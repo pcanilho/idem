@@ -57,10 +57,14 @@ Two different values. Five renders give five passwords.
 ## Status
 
 **Early, and not yet released.** The comparison engine, manifest parsing, path addressing and
-chart-reference handling are built and tested. The CLI is not, and `action.yml` downloads a
-release that does not exist yet. Everything below is the
-intended interface — a specification, not a demo. The `helm template` snippet above is the one
-thing you can reproduce today.
+chart-reference handling are built and tested — and so is a working CLI: `idem <path>` discovers
+charts, renders each of them more than once, compares the results and prints the verdict, with
+the exit codes below.
+
+Not yet built: three-engine verdicts, the `ignoreDifferences` emitter, the static analyzer,
+`-o json`/`markdown`/`github`, dependency resolution, `--new-from-rev`, `--cluster` and
+`doctor`. `action.yml` downloads a release that does not exist yet. So everything below is
+still the intended interface — a specification, not a demo.
 
 Three-engine verdicts (ArgoCD, Flux, Helm) are v1 scope, not a later addition. They are the
 reason the tool exists.
@@ -185,10 +189,15 @@ That is the whole surface:
       --new-from-rev REV          report only findings in charts changed since REV
       --new-from-merge-base REF   same, against the merge base with REF
       --repo        chart repository URL, as helm's --repo
-      --version     chart version
+      --chart-version  chart version, as helm's --version
   -o                text, json, markdown or github        (default text)
   -v                expand every finding
+      --version     print idem's version
 ```
+
+The chart version is `--chart-version`, not `--version`, which is the one place `idem`
+deliberately does not mirror helm. `idem --version` is the flag every command-line tool has, and
+answering it with a chart's version would be a surprise in the one place nobody expects one.
 
 ### Output formats
 

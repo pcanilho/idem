@@ -1,0 +1,256 @@
+package report
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/objpath"
+)
+
+// path turns ".data.password" into the segments the real pipeline would build.
+func path(dotted string) objpath.Path {
+	var p objpath.Path
+	for seg := range strings.SplitSeq(strings.TrimPrefix(dotted, "."), ".") {
+		p = p.Append(objpath.Key(seg))
+	}
+	return p
+}
+
+func finding(source, name string, fields ...string) check.Finding {
+	var paths []diff.PathDiff
+	for _, f := range fields {
+		paths = append(paths, diff.PathDiff{
+			Path: path(f), Left: "a", Right: "b", HasLeft: true, HasRight: true,
+		})
+	}
+	return check.Finding{
+		Source: source,
+		Change: diff.Change{
+			Object: diff.ObjectRef{APIVersion: "v1", Kind: "Secret", Name: name},
+			Type:   diff.Differs,
+			Paths:  paths,
+		},
+	}
+}
+
+func text(t *testing.T, r Report) string {
+	t.Helper()
+	var b strings.Builder
+	if err := r.Text(&b); err != nil {
+		t.Fatalf("Text() error = %v", err)
+	}
+	return b.String()
+}
+
+func clean(name string) Chart { return Chart{Name: name, Dir: "./" + name} }
+
+func TestTextReportsACleanRunWithAVerdictSentence(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{clean("home"), clean("lab")},
+		Helm:   "4.2.4",
+		Rounds: 2,
+	})
+
+	if !strings.Contains(got, "All 2 charts render consistently under ArgoCD") {
+		t.Errorf("Text() = %q, want a verdict sentence naming the engine", got)
+	}
+}
+
+func TestTextUsesTheChartNameForASingleCleanChart(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{clean("home")}, Helm: "4.2.4", Rounds: 2})
+
+	if !strings.Contains(got, "home renders consistently under ArgoCD") {
+		t.Errorf("Text() = %q, want the chart named rather than a count", got)
+	}
+}
+
+func TestTextAlwaysNamesTheHelmBinaryAndRoundCount(t *testing.T) {
+	// A pass that does not say what it checked is a pass you cannot trust -
+	// ArgoCD 3.5 swapped Helm 3.19 for 4.2 underneath everybody.
+	for _, r := range []Report{
+		{Charts: []Chart{clean("home")}, Helm: "4.2.4", Rounds: 2},
+		{Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "home-creds", ".data.password")}}}, Helm: "4.2.4", Rounds: 3},
+	} {
+		got := text(t, r)
+		if !strings.Contains(got, "helm 4.2.4") {
+			t.Errorf("Text() = %q, want the helm version", got)
+		}
+		if !strings.Contains(got, "rounds") {
+			t.Errorf("Text() = %q, want the round count", got)
+		}
+	}
+}
+
+func TestTextGroupsFindingsByTheTemplateThatProducedThem(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name: "lab",
+			Findings: []check.Finding{
+				finding("lab/templates/database.yaml", "lab-harbor-postgres", ".data.password"),
+				finding("lab/templates/database.yaml", "lab-harbor-postgres2", ".data.registry-token"),
+				finding("lab/templates/secrets.yaml", "lab-other", ".data.key"),
+			},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Count(got, "lab/templates/database.yaml") != 1 {
+		t.Errorf("Text() = %q, want the template named once as a group header", got)
+	}
+	db := strings.Index(got, "lab/templates/database.yaml")
+	secrets := strings.Index(got, "lab/templates/secrets.yaml")
+	if db < 0 || secrets < 0 || db > secrets {
+		t.Errorf("Text() = %q, want groups in sorted order", got)
+	}
+}
+
+func TestTextGroupsFindingsWithNoSourceUnderAnExplicitUnknown(t *testing.T) {
+	// Input that has lost helm's "# Source:" comment must say so. A guessed
+	// template is worse than an admitted gap.
+	got := text(t, Report{
+		Charts: []Chart{{Name: "x", Findings: []check.Finding{finding("", "thing", ".data.k")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "(source unknown)") {
+		t.Errorf("Text() = %q, want an explicit unknown group", got)
+	}
+}
+
+func TestTextNamesTheObjectAndFieldOfEachFinding(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{
+			finding("home/templates/secrets.yaml", "home-ollama-secrets", ".data.WEBUI_SECRET_KEY"),
+		}}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for _, want := range []string{"Secret/home-ollama-secrets", ".data.WEBUI_SECRET_KEY"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+func TestTextCountsHowManyChartsWillChurn(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "c", ".data.k")}},
+			clean("lab"),
+			clean("ops"),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "1 of 3 charts will churn under ArgoCD") {
+		t.Errorf("Text() = %q, want a count of churning charts out of the total", got)
+	}
+}
+
+func TestTextReportsChartsThatCouldNotBeRendered(t *testing.T) {
+	// Exit 2 is always fatal; a chart that silently fails to render and is
+	// then skipped is the same class of bug idem exists to catch.
+	got := text(t, Report{
+		Charts: []Chart{clean("home"), {Name: "lab", Err: errors.New("helm template: exit status 1: missing dependency")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "could not be rendered") {
+		t.Errorf("Text() = %q, want unevaluable charts reported", got)
+	}
+	if !strings.Contains(got, "missing dependency") {
+		t.Errorf("Text() = %q, want helm's own reason shown", got)
+	}
+}
+
+func TestTextCapsTheFieldsListedForOneObject(t *testing.T) {
+	// A Secret whose whole .data regenerates produces one line per key. Left
+	// unbounded that is hundreds of lines straight to a terminal.
+	var fields []string
+	for _, k := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		fields = append(fields, ".data."+k)
+	}
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{
+			finding("home/templates/s.yaml", "big", fields...),
+		}}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, ".data.h") {
+		t.Errorf("Text() = %q, want the field list capped", got)
+	}
+	if !strings.Contains(got, "more") {
+		t.Errorf("Text() = %q, want the elided fields counted", got)
+	}
+}
+
+func TestChurningAndUnevaluableCountCharts(t *testing.T) {
+	r := Report{Charts: []Chart{
+		{Name: "a", Findings: []check.Finding{finding("t.yaml", "o", ".x")}},
+		{Name: "b", Err: errors.New("boom")},
+		clean("c"),
+	}}
+
+	if got, want := r.Churning(), 1; got != want {
+		t.Errorf("Churning() = %d, want %d", got, want)
+	}
+	if got, want := r.Unevaluable(), 1; got != want {
+		t.Errorf("Unevaluable() = %d, want %d", got, want)
+	}
+}
+
+func TestTextContainsNoRawTabs(t *testing.T) {
+	// Columns are aligned with spaces. A raw tab renders at whatever width the
+	// reader's terminal decides, which is exactly the misalignment that ruled
+	// out box drawing and emoji badges in the first place.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".data.password")}},
+			{Name: "lab", Err: errors.New("helm template: exit status 1")},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "\t") {
+		t.Errorf("Text() = %q, want no raw tab characters", got)
+	}
+}
+
+func TestTextIndentsEveryLineOfAMultiLineRenderError(t *testing.T) {
+	// helm's stderr is several lines with a blank line in the middle. Dumped
+	// verbatim it breaks out of the indentation and reads as a crash.
+	err := errors.New("helm template: exit status 1: Error: execution error\n\nUse --debug flag to render out invalid YAML")
+	got := text(t, Report{
+		Charts: []Chart{{Name: "lab", Err: err}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	for line := range strings.SplitSeq(strings.TrimRight(got, "\n"), "\n") {
+		if line != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("line %q is not indented; Text() = %q", line, got)
+		}
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Errorf("Text() = %q, want no blank runs from helm's stderr", got)
+	}
+}
+
+func TestVerdictWhenEveryChartFailedToRender(t *testing.T) {
+	// "0 charts render consistently under ArgoCD" is true but useless, and
+	// reads as a verdict about charts that were never actually checked.
+	got := text(t, Report{
+		Charts: []Chart{{Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "render consistently") {
+		t.Errorf("Text() = %q, want no consistency claim when nothing rendered", got)
+	}
+	if !strings.Contains(got, "1 chart could not be rendered") {
+		t.Errorf("Text() = %q, want the count of unevaluable charts", got)
+	}
+}
