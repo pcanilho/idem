@@ -250,7 +250,7 @@ data: {alpha: "2", bravo: "2", charlie: "2", delta: "2", echo: "2", foxtrot: "2"
 `
 	want := []string{".data.alpha", ".data.bravo", ".data.charlie", ".data.delta", ".data.echo", ".data.foxtrot"}
 
-	for run := 0; run < 20; run++ {
+	for run := range 20 {
 		got := compare(t, left, right)
 		if len(got) != 1 || len(got[0].Paths) != len(want) {
 			t.Fatalf("run %d: unexpected changes: %+v", run, got)
@@ -281,7 +281,7 @@ spec: {replicas: 99}
 	if err != nil {
 		t.Fatalf("Compare: %v", err)
 	}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		again, err := Compare(left, right)
 		if err != nil {
 			t.Fatalf("Compare: %v", err)
@@ -405,5 +405,56 @@ func TestJSONOutputNamesTheObjectStructurally(t *testing.T) {
 	obj, _ := out[0]["object"].(map[string]any)
 	if obj["kind"] != "ConfigMap" || obj["name"] != "alpha" {
 		t.Errorf("object = %v, want kind=ConfigMap name=alpha", obj)
+	}
+}
+
+const twoGenerateNameJobs = `
+apiVersion: batch/v1
+kind: Job
+metadata: {generateName: pre-install-}
+spec: {backoffLimit: 1}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {generateName: post-upgrade-}
+spec: {backoffLimit: 1}
+`
+
+func TestObjectRefDistinguishesGenerateNameObjects(t *testing.T) {
+	// Hook Jobs are named by the API server at apply time, so a rendered
+	// stream can hold several with no metadata.name at all. Compare matches
+	// them correctly because manifest.Object.Key falls back to generateName -
+	// but ObjectRef is what every consumer downstream reads, and if its Key
+	// collides then two findings cannot be told apart, and the source
+	// attribution for one silently lands on the other.
+	objs := parse(t, twoGenerateNameJobs)
+	if len(objs) != 2 {
+		t.Fatalf("fixture parsed to %d objects, want 2", len(objs))
+	}
+
+	first, second := refOf(objs[0]), refOf(objs[1])
+	if first.Key() == second.Key() {
+		t.Errorf("both refs have Key() = %q; distinct objects must have distinct keys", first.Key())
+	}
+	if first.Display() == second.Display() {
+		t.Errorf("both refs display as %q; a finding must name which object it is about", first.Display())
+	}
+}
+
+func TestObjectRefKeyMatchesTheManifestIdentityItCameFrom(t *testing.T) {
+	// The checker joins findings back to the render they came from - to
+	// recover the "# Source:" template - by key. Two different key functions
+	// for the same object is a join that silently misses.
+	for _, o := range parse(t, twoGenerateNameJobs) {
+		if got, want := refOf(o).Key(), o.Key(); got != want {
+			t.Errorf("ObjectRef.Key() = %q, manifest.Object.Key() = %q; they must agree", got, want)
+		}
+	}
+}
+
+func TestObjectRefDisplayMarksAGeneratedName(t *testing.T) {
+	ref := refOf(parse(t, twoGenerateNameJobs)[0])
+	if got, want := ref.Display(), "Job/pre-install-*"; got != want {
+		t.Errorf("Display() = %q, want %q", got, want)
 	}
 }

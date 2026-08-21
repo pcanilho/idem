@@ -50,24 +50,44 @@ type ObjectRef struct {
 	Kind       string `json:"kind"`
 	Namespace  string `json:"namespace,omitempty"`
 	Name       string `json:"name"`
+
+	// GenerateName carries hook Jobs and anything else the API server names at
+	// apply time. Without it every such object in a render collapses to the
+	// same Key and the same Display, so two findings cannot be told apart.
+	GenerateName string `json:"generateName,omitempty"`
 }
 
 func refOf(o manifest.Object) ObjectRef {
-	return ObjectRef{APIVersion: o.APIVersion, Kind: o.Kind, Namespace: o.Namespace, Name: o.Name}
+	return ObjectRef{
+		APIVersion:   o.APIVersion,
+		Kind:         o.Kind,
+		Namespace:    o.Namespace,
+		Name:         o.Name,
+		GenerateName: o.GenerateName,
+	}
+}
+
+// object rebuilds the manifest.Object this ref came from.
+//
+// Key and Display delegate rather than reimplement: holding the identity rule
+// in two places is exactly how ObjectRef came to disagree with the objects it
+// describes, and a consumer joining findings back to a render by key would
+// silently miss.
+func (r ObjectRef) object() manifest.Object {
+	return manifest.Object{
+		APIVersion:   r.APIVersion,
+		Kind:         r.Kind,
+		Namespace:    r.Namespace,
+		Name:         r.Name,
+		GenerateName: r.GenerateName,
+	}
 }
 
 // Key is the identity used to match objects across renders.
-func (r ObjectRef) Key() string {
-	return r.APIVersion + "|" + r.Kind + "|" + r.Namespace + "|" + r.Name
-}
+func (r ObjectRef) Key() string { return r.object().Key() }
 
 // Display is the short human-facing form.
-func (r ObjectRef) Display() string {
-	if r.Namespace != "" {
-		return r.Kind + "/" + r.Namespace + "/" + r.Name
-	}
-	return r.Kind + "/" + r.Name
-}
+func (r ObjectRef) Display() string { return r.object().Display() }
 
 // PathDiff is a single differing leaf within an object.
 //
