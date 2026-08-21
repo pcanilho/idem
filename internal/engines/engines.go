@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/engine"
-	"github.com/pcanilho/idem/internal/lookup"
 )
 
 // Target is one engine idem can say something true about.
@@ -85,7 +85,10 @@ func Select(spec string) ([]Target, error) {
 // chart" and "this chart contains no lookup" lead to opposite verdicts, and
 // collapsing them would turn a failed scan into a confident CHURNS.
 type Evidence struct {
-	Uses []lookup.Use
+	// Uses are the `lookup` call sites specifically - not every flagged
+	// function. Only lookup can stabilise a value, so only lookup decides
+	// these verdicts.
+	Uses []analyze.Use
 	Err  error
 }
 
@@ -126,7 +129,7 @@ func (t Target) Verdict(ev Evidence) engine.Verdict {
 	// take tracing the template AST through include into subchart helpers,
 	// which idem does not do and never will. Say unknown, and cite the lookup
 	// so the reader can judge it themselves.
-	best, _ := lookup.Best(uses)
+	best, _ := analyze.Best(uses)
 	return engine.Verdict{
 		Engine:   t.name,
 		Result:   engine.Unknown,

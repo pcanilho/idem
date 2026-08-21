@@ -1,10 +1,11 @@
-package lookup
+package analyze
 
 import (
 	"archive/tar"
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -66,10 +67,10 @@ func files(uses []Use) []string {
 	return out
 }
 
-func TestFindReportsNothingForAChartThatNeverCallsLookup(t *testing.T) {
+func TestFindReportsNothingForAChartThatNamesNoFlaggedFunction(t *testing.T) {
 	dir := chartDir(t, "acme")
 	write(t, filepath.Join(dir, "templates", "secret.yaml"),
-		"data:\n  key: {{ randAlphaNum 32 | b64enc }}\n")
+		"data:\n  key: {{ .Values.key | b64enc }}\n")
 
 	got, err := Find(dir)
 	if err != nil {
@@ -292,5 +293,205 @@ func TestBestFallsBackToAMentionWhenThereIsNoCall(t *testing.T) {
 func TestBestReportsWhenThereIsNothing(t *testing.T) {
 	if _, ok := Best(nil); ok {
 		t.Error("Best(nil) ok = true, want false")
+	}
+}
+
+// --- the generalised sweep ---
+
+func namesOf(uses []Use) []string {
+	out := make([]string, len(uses))
+	for i, u := range uses {
+		out[i] = u.Function
+	}
+	return out
+}
+
+func TestFindNamesWhichFunctionItFound(t *testing.T) {
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "secret.yaml"),
+		"data:\n  key: {{ randAlphaNum 32 | b64enc }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Function != "randAlphaNum" {
+		t.Fatalf("Find() = %+v, want one randAlphaNum", got)
+	}
+	if got[0].Line != 2 {
+		t.Errorf("Line = %d, want 2", got[0].Line)
+	}
+}
+
+func TestFindReportsSeveralFunctionsOnOneLine(t *testing.T) {
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "cert.yaml"),
+		"  ca: {{ $ca := genCA \"x\" 365 }}{{ $c := genSignedCert \"y\" nil nil 365 $ca }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	names := namesOf(got)
+	for _, want := range []string{"genCA", "genSignedCert"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("Find() = %v, want %q - one line can call more than one", names, want)
+		}
+	}
+}
+
+func TestALongerNameIsNotMistakenForItsPrefix(t *testing.T) {
+	// randAlpha is a prefix of randAlphaNum, and genCA of genCAWithKey. A
+	// naive alternation reports the short one and the reader chases the wrong
+	// function.
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "s.yaml"),
+		"a: {{ randAlphaNum 8 }}\nb: {{ genCAWithKey \"x\" 365 $k }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	names := namesOf(got)
+	for _, want := range []string{"randAlphaNum", "genCAWithKey"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("Find() = %v, want %q", names, want)
+		}
+	}
+	for _, unwanted := range []string{"randAlpha", "genCA"} {
+		if slices.Contains(names, unwanted) {
+			t.Errorf("Find() = %v, want no bare %q", names, unwanted)
+		}
+	}
+}
+
+func TestFindStillSeparatesLookupFromTheRest(t *testing.T) {
+	// The Flux and Helm verdicts turn on lookup specifically, so it has to be
+	// retrievable on its own.
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "s.yaml"),
+		"a: {{ (lookup \"v1\" \"Secret\" $ns $n).data.p | default (randAlphaNum 32) }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if n := len(Of(got, Lookup)); n != 1 {
+		t.Errorf("Of(lookup) found %d, want 1", n)
+	}
+	if n := len(Of(got, "randAlphaNum")); n != 1 {
+		t.Errorf("Of(randAlphaNum) found %d, want 1", n)
+	}
+}
+
+func TestDeterministicLookalikesAreNotFlagged(t *testing.T) {
+	// derivePassword is deterministic given its inputs, buildCustomCert only
+	// assembles what it is handed, and decryptAES is the inverse of a flagged
+	// function rather than a source of new randomness. Flagging them would be
+	// crying wolf, which teaches people to distrust the observed findings too.
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "s.yaml"),
+		"a: {{ derivePassword 1 \"long\" $p $u $s }}\nb: {{ buildCustomCert $c $k }}\nc: {{ decryptAES $k $v }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Find() = %v, want none", namesOf(got))
+	}
+}
+
+func TestEveryFlaggedFunctionExplainsWhy(t *testing.T) {
+	// The reason is printed next to the finding; a blank one reads as a bug.
+	for _, f := range Functions {
+		if strings.TrimSpace(f.Why) == "" {
+			t.Errorf("%s has no reason", f.Name)
+		}
+		if Why(f.Name) != f.Why {
+			t.Errorf("Why(%q) = %q, want %q", f.Name, Why(f.Name), f.Why)
+		}
+	}
+}
+
+func TestTheFlaggedSetMatchesTheAudit(t *testing.T) {
+	// docs/design.md §5 pins this list, audited against sprig v3.3.0 - which
+	// both Helm 3.19 and Helm 4.2 pin, so one list covers both lines. If the
+	// set changes, that document changes with it.
+	if got, want := len(Functions), 22; got != want {
+		t.Errorf("Functions has %d entries, want %d (21 sprig + lookup)", got, want)
+	}
+}
+
+func TestFindLocatesAFunctionInsideAVendoredArchive(t *testing.T) {
+	dir := chartDir(t, "parent")
+	tgz(t, filepath.Join(dir, "charts", "common-2.0.0.tgz"), map[string]string{
+		"common/templates/_certs.tpl": "{{- define \"c.crt\" -}}\n{{ genSelfSignedCert $cn nil nil 365 }}\n{{- end -}}\n",
+	})
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Function != "genSelfSignedCert" {
+		t.Errorf("Find() = %+v, want the archived call", got)
+	}
+}
+
+func TestPotentialReportsEachFunctionOnce(t *testing.T) {
+	// A chart reaching a shared helper ninety times is one thing to look at,
+	// not ninety.
+	uses := []Use{
+		{Function: "randAlphaNum", File: "a.yaml", Line: 1, Call: true},
+		{Function: "randAlphaNum", File: "b.yaml", Line: 9, Call: true},
+		{Function: "genCA", File: "c.yaml", Line: 3, Call: true},
+	}
+
+	got := Potential(uses)
+
+	if len(got) != 2 {
+		t.Fatalf("Potential() = %+v, want one per function", got)
+	}
+}
+
+func TestPotentialPrefersACallSiteOverAMention(t *testing.T) {
+	uses := []Use{
+		{Function: "now", File: "a.yaml", Line: 1},
+		{Function: "now", File: "a.yaml", Line: 8, Call: true},
+	}
+
+	got := Potential(uses)
+
+	if len(got) != 1 || got[0].Line != 8 {
+		t.Errorf("Potential() = %+v, want the call on line 8", got)
+	}
+}
+
+func TestPotentialExcludesLookup(t *testing.T) {
+	// lookup is what STABILISES a value under an engine that resolves it, and
+	// its presence is already reported as the Flux and Helm verdict. Listing
+	// it as a potential cause would contradict that verdict on the same screen.
+	uses := []Use{
+		{Function: Lookup, File: "a.yaml", Line: 1, Call: true},
+		{Function: "randAlphaNum", File: "a.yaml", Line: 1, Call: true},
+	}
+
+	got := Potential(uses)
+
+	if len(got) != 1 || got[0].Function != "randAlphaNum" {
+		t.Errorf("Potential() = %+v, want lookup left out", got)
+	}
+}
+
+func TestPotentialIsOrderedBySourcePosition(t *testing.T) {
+	uses := []Use{
+		{Function: "now", File: "z.yaml", Line: 1, Call: true},
+		{Function: "genCA", File: "a.yaml", Line: 4, Call: true},
+	}
+
+	got := Potential(uses)
+
+	if got[0].File != "a.yaml" {
+		t.Errorf("Potential() = %+v, want source order", got)
 	}
 }

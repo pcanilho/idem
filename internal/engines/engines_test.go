@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/engine"
-	"github.com/pcanilho/idem/internal/lookup"
 )
 
 func byName(t *testing.T, name string) Target {
@@ -20,7 +20,7 @@ func byName(t *testing.T, name string) Target {
 	return Target{}
 }
 
-var oneUse = Evidence{Uses: []lookup.Use{{File: "charts/common/templates/_secrets.tpl", Line: 103}}}
+var oneUse = Evidence{Uses: []analyze.Use{{File: "charts/common/templates/_secrets.tpl", Line: 103}}}
 
 var noUse = Evidence{}
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/engine"
@@ -45,6 +46,10 @@ type Chart struct {
 	// are those a jq expression might cover. Shown, never guessed at.
 	Suppressed []delivery.Suppressed
 	Maybe      []delivery.Suppressed
+
+	// Potential are non-deterministic functions the chart calls but which did
+	// not produce a difference this render. A warning, never a fact.
+	Potential []analyze.Use
 
 	// Err is set when the chart could not be rendered at all. That is exit 2
 	// and always fatal - a chart silently skipped is the bug idem exists for.
@@ -109,6 +114,9 @@ func (r Report) Text(w io.Writer) error {
 		detail = true
 	}
 	if writeSuppressed(&b, r.Charts) {
+		detail = true
+	}
+	if writePotential(&b, r.Charts) {
 		detail = true
 	}
 	if writeUnevaluable(&b, r.Charts) {
@@ -298,6 +306,57 @@ func writeSuppressed(b *strings.Builder, charts []Chart) bool {
 	}
 
 	return true
+}
+
+// writePotential lists functions that could make a chart churn but did not
+// this time, and reports whether there were any.
+//
+// Its own section, never counted, never fatal - docs/design.md §5. A static
+// warning is sometimes wrong, and a tool that cries wolf about the potential
+// case teaches you to distrust it about the observed one. But the failure that
+// motivated idem was a pin that silently stopped applying, so hiding these
+// would hide the thing most worth knowing.
+func writePotential(b *strings.Builder, charts []Chart) bool {
+	var any bool
+	for _, c := range charts {
+		if len(c.Potential) == 0 {
+			continue
+		}
+		if !any {
+			b.WriteString("\n  — potential · not counted, not fatal —\n")
+			any = true
+		}
+
+		// idem cannot attribute an observed difference to a particular
+		// function, so on a chart that DID churn it must not claim this one
+		// stayed quiet.
+		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && c.Err == nil
+
+		// Grouped by chart because the paths are chart-relative: on its own,
+		// "templates/job.yaml:351" names a file in some chart the reader then
+		// has to go and find.
+		fmt.Fprintf(b, "\n    %s\n", c.Name)
+
+		shown := min(len(c.Potential), maxFields)
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, u := range c.Potential[:shown] {
+			note := analyze.Why(u.Function)
+			if settled {
+				note += ", did not fire this render"
+			}
+			// file:line last, and deliberately: alignment pads every row to
+			// the widest cell, and a deeply vendored subchart path would drag
+			// all of them out past a readable width.
+			fmt.Fprintf(tw, "      %s\t%s\t%s:%d\n", u.Function, note, u.File, u.Line)
+		}
+		tw.Flush()
+
+		if elided := len(c.Potential) - shown; elided > 0 {
+			fmt.Fprintf(b, "      … and %d more\n", elided)
+		}
+	}
+
+	return any
 }
 
 // writeUnevaluable lists charts that never rendered, and reports whether there

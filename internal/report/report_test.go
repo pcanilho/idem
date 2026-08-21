@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/diff"
@@ -639,6 +640,159 @@ func TestAnEmptyEngineSelectionShowsEveryVerdict(t *testing.T) {
 	for _, want := range []string{"argocd", "flux", "helm"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Text() = %q, want the %s row", got, want)
+		}
+	}
+}
+
+func potentialUse(file string, line int, fn string) analyze.Use {
+	return analyze.Use{Function: fn, File: file, Line: line, Call: true}
+}
+
+func TestTextListsPotentialFindingsInTheirOwnSection(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:      "lab",
+			Potential: []analyze.Use{potentialUse("lab/templates/registry.yaml", 22, "genSelfSignedCert")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "potential") {
+		t.Errorf("Text() = %q, want a potential section", got)
+	}
+	if !strings.Contains(got, "not counted, not fatal") {
+		t.Errorf("Text() = %q, want the section to disclaim itself", got)
+	}
+	for _, want := range []string{"lab/templates/registry.yaml:22", "genSelfSignedCert"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestPotentialFindingsAreNeverCounted(t *testing.T) {
+	// A static warning is sometimes wrong - a pin may be perfectly sound - and
+	// a tool that cries wolf about the potential case teaches you to distrust
+	// it about the observed one.
+	r := Report{
+		Charts: []Chart{{
+			Name:      "lab",
+			Potential: []analyze.Use{potentialUse("lab/templates/s.yaml", 3, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Churning(); got != 0 {
+		t.Errorf("Churning() = %d, want 0 - a potential finding is a warning, not a fact", got)
+	}
+	if !strings.Contains(text(t, r), "renders consistently") {
+		t.Errorf("Text() = %q, want the clean verdict kept", text(t, r))
+	}
+}
+
+func TestPotentialClaimsItDidNotFireOnlyWhenNothingChurned(t *testing.T) {
+	// idem cannot attribute an observed difference to a particular function,
+	// so on a chart that DID churn it must not claim this one stayed quiet.
+	churning := text(t, Report{
+		Charts: []Chart{{
+			Name:      "lab",
+			Findings:  []check.Finding{finding("lab/templates/s.yaml", "creds", ".data.password")},
+			Potential: []analyze.Use{potentialUse("lab/templates/s.yaml", 3, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(churning, "did not fire") {
+		t.Errorf("Text() = %q, want no claim about which function fired", churning)
+	}
+
+	clean := text(t, Report{
+		Charts: []Chart{{
+			Name:      "lab",
+			Potential: []analyze.Use{potentialUse("lab/templates/s.yaml", 3, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(clean, "did not fire") {
+		t.Errorf("Text() = %q, want the pin noted on a clean render", clean)
+	}
+}
+
+func TestPotentialNamesWhyTheFunctionIsFlagged(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:      "lab",
+			Potential: []analyze.Use{potentialUse("lab/templates/s.yaml", 3, "genPrivateKey")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "new key material") {
+		t.Errorf("Text() = %q, want the reason it is flagged", got)
+	}
+}
+
+func TestNoPotentialSectionWhenThereIsNothingToWarnAbout(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{clean("home")}, Helm: "4.2.4", Rounds: 2})
+
+	if strings.Contains(got, "potential") {
+		t.Errorf("Text() = %q, want no empty section", got)
+	}
+}
+
+func TestPotentialSaysWhichChartEachWarningCameFrom(t *testing.T) {
+	// The paths are chart-relative, so "templates/job.yaml:351" on its own
+	// names a file in some chart the reader then has to go and find.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "home", Potential: []analyze.Use{potentialUse("templates/job.yaml", 351, "now")}},
+			{Name: "lab", Potential: []analyze.Use{potentialUse("templates/job.yaml", 12, "bcrypt")}},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for _, want := range []string{"home", "lab"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want the chart %q named", got, want)
+		}
+	}
+}
+
+func TestPotentialCapsTheWarningsShownPerChart(t *testing.T) {
+	// A bitnami-style common library names half a dozen of these in one
+	// helper. Uncapped, one chart can bury the findings above it.
+	var uses []analyze.Use
+	for i, fn := range []string{"randAlpha", "randNumeric", "randAscii", "shuffle", "randAlphaNum", "genCA", "now"} {
+		uses = append(uses, potentialUse("templates/s.tpl", i+1, fn))
+	}
+	got := text(t, Report{
+		Charts: []Chart{{Name: "lab", Potential: uses}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "more") {
+		t.Errorf("Text() = %q, want the surplus counted rather than dumped", got)
+	}
+}
+
+func TestPotentialLinesStayReadablyNarrow(t *testing.T) {
+	// Column alignment pads to the widest cell, so a deeply vendored subchart
+	// path in one row stretches every other row with it.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name: "lab",
+			Potential: []analyze.Use{
+				potentialUse("gitea/charts/postgresql-ha/charts/common/templates/_secrets.tpl", 132, "randAlpha"),
+				potentialUse("templates/s.yaml", 3, "now"),
+			},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for line := range strings.SplitSeq(got, "\n") {
+		if len(line) > 120 {
+			t.Errorf("line is %d chars, want under 120:\n%s", len(line), line)
 		}
 	}
 }

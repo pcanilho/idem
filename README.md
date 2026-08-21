@@ -71,8 +71,12 @@ differing field even where the display above it elides some.
 finding you have already covered with an `ignoreDifferences` block is reported as handled rather
 than shouted about again — and it will not re-emit config you already have.
 
-Not yet built: the static analyzer, `-o json`/`markdown`/`github`, dependency resolution,
-`--new-from-rev`, `--cluster` and `doctor`. Engine
+The static analyzer works too: a chart that calls a non-deterministic function but rendered
+identically is reported as a **potential** finding — its own section, never counted, never
+fatal — because the failure that motivated `idem` was a pin that silently stopped applying.
+
+Not yet built: `-o json`/`markdown`/`github`, dependency resolution, `--new-from-rev`,
+`--cluster` and `doctor`. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

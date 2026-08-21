@@ -1,9 +1,10 @@
 // Command idem checks whether Helm charts render consistently.
 //
-// This is the walking skeleton: classify the reference, render it more than
-// once with `helm template`, compare the results structurally, and print the
-// verdict. Engine verdicts, remediation blocks, the static analyzer and the
-// other output formats are not here yet.
+// Classify the reference, render it more than once with `helm template`,
+// compare the results structurally, and say what that means under each GitOps
+// engine - discounting whatever the delivery config already suppresses. The
+// output formats beyond text, dependency resolution, --new-from-rev, --cluster
+// and doctor are not here yet.
 package main
 
 import (
@@ -18,13 +19,13 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/chartref"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
 	"github.com/pcanilho/idem/internal/helm"
-	"github.com/pcanilho/idem/internal/lookup"
 	"github.com/pcanilho/idem/internal/report"
 	"github.com/pcanilho/idem/internal/scan"
 )
@@ -148,13 +149,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
+		uses, evidence := chartEvidence(ref, result.Chart.Dir)
+
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:       result.Chart.Name,
 			Dir:        result.Chart.Dir,
 			Findings:   applied.Churning,
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
-			Verdicts:   verdictsFor(ref, result),
+			Verdicts:   verdictsFor(result, evidence),
+			Potential:  analyze.Potential(uses),
 			Err:        result.Err,
 		})
 	}
@@ -286,8 +290,6 @@ func chartPath(root, dir string) string {
 	return filepath.ToSlash(rel)
 }
 
-// Only charts that actually churn get verdicts: a verdict answers "what does
-// this finding mean for me", and a clean chart has no finding to explain.
 // selectEngines resolves which engines' verdicts to display.
 //
 // "auto" takes the engines the repository actually uses, which is what the
@@ -330,21 +332,32 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
-func verdictsFor(ref chartref.Ref, result scan.Result) []engine.Verdict {
-	if result.Err != nil || len(result.Findings) == 0 {
-		return nil
-	}
-
-	ev := engines.Evidence{}
-	if ref.Kind == chartref.Local {
-		ev.Uses, ev.Err = lookup.Find(result.Chart.Dir)
-	} else {
+// chartEvidence scans a chart once, for both purposes it is needed.
+//
+// Every chart is scanned, not only the churning ones: a chart that renders
+// identically today while calling randAlphaNum is being held by a pin, and a
+// pin that silently stops applying is the failure idem exists for.
+func chartEvidence(ref chartref.Ref, dir string) ([]analyze.Use, engines.Evidence) {
+	if ref.Kind != chartref.Local {
 		// The chart was rendered straight from a registry and never landed on
 		// disk, so there is no source to scan. Reported as unknown rather than
 		// as "no lookup", which would be a sound CHURNS verdict off no
 		// evidence at all. Resolving this needs the same temp-dir fetch that
 		// dependency handling will build.
-		ev.Err = fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind)
+		return nil, engines.Evidence{
+			Err: fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind),
+		}
+	}
+
+	uses, err := analyze.Find(dir)
+	return uses, engines.Evidence{Uses: analyze.Of(uses, analyze.Lookup), Err: err}
+}
+
+// Only charts that actually churn get verdicts: a verdict answers "what does
+// this finding mean for me", and a clean chart has no finding to explain.
+func verdictsFor(result scan.Result, ev engines.Evidence) []engine.Verdict {
+	if result.Err != nil || len(result.Findings) == 0 {
+		return nil
 	}
 
 	all := engines.All()
