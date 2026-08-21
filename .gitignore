@@ -8,3 +8,7 @@
 # of that name in ANY directory -- and because git sets core.ignorecase on
 # macOS, the match is case-insensitive too.
 /PLAN_V1.md
+
+# Local agent briefing -- guidance for Claude Code, not documentation for
+# anyone reading the repo. Anchored for the same reason as the plan above.
+/CLAUDE.md
