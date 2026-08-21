@@ -93,7 +93,8 @@ Most runs find nothing, because you fix a chart once and it stays fixed:
 
 ```console
 $ idem ./charts
-✓ 10 charts render consistently   ·   helm 4.2.4, 2 rounds
+✓ All 10 charts render consistently under ArgoCD.
+  helm 4.2.4 · 2 rounds
 ```
 
 It names the helm binary and round count on purpose. A silent pass that does not say what it
@@ -115,7 +116,8 @@ $ idem ./charts
     Secret/lab-harbor-postgres   .data.password           silent — no checksum
     Secret/lab-harbor-postgres   .data.registry-token     silent — no checksum
 
-  10 charts · 7 consistent · 2 differ · 1 unevaluable   ·   helm 4.2.4, 2 rounds
+  2 of 10 charts will churn under ArgoCD; 1 could not be rendered.
+  helm 4.2.4 · 2 rounds · run with --strict to gate on this
 
   Add to your ArgoCD Application to stop the churn:
 
@@ -132,8 +134,7 @@ $ idem ./charts
       syncPolicy:
         syncOptions: [RespectIgnoreDifferences=true]
 
-  exit 2 (a chart could not be rendered)
-  findings are advisory — pass --strict to gate on them
+  exit 2 — a chart could not be rendered
 ```
 
 The right-hand column is the whole product in three words. `rolls 2 Deployments` and
@@ -156,7 +157,8 @@ $ idem oci://registry-1.docker.io/bitnamicharts/postgresql --engine all
       flux      unknown    chart uses `lookup` (common/_secrets.tpl:103) — may guard this value
       helm      unknown    same
 
-  1 chart · 1 differs   ·   helm 4.2.4, 2 rounds
+  This chart will churn under ArgoCD. Under Flux and Helm: unknown.
+  helm 4.2.4 · 2 rounds
 ```
 
 Add `--cluster` and those `unknown`s become measured facts — see
@@ -183,9 +185,56 @@ That is the whole surface:
       --new-from-merge-base REF   same, against the merge base with REF
       --repo        chart repository URL, as helm's --repo
       --version     chart version
-  -o                text or json                          (default text)
+  -o                text, json or markdown                (default text)
   -v                expand every finding
 ```
+
+### Output formats
+
+`-o text` is the default above. `-o json` is the machine-readable contract, and `-o markdown`
+is shaped for a pull-request comment:
+
+````console
+$ idem ./charts -o markdown
+````
+
+```markdown
+### idem — 2 of 10 charts will churn under ArgoCD
+
+| chart | object | field | consequence |
+|---|---|---|---|
+| `home` | `Secret/home-ollama-secrets` | `.data.WEBUI_SECRET_KEY` | rolls 2 Deployments |
+| `lab` | `Secret/lab-harbor-postgres` | `.data.password` | silent — no checksum |
+| `lab` | `Secret/lab-harbor-postgres` | `.data.registry-token` | silent — no checksum |
+
+<details>
+<summary>Fix — add to your ArgoCD Application</summary>
+
+    spec:
+      ignoreDifferences:
+        - kind: Secret
+          name: home-ollama-secrets
+          jsonPointers: [/data/WEBUI_SECRET_KEY]
+      syncPolicy:
+        syncOptions: [RespectIgnoreDifferences=true]
+
+</details>
+
+<sub>helm 4.2.4 · 2 rounds · 1 chart could not be rendered</sub>
+```
+
+The fix is collapsed because it is long and only some readers need it, and the table survives
+GitHub's renderer without alignment tricks. Piping that into `gh pr comment --body-file -` is
+the whole CI integration:
+
+```yaml
+- run: idem ./charts --new-from-merge-base ${{ github.base_ref }} -o markdown > /tmp/idem.md
+- run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
+  if: ${{ hashFiles('/tmp/idem.md') != '' }}
+```
+
+**No HTML, CSV or SARIF in v1.** JSON covers every machine consumer, markdown covers the human
+one that matters, and each additional format is a rendering to maintain forever.
 
 **There is no rules file and no exceptions file, deliberately.** Suppression is something you
 need *after* you have run a tool and disagreed with it — nobody has exceptions on day one. If
@@ -218,8 +267,8 @@ failing and without touching your working tree:
 
 ```console
 $ idem ./charts
-✓ 10 charts render consistently   ·   helm 4.2.4, 2 rounds
-   (8 vendored, 2 resolved in a temp dir)
+✓ All 10 charts render consistently under ArgoCD.
+  helm 4.2.4 · 2 rounds · 8 vendored, 2 resolved in a temp dir
 ```
 
 `idem` never writes to your repository unless you pass `--dependency-update`. A linter that
@@ -243,8 +292,8 @@ $ idem ./charts --new-from-merge-base main --strict
   home/templates/secrets.yaml
     Secret/home-ollama-secrets   .data.WEBUI_SECRET_KEY   rolls 2 Deployments
 
-  10 charts · 2 changed since main · 1 differs
-  (7 pre-existing findings not shown — drop the flag to see them)
+  1 of the 2 charts changed since main will churn under ArgoCD.
+  7 pre-existing findings not shown — drop the flag to see them.
   exit 1
 ```
 

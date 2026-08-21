@@ -580,7 +580,39 @@ false paths. Everything else falls back to positional matching.
 
 ---
 
-## 11. Implementation notes
+## 11. Output
+
+Three renderings of one `Report` struct, and the split is deliberate.
+
+**`text`** is a status line that occasionally expands, not a report. The modal run finds
+nothing and prints two lines; a run with findings prints one line per finding and one
+remediation block. No box drawing and no emoji severity badges — not on aesthetic grounds, but
+because emoji have inconsistent width across terminals and would break the column alignment on
+exactly the terminals that cannot be tested, and because box-drawing characters make `grep`,
+`awk` and output diffing worse on a tool people will pipe.
+
+**The last line is a verdict, not a stat line.** `2 of 10 charts will churn under ArgoCD; 1
+could not be rendered` beats `10 charts · 7 consistent · 2 differ · 1 unevaluable`, which makes
+the reader do arithmetic to find out whether to care. Borrowed from
+[iam-policy-validator](https://github.com/boogy/iam-policy-validator), whose footer states the
+conclusion in a sentence.
+
+**`json`** is the machine contract and the documented substitute for the rules system that was
+cut, so its shape is stable from the first release: enums marshal as names rather than
+ordinals, and each path carries both its dotted and RFC 6901 renderings so no consumer has to
+reimplement the escaping.
+
+**`markdown`** exists for one job — a pull-request comment. A table survives GitHub's renderer
+without alignment tricks, and the remediation goes in a `<details>` block because it is long
+and only some readers need it. `gh pr comment --body-file -` is then the entire CI integration.
+
+**No HTML, CSV or SARIF.** JSON covers every machine consumer and markdown covers the human one
+that matters; each further format is a rendering to maintain forever, and SARIF in particular
+buys GitHub code-scanning integration for a tool whose findings are not code defects.
+
+---
+
+## 12. Implementation notes
 
 **Paths are segments, not strings.** A Kubernetes key may contain `.` or `/` —
 `.data.application.yaml` and `.metadata.annotations.checksum/secrets` are both common — so a
