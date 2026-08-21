@@ -146,10 +146,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds, Delivery: deliveryCfg.Files, Engines: shown}
-	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs) {
+	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref)) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
-		uses, evidence := chartEvidence(ref, result.Chart.Dir)
+		evidence := engines.Evidence{
+			Uses: analyze.Of(result.Uses, analyze.Lookup),
+			Err:  result.InspectErr,
+		}
 
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:       result.Chart.Name,
@@ -158,7 +161,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
 			Verdicts:   verdictsFor(result, evidence),
-			Potential:  analyze.Potential(uses),
+			Potential:  analyze.Potential(result.Uses),
 			Err:        result.Err,
 		})
 	}
@@ -332,25 +335,25 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
-// chartEvidence scans a chart once, for both purposes it is needed.
+// inspector reads a chart's source for the functions idem flags.
 //
 // Every chart is scanned, not only the churning ones: a chart that renders
 // identically today while calling randAlphaNum is being held by a pin, and a
-// pin that silently stops applying is the failure idem exists for.
-func chartEvidence(ref chartref.Ref, dir string) ([]analyze.Use, engines.Evidence) {
-	if ref.Kind != chartref.Local {
-		// The chart was rendered straight from a registry and never landed on
-		// disk, so there is no source to scan. Reported as unknown rather than
-		// as "no lookup", which would be a sound CHURNS verdict off no
-		// evidence at all. Resolving this needs the same temp-dir fetch that
-		// dependency handling will build.
-		return nil, engines.Evidence{
-			Err: fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind),
+// pin that silently stops applying is the failure idem exists for. It runs in
+// the render pool rather than in a pass afterwards, so it overlaps rendering
+// instead of adding its own serial tail.
+func inspector(ref chartref.Ref) scan.Inspect {
+	return func(c scan.Chart) ([]analyze.Use, error) {
+		if ref.Kind != chartref.Local {
+			// Rendered straight from a registry and never landed on disk, so
+			// there is no source to scan. Reported as unknown rather than as
+			// "no lookup", which would be a sound CHURNS verdict off no
+			// evidence at all. Resolving this needs the same temp-dir fetch
+			// that dependency handling will build.
+			return nil, fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind)
 		}
+		return analyze.Find(c.Dir)
 	}
-
-	uses, err := analyze.Find(dir)
-	return uses, engines.Evidence{Uses: analyze.Of(uses, analyze.Lookup), Err: err}
 }
 
 // Only charts that actually churn get verdicts: a verdict answers "what does

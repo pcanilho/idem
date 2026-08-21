@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/manifest"
@@ -31,19 +32,32 @@ type Chart struct {
 	Spec engine.Spec
 }
 
+// Inspect examines a chart's source. Optional; nil skips it.
+//
+// Runs in the same pool as rendering rather than in a pass afterwards, so a
+// chart's source scan overlaps other charts' renders instead of adding its own
+// serial tail - and so that --jobs bounds all the work, not just some of it.
+type Inspect func(Chart) ([]analyze.Use, error)
+
 // Result is one chart's outcome. Err set means the chart could not be
 // rendered, which is exit 2 - never a silent skip.
 type Result struct {
 	Chart    Chart
 	Findings []check.Finding
 	Err      error
+
+	// Uses is what Inspect found, and InspectErr why it could not look.
+	// A failed inspection is an honest unknown for the engine verdicts, never
+	// a reason to call the chart unrenderable.
+	Uses       []analyze.Use
+	InspectErr error
 }
 
 // Charts checks every chart, running at most jobs renders at once.
 //
 // Results come back in the order the charts were given, whatever order they
 // finished in. A tool that reports non-determinism cannot exhibit it.
-func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int) []Result {
+func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, inspect Inspect) []Result {
 	// One semaphore for every render in the run, so the two levels of
 	// parallelism cannot multiply into charts*rounds processes at once.
 	gate := make(chan struct{}, resolveJobs(jobs))
@@ -52,7 +66,7 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int) [
 	var wg sync.WaitGroup
 	for i, c := range charts {
 		wg.Go(func() {
-			results[i] = one(ctx, r, c, rounds, gate)
+			results[i] = one(ctx, r, c, rounds, gate, inspect)
 		})
 	}
 	wg.Wait()
@@ -64,13 +78,16 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int) [
 //
 // The chart's goroutine never holds the gate itself - only the renders do - so
 // charts waiting on their rounds cannot starve the pool.
-func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}) Result {
+func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}, inspect Inspect) Result {
 	if rounds < 2 {
 		return Result{Chart: c, Err: fmt.Errorf("checking %s: rounds is %d, and at least 2 renders are needed", c.Name, rounds)}
 	}
 
 	renders := make([][]manifest.Object, rounds)
 	errs := make([]error, rounds)
+
+	var uses []analyze.Use
+	var inspectErr error
 
 	var wg sync.WaitGroup
 	for round := range rounds {
@@ -82,21 +99,39 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 			renders[round], errs[round] = r.Render(ctx, c.Spec)
 		})
 	}
+
+	// Reading the chart source does not depend on rendering it, so it runs
+	// alongside the rounds, taking a slot like any other unit of work.
+	if inspect != nil {
+		wg.Go(func() {
+			gate <- struct{}{}
+			defer func() { <-gate }()
+
+			uses, inspectErr = inspect(c)
+		})
+	}
 	wg.Wait()
 
 	// Report the earliest round that failed, so the reason does not depend on
-	// which goroutine happened to finish first.
+	// which goroutine happened to finish first. The inspection is still
+	// carried: a chart that would not render may still be worth warning about.
 	for round, err := range errs {
 		if err != nil {
-			return Result{Chart: c, Err: fmt.Errorf("rendering %s (round %d): %w", c.Name, round+1, err)}
+			return Result{
+				Chart: c, Uses: uses, InspectErr: inspectErr,
+				Err: fmt.Errorf("rendering %s (round %d): %w", c.Name, round+1, err),
+			}
 		}
 	}
 
 	result, err := check.Compare(renders)
 	if err != nil {
-		return Result{Chart: c, Err: fmt.Errorf("checking %s: %w", c.Name, err)}
+		return Result{
+			Chart: c, Uses: uses, InspectErr: inspectErr,
+			Err: fmt.Errorf("checking %s: %w", c.Name, err),
+		}
 	}
-	return Result{Chart: c, Findings: result.Findings}
+	return Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr}
 }
 
 // resolveJobs turns the flag value into a worker count.

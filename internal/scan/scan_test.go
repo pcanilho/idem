@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/manifest"
 )
@@ -33,6 +34,7 @@ type counting struct {
 	active    int
 	maxActive int
 	calls     map[string]int
+	inspected int
 
 	body  string
 	delay time.Duration
@@ -107,7 +109,7 @@ func TestChartsReturnsOneResultPerChartInInputOrder(t *testing.T) {
 	// be. A tool that reports non-determinism cannot exhibit it.
 	charts := []Chart{chart("zeta"), chart("alpha"), chart("mid")}
 
-	got := Charts(context.Background(), &counting{}, charts, 2, 4)
+	got := Charts(context.Background(), &counting{}, charts, 2, 4, nil)
 
 	if len(got) != len(charts) {
 		t.Fatalf("Charts() returned %d results, want %d", len(got), len(charts))
@@ -120,7 +122,7 @@ func TestChartsReturnsOneResultPerChartInInputOrder(t *testing.T) {
 }
 
 func TestChartsReportsFindingsAgainstTheChartTheyCameFrom(t *testing.T) {
-	got := Charts(context.Background(), &counting{}, []Chart{chart("home"), chart("lab")}, 2, 4)
+	got := Charts(context.Background(), &counting{}, []Chart{chart("home"), chart("lab")}, 2, 4, nil)
 
 	for _, r := range got {
 		if r.Err != nil {
@@ -138,7 +140,7 @@ func TestChartsReportsFindingsAgainstTheChartTheyCameFrom(t *testing.T) {
 func TestChartsRendersEachChartOncePerRound(t *testing.T) {
 	r := &counting{}
 
-	Charts(context.Background(), r, []Chart{chart("home"), chart("lab")}, 3, 4)
+	Charts(context.Background(), r, []Chart{chart("home"), chart("lab")}, 3, 4, nil)
 
 	for _, ref := range []string{"./home", "./lab"} {
 		if got := r.calls[ref]; got != 3 {
@@ -153,7 +155,7 @@ func TestAChartThatFailsToRenderDoesNotStopTheOthers(t *testing.T) {
 	boom := errors.New("helm template: exit status 1")
 	r := &counting{fail: map[string]error{"./lab": boom}}
 
-	got := Charts(context.Background(), r, []Chart{chart("home"), chart("lab"), chart("ops")}, 2, 4)
+	got := Charts(context.Background(), r, []Chart{chart("home"), chart("lab"), chart("ops")}, 2, 4, nil)
 
 	if got[0].Err != nil || got[2].Err != nil {
 		t.Errorf("healthy charts carry errors: %v, %v", got[0].Err, got[2].Err)
@@ -170,7 +172,7 @@ func TestChartsNeverExceedsTheJobLimit(t *testing.T) {
 	r := &counting{delay: 5 * time.Millisecond}
 	charts := []Chart{chart("a"), chart("b"), chart("c"), chart("d"), chart("e")}
 
-	Charts(context.Background(), r, charts, 3, 2)
+	Charts(context.Background(), r, charts, 3, 2, nil)
 
 	if r.maxActive > 2 {
 		t.Errorf("%d renders ran at once, want at most 2", r.maxActive)
@@ -180,7 +182,7 @@ func TestChartsNeverExceedsTheJobLimit(t *testing.T) {
 func TestChartsRendersDifferentChartsConcurrently(t *testing.T) {
 	m := newMeeting(3)
 
-	got := Charts(context.Background(), m, []Chart{chart("a"), chart("b"), chart("c")}, 2, 8)
+	got := Charts(context.Background(), m, []Chart{chart("a"), chart("b"), chart("c")}, 2, 8, nil)
 
 	for _, r := range got {
 		if r.Err != nil {
@@ -195,7 +197,7 @@ func TestChartsRendersTheRoundsOfOneChartConcurrently(t *testing.T) {
 	// independent. Parallelising charts alone would leave that chart serial.
 	m := newMeeting(2)
 
-	got := Charts(context.Background(), m, []Chart{chart("only")}, 2, 8)
+	got := Charts(context.Background(), m, []Chart{chart("only")}, 2, 8, nil)
 
 	if got[0].Err != nil {
 		t.Errorf("rounds of a single chart did not overlap: %v", got[0].Err)
@@ -206,7 +208,7 @@ func TestRoundsAreBoundedByTheJobLimitToo(t *testing.T) {
 	// A single chart with many rounds must not ignore --jobs.
 	r := &counting{delay: 5 * time.Millisecond}
 
-	Charts(context.Background(), r, []Chart{chart("only")}, 8, 2)
+	Charts(context.Background(), r, []Chart{chart("only")}, 8, 2, nil)
 
 	if r.maxActive > 2 {
 		t.Errorf("%d renders ran at once, want at most 2", r.maxActive)
@@ -214,7 +216,7 @@ func TestRoundsAreBoundedByTheJobLimitToo(t *testing.T) {
 }
 
 func TestFewerThanTwoRoundsIsReportedPerChart(t *testing.T) {
-	got := Charts(context.Background(), &counting{}, []Chart{chart("home")}, 1, 4)
+	got := Charts(context.Background(), &counting{}, []Chart{chart("home")}, 1, 4, nil)
 
 	if got[0].Err == nil {
 		t.Error("Err = nil, want a single round rejected")
@@ -240,7 +242,7 @@ func TestChartsIsDeterministicAcrossRuns(t *testing.T) {
 	var first []string
 	for run := range 20 {
 		var names []string
-		for _, r := range Charts(context.Background(), &counting{}, charts, 2, 8) {
+		for _, r := range Charts(context.Background(), &counting{}, charts, 2, 8, nil) {
 			names = append(names, r.Chart.Name+":"+fmt.Sprint(len(r.Findings)))
 		}
 		if run == 0 {
@@ -250,5 +252,99 @@ func TestChartsIsDeterministicAcrossRuns(t *testing.T) {
 		if strings.Join(names, ",") != strings.Join(first, ",") {
 			t.Fatalf("run %d gave %v, run 0 gave %v", run, names, first)
 		}
+	}
+}
+
+// --- inspection, run in the same pool as rendering ---
+
+// inspector records its own concurrency into the shared counting renderer, so
+// a test can assert the job limit covers both kinds of work.
+func (c *counting) inspect(spec engine.Spec) ([]analyze.Use, error) {
+	c.mu.Lock()
+	c.active++
+	c.maxActive = max(c.maxActive, c.active)
+	c.mu.Unlock()
+
+	time.Sleep(c.delay)
+
+	c.mu.Lock()
+	c.active--
+	c.inspected++
+	c.mu.Unlock()
+
+	return []analyze.Use{{Function: "now", File: "t.yaml", Line: 1, Call: true}}, nil
+}
+
+func TestChartsInspectsEveryChart(t *testing.T) {
+	r := &counting{}
+
+	got := Charts(context.Background(), r, []Chart{chart("a"), chart("b")}, 2, 4,
+		func(c Chart) ([]analyze.Use, error) { return r.inspect(c.Spec) })
+
+	if r.inspected != 2 {
+		t.Errorf("inspected %d charts, want 2", r.inspected)
+	}
+	for _, res := range got {
+		if len(res.Uses) != 1 {
+			t.Errorf("%s: Uses = %+v, want the inspector's result", res.Chart.Name, res.Uses)
+		}
+	}
+}
+
+func TestInspectionObeysTheSameJobLimitAsRendering(t *testing.T) {
+	// Scanning chart sources is real work competing for the same machine. If
+	// it ran outside the limit, --jobs would stop meaning what it says.
+	r := &counting{delay: 5 * time.Millisecond}
+	charts := []Chart{chart("a"), chart("b"), chart("c"), chart("d")}
+
+	Charts(context.Background(), r, charts, 3, 2,
+		func(c Chart) ([]analyze.Use, error) { return r.inspect(c.Spec) })
+
+	if r.maxActive > 2 {
+		t.Errorf("%d tasks ran at once, want at most 2", r.maxActive)
+	}
+}
+
+func TestInspectionOverlapsWithRendering(t *testing.T) {
+	// The whole point of moving it into the pool: a chart's source scan should
+	// run while other charts are still rendering, not in a second pass after
+	// every render has finished.
+	m := newMeeting(2)
+
+	got := Charts(context.Background(), m, []Chart{chart("only")}, 2, 8,
+		func(Chart) ([]analyze.Use, error) {
+			// Joins the same meeting as the renders, so this only returns if a
+			// render was genuinely in flight at the same moment.
+			_, err := m.Render(context.Background(), engine.Spec{Release: "only"})
+			return nil, err
+		})
+
+	if got[0].Err != nil || got[0].InspectErr != nil {
+		t.Errorf("render and inspection did not overlap: %v / %v", got[0].Err, got[0].InspectErr)
+	}
+}
+
+func TestAnInspectionFailureDoesNotFailTheChart(t *testing.T) {
+	// Not being able to read the chart source is an honest unknown for the
+	// verdicts; it is not a reason to call the chart unrenderable.
+	boom := errors.New("scanning charts/common.tgz: unexpected EOF")
+	r := &counting{}
+
+	got := Charts(context.Background(), r, []Chart{chart("a")}, 2, 4,
+		func(Chart) ([]analyze.Use, error) { return nil, boom })
+
+	if got[0].Err != nil {
+		t.Errorf("Err = %v, want the chart still evaluated", got[0].Err)
+	}
+	if !errors.Is(got[0].InspectErr, boom) {
+		t.Errorf("InspectErr = %v, want the scan failure kept", got[0].InspectErr)
+	}
+}
+
+func TestChartsWithoutAnInspectorStillWorks(t *testing.T) {
+	got := Charts(context.Background(), &counting{}, []Chart{chart("a")}, 2, 4, nil)
+
+	if len(got) != 1 || got[0].Err != nil {
+		t.Errorf("Charts() = %+v, want the chart checked", got)
 	}
 }
