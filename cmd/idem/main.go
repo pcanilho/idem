@@ -20,7 +20,9 @@ import (
 	"github.com/pcanilho/idem/internal/chartref"
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
+	"github.com/pcanilho/idem/internal/engines"
 	"github.com/pcanilho/idem/internal/helm"
+	"github.com/pcanilho/idem/internal/lookup"
 	"github.com/pcanilho/idem/internal/report"
 	"github.com/pcanilho/idem/internal/scan"
 )
@@ -62,6 +64,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
+	fs.StringVar(&opt.engine, "engine", "all", "argocd, flux, helm, or all")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -78,6 +81,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if opt.showVersion {
 		fmt.Fprintf(stdout, "idem %s\n", cliVersion())
 		return exitOK
+	}
+
+	targets, err := engines.Select(opt.engine)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
 	}
 
 	if opt.rounds < 2 {
@@ -121,6 +130,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Name:     result.Chart.Name,
 			Dir:      result.Chart.Dir,
 			Findings: result.Findings,
+			Verdicts: verdictsFor(ref, result, targets),
 			Err:      result.Err,
 		})
 	}
@@ -183,6 +193,7 @@ type options struct {
 	repo         string
 	chartVersion string
 	jobs         int
+	engine       string
 	showVersion  bool
 }
 
@@ -231,6 +242,34 @@ func resolve(ref chartref.Ref) ([]target, error) {
 // rounds would manufacture the very churn idem is looking for.
 func releaseName(raw string) string {
 	return path.Base(strings.TrimSuffix(raw, "/"))
+}
+
+// verdictsFor works out what each selected engine does with this chart.
+//
+// Only charts that actually churn get verdicts: a verdict answers "what does
+// this finding mean for me", and a clean chart has no finding to explain.
+func verdictsFor(ref chartref.Ref, result scan.Result, targets []engines.Target) []engine.Verdict {
+	if result.Err != nil || len(result.Findings) == 0 {
+		return nil
+	}
+
+	ev := engines.Evidence{}
+	if ref.Kind == chartref.Local {
+		ev.Uses, ev.Err = lookup.Find(result.Chart.Dir)
+	} else {
+		// The chart was rendered straight from a registry and never landed on
+		// disk, so there is no source to scan. Reported as unknown rather than
+		// as "no lookup", which would be a sound CHURNS verdict off no
+		// evidence at all. Resolving this needs the same temp-dir fetch that
+		// dependency handling will build.
+		ev.Err = fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind)
+	}
+
+	out := make([]engine.Verdict, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, t.Verdict(ev))
+	}
+	return out
 }
 
 // version is stamped by the release build with -ldflags. Empty in a source

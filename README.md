@@ -61,10 +61,15 @@ chart-reference handling are built and tested — and so is a working CLI: `idem
 charts, renders each of them more than once, compares the results and prints the verdict, with
 the exit codes below.
 
-Not yet built: three-engine verdicts, the `ignoreDifferences` emitter, the static analyzer,
-`-o json`/`markdown`/`github`, dependency resolution, `--new-from-rev`, `--cluster` and
-`doctor`. `action.yml` downloads a release that does not exist yet. So everything below is
-still the intended interface — a specification, not a demo.
+Three-engine verdicts work: `idem` reports what a finding means under ArgoCD, Flux and Helm,
+and tells you whether you are looking at a chart defect or an ArgoCD limitation.
+
+Not yet built: the `ignoreDifferences` emitter, the static analyzer, `-o json`/`markdown`/
+`github`, dependency resolution, `--new-from-rev`, `--cluster` and `doctor`. Engine
+auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
+chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
+`unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of
+what follows is still the intended interface — a specification, not a demo.
 
 Three-engine verdicts (ArgoCD, Flux, Helm) are v1 scope, not a later addition. They are the
 reason the tool exists.

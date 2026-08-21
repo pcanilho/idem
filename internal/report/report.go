@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/engine"
 )
 
 // maxFields caps how many differing fields one object lists.
@@ -33,6 +34,10 @@ type Chart struct {
 	Dir  string
 
 	Findings []check.Finding
+
+	// Verdicts is what each selected engine does with this chart. Empty when
+	// the chart is clean, or when no engine lens was requested.
+	Verdicts []engine.Verdict
 
 	// Err is set when the chart could not be rendered at all. That is exit 2
 	// and always fatal - a chart silently skipped is the bug idem exists for.
@@ -120,6 +125,67 @@ func writeChart(b *strings.Builder, c Chart) {
 		}
 		tw.Flush()
 	}
+
+	writeVerdicts(b, c.Verdicts)
+}
+
+// writeVerdicts prints what each engine does with this chart.
+//
+// One block per chart rather than per finding: today the answer turns on
+// whether the chart calls lookup at all, which is a property of the chart. It
+// becomes per-finding only with --cluster, where each value can be observed
+// separately.
+func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict) {
+	if len(verdicts) == 0 {
+		return
+	}
+
+	b.WriteString("\n")
+	tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+
+	var previous engine.Verdict
+	for i, v := range verdicts {
+		because := v.Because
+		// Flux and Helm reach the same answer for the same reason. Printing
+		// the sentence twice makes the reader compare two identical lines to
+		// discover they are identical.
+		if i > 0 && v.Result == previous.Result && v.Because == previous.Because {
+			because = "same"
+		}
+		fmt.Fprintf(tw, "      %s\t%s\t%s\n", v.Engine, result(v.Result), because)
+		previous = v
+	}
+	tw.Flush()
+
+	if defect(verdicts) {
+		b.WriteString("\n")
+		b.WriteString("      No `lookup` anywhere in this chart, so nothing can stabilise this value.\n")
+		b.WriteString("      That is a chart defect rather than an ArgoCD limitation — worth reporting\n")
+		b.WriteString("      upstream, and pinning the value meanwhile.\n")
+	}
+}
+
+// result renders a verdict word. CHURNS is the one word that should catch the
+// eye in a wall of output; unknown is an admission and must not compete.
+func result(r engine.Result) string {
+	if r == engine.Churns {
+		return strings.ToUpper(r.String())
+	}
+	return r.String()
+}
+
+// defect reports whether the findings are the chart's own fault.
+//
+// True only when an engine that DOES resolve lookup still churns, which idem
+// concludes solely from there being no lookup in the chart. ArgoCD churning
+// proves nothing here: its repo-server has no cluster access either way.
+func defect(verdicts []engine.Verdict) bool {
+	for _, v := range verdicts {
+		if v.Result == engine.Churns && !v.Observed {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFinding(tw io.Writer, f check.Finding) {

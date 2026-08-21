@@ -378,3 +378,74 @@ func TestParallelRendersDoNotInterleaveHelmOutput(t *testing.T) {
 		t.Errorf("stdout = %q, want the reason attributed to its chart", stdout)
 	}
 }
+
+func TestAChartWithNoLookupIsReportedAsAChartDefect(t *testing.T) {
+	requireHelm(t)
+
+	// randAlphaNum with nothing guarding it: no engine can stabilise this, so
+	// the answer is "file an upstream issue", not "add an ignoreDifferences
+	// block". Telling those apart is the point of three-engine verdicts.
+	_, stdout, _ := invoke(t, "testdata/churn")
+
+	for _, want := range []string{"argocd", "flux", "helm", "CHURNS", "No `lookup` anywhere", "upstream"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, want it to contain %q", stdout, want)
+		}
+	}
+}
+
+func TestAChartThatCallsLookupIsUnknownForFluxAndHelm(t *testing.T) {
+	requireHelm(t)
+
+	// The README's opening idiom. ArgoCD churns as an observed fact; whether
+	// that lookup guards this value under Flux or Helm is not something idem
+	// will guess at.
+	_, stdout, _ := invoke(t, "testdata/guarded")
+
+	if !strings.Contains(stdout, "CHURNS") {
+		t.Errorf("stdout = %q, want ArgoCD's observed verdict", stdout)
+	}
+	if !strings.Contains(stdout, "unknown") {
+		t.Errorf("stdout = %q, want unknown for the lookup-resolving engines", stdout)
+	}
+	if !strings.Contains(stdout, "templates/secret.yaml") {
+		t.Errorf("stdout = %q, want the lookup located as evidence", stdout)
+	}
+	if strings.Contains(stdout, "No `lookup` anywhere") {
+		t.Errorf("stdout = %q, want no chart-defect claim - this chart does call lookup", stdout)
+	}
+}
+
+func TestEngineFlagSelectsASingleEngine(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/churn", "--engine", "flux")
+
+	if !strings.Contains(stdout, "flux") {
+		t.Errorf("stdout = %q, want the flux verdict", stdout)
+	}
+	if strings.Contains(stdout, "every sync, forever") {
+		t.Errorf("stdout = %q, want no argocd row when only flux was asked for", stdout)
+	}
+}
+
+func TestEngineFlagRejectsAnUnknownEngine(t *testing.T) {
+	code, _, stderr := invoke(t, "testdata/churn", "--engine", "fleet")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "fleet") || !strings.Contains(stderr, "argocd") {
+		t.Errorf("stderr = %q, want the bad value and the valid ones", stderr)
+	}
+}
+
+func TestACleanChartGetsNoVerdictBlock(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/clean")
+
+	if strings.Contains(stdout, "CHURNS") {
+		t.Errorf("stdout = %q, want no verdicts when there is nothing to explain", stdout)
+	}
+}

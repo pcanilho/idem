@@ -7,6 +7,7 @@ import (
 
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/objpath"
 )
 
@@ -252,5 +253,120 @@ func TestVerdictWhenEveryChartFailedToRender(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 chart could not be rendered") {
 		t.Errorf("Text() = %q, want the count of unevaluable charts", got)
+	}
+}
+
+func verdicts(specs ...[3]string) []engine.Verdict {
+	var out []engine.Verdict
+	for _, s := range specs {
+		var r engine.Result
+		switch s[1] {
+		case "churns":
+			r = engine.Churns
+		case "stable":
+			r = engine.Stable
+		}
+		out = append(out, engine.Verdict{Engine: s[0], Result: r, Because: s[2], Observed: s[0] == "argocd"})
+	}
+	return out
+}
+
+func chartWithVerdicts(vs []engine.Verdict) Report {
+	return Report{
+		Charts: []Chart{{
+			Name:     "home",
+			Findings: []check.Finding{finding("home/templates/secrets.yaml", "creds", ".data.password")},
+			Verdicts: vs,
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}
+}
+
+func TestTextShowsOneVerdictRowPerEngine(t *testing.T) {
+	got := text(t, chartWithVerdicts(verdicts(
+		[3]string{"argocd", "churns", "every sync, forever"},
+		[3]string{"flux", "unknown", "chart calls `lookup` (a.tpl:9)"},
+		[3]string{"helm", "unknown", "chart calls `lookup` (a.tpl:9)"},
+	)))
+
+	for _, want := range []string{"argocd", "flux", "helm"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want a row for %q", got, want)
+		}
+	}
+}
+
+func TestTextShoutsChurnsAndKeepsUnknownQuiet(t *testing.T) {
+	// CHURNS is the one word that should catch the eye in a wall of output;
+	// unknown is an admission and should not compete with it.
+	got := text(t, chartWithVerdicts(verdicts(
+		[3]string{"argocd", "churns", "every sync, forever"},
+		[3]string{"flux", "unknown", "chart calls `lookup` (a.tpl:9)"},
+	)))
+
+	if !strings.Contains(got, "CHURNS") {
+		t.Errorf("Text() = %q, want CHURNS in caps", got)
+	}
+	if !strings.Contains(got, "unknown") || strings.Contains(got, "UNKNOWN") {
+		t.Errorf("Text() = %q, want unknown in lower case", got)
+	}
+}
+
+func TestTextCollapsesARepeatedReasonToSame(t *testing.T) {
+	// Flux and Helm reach the same answer for the same reason. Printing the
+	// sentence twice makes the reader compare two identical lines to find out
+	// they are identical.
+	got := text(t, chartWithVerdicts(verdicts(
+		[3]string{"argocd", "churns", "every sync, forever"},
+		[3]string{"flux", "unknown", "chart calls `lookup` (a.tpl:9) — may guard this value"},
+		[3]string{"helm", "unknown", "chart calls `lookup` (a.tpl:9) — may guard this value"},
+	)))
+
+	if strings.Count(got, "may guard this value") != 1 {
+		t.Errorf("Text() = %q, want the repeated reason written once", got)
+	}
+	if !strings.Contains(got, "same") {
+		t.Errorf("Text() = %q, want the repeat shown as `same`", got)
+	}
+}
+
+func TestTextNamesTheChartDefectWhenNothingCouldStabiliseTheValue(t *testing.T) {
+	// This is the whole point of three-engine verdicts: it tells the reader
+	// whether to file an upstream issue or add an ignoreDifferences block.
+	got := text(t, chartWithVerdicts(verdicts(
+		[3]string{"argocd", "churns", "every sync, forever"},
+		[3]string{"flux", "churns", "on every chart or values change"},
+		[3]string{"helm", "churns", "on every `helm upgrade`"},
+	)))
+
+	if !strings.Contains(got, "No `lookup` anywhere") {
+		t.Errorf("Text() = %q, want the sound reasoning stated", got)
+	}
+	if !strings.Contains(got, "upstream") {
+		t.Errorf("Text() = %q, want the reader pointed upstream", got)
+	}
+}
+
+func TestTextDoesNotClaimAChartDefectFromArgoCDAlone(t *testing.T) {
+	// ArgoCD churning says nothing about whether a lookup could stabilise the
+	// value - its repo-server has no cluster access either way. Only a sound
+	// (inferred, not observed) CHURNS from a lookup-resolving engine does.
+	got := text(t, chartWithVerdicts(verdicts(
+		[3]string{"argocd", "churns", "every sync, forever"},
+	)))
+
+	if strings.Contains(got, "No `lookup` anywhere") {
+		t.Errorf("Text() = %q, want no chart-defect claim from ArgoCD alone", got)
+	}
+}
+
+func TestTextShowsNoVerdictBlockWhenThereAreNone(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("t.yaml", "c", ".data.k")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "CHURNS") {
+		t.Errorf("Text() = %q, want no verdict rows", got)
 	}
 }
