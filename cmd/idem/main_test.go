@@ -332,3 +332,49 @@ func TestFormatVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestJobsFlagIsAccepted(t *testing.T) {
+	requireHelm(t)
+
+	code, stdout, stderr := invoke(t, "testdata/many", "--jobs", "1")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "All 2 charts") {
+		t.Errorf("stdout = %q, want both charts checked", stdout)
+	}
+}
+
+func TestOutputIsIdenticalWhateverTheJobCount(t *testing.T) {
+	requireHelm(t)
+
+	// Charts finish in whatever order the pool happens to complete them. If
+	// that leaked into the report, idem would be exhibiting the very
+	// non-determinism it exists to report.
+	_, sequential, _ := invoke(t, "testdata/many", "--jobs", "1")
+	_, parallel, _ := invoke(t, "testdata/many", "--jobs", "8")
+
+	if sequential != parallel {
+		t.Errorf("--jobs 1 gave %q, --jobs 8 gave %q", sequential, parallel)
+	}
+}
+
+func TestParallelRendersDoNotInterleaveHelmOutput(t *testing.T) {
+	requireHelm(t)
+
+	// Every helm invocation writes to its own buffer, so concurrent renders
+	// cannot interleave on the terminal. The failing chart's reason must still
+	// arrive whole and attributed.
+	code, stdout, stderr := invoke(t, "testdata/broken", "--jobs", "8")
+
+	if code != exitFatal {
+		t.Fatalf("exit = %d, want %d", code, exitFatal)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want helm's output captured rather than leaked", stderr)
+	}
+	if !strings.Contains(stdout, "auth.password is required") {
+		t.Errorf("stdout = %q, want the reason attributed to its chart", stdout)
+	}
+}

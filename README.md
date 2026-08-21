@@ -183,7 +183,7 @@ That is the whole surface:
       --helm        helm binary to render with   (default: first on PATH)
       --cluster     resolve lookup and capabilities against the current kube context
       --kube-context  which context to use              (default: current)
-      --jobs        parallel charts               (default: number of CPUs)
+      --jobs        renders to run at once        (default: number of CPUs)
       --dependency-update  resolve missing deps in place, not a temp dir
       --no-deps     never fetch dependencies      (airgapped / reproducible CI)
       --new-from-rev REV          report only findings in charts changed since REV

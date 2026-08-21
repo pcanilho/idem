@@ -13,15 +13,16 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
 	"github.com/pcanilho/idem/internal/chartref"
-	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/helm"
 	"github.com/pcanilho/idem/internal/report"
+	"github.com/pcanilho/idem/internal/scan"
 )
 
 // Exit codes. Findings are informative by default: a chart using `lookup` is
@@ -60,6 +61,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.strict, "strict", false, "exit non-zero on findings")
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
+	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -108,14 +110,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds}
+	queue := make([]scan.Chart, 0, len(charts))
 	for _, c := range charts {
-		result, runErr := check.Run(ctx, h, specFor(ref, c, opt), opt.rounds)
+		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
+	}
+
+	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds}
+	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs) {
 		rep.Charts = append(rep.Charts, report.Chart{
-			Name:     c.release,
-			Dir:      c.ref,
+			Name:     result.Chart.Name,
+			Dir:      result.Chart.Dir,
 			Findings: result.Findings,
-			Err:      runErr,
+			Err:      result.Err,
 		})
 	}
 
@@ -176,6 +182,7 @@ type options struct {
 	helmBin      string
 	repo         string
 	chartVersion string
+	jobs         int
 	showVersion  bool
 }
 

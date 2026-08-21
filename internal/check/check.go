@@ -7,24 +7,14 @@
 package check
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"slices"
 	"strings"
 
 	"github.com/pcanilho/idem/internal/diff"
-	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/manifest"
 )
-
-// Renderer produces one render of a chart.
-//
-// Declared here rather than taken from engine so that check depends on the one
-// method it uses. engine.Renderer satisfies it.
-type Renderer interface {
-	Render(ctx context.Context, spec engine.Spec) ([]manifest.Object, error)
-}
 
 // Finding is one object that did not render the same way every time.
 type Finding struct {
@@ -42,33 +32,29 @@ type Result struct {
 	Findings []Finding
 }
 
-// Run renders spec `rounds` times and reports what differed.
+// Compare reports what differed across renders of one chart.
 //
 // Every round is compared against the first, not against its predecessor. A
 // value drawn from a small space - randInt on a short range, a timestamp at
 // second resolution - can repeat by chance in consecutive rounds, and pairwise
 // comparison would then call a non-deterministic chart clean.
-func Run(ctx context.Context, r Renderer, spec engine.Spec, rounds int) (Result, error) {
-	if rounds < 2 {
-		return Result{}, fmt.Errorf("rounds is %d: at least 2 renders are needed, because a single render cannot be compared to anything", rounds)
+//
+// It takes renders rather than producing them so that the caller owns
+// scheduling: rounds are independent and worth running concurrently, and the
+// comparison has no business knowing that.
+func Compare(renders [][]manifest.Object) (Result, error) {
+	if len(renders) < 2 {
+		return Result{}, fmt.Errorf("got %d renders: at least 2 are needed, because a single render cannot be compared to anything", len(renders))
 	}
 
-	first, err := r.Render(ctx, spec)
-	if err != nil {
-		return Result{}, fmt.Errorf("rendering %s: %w", spec.ChartRef, err)
-	}
+	first := renders[0]
 	sources := sourceIndex(first)
 
 	merged := make(map[string]Finding)
-	for round := 2; round <= rounds; round++ {
-		next, err := r.Render(ctx, spec)
-		if err != nil {
-			return Result{}, fmt.Errorf("rendering %s (round %d): %w", spec.ChartRef, round, err)
-		}
-
+	for round, next := range renders[1:] {
 		changes, err := diff.Compare(first, next)
 		if err != nil {
-			return Result{}, fmt.Errorf("comparing renders of %s (round %d): %w", spec.ChartRef, round, err)
+			return Result{}, fmt.Errorf("comparing round 1 against round %d: %w", round+2, err)
 		}
 		for _, c := range changes {
 			merge(merged, c, sources)
@@ -76,7 +62,7 @@ func Run(ctx context.Context, r Renderer, spec engine.Spec, rounds int) (Result,
 	}
 
 	return Result{
-		Rounds:   rounds,
+		Rounds:   len(renders),
 		Findings: sortedFindings(merged),
 	}, nil
 }
