@@ -36,6 +36,10 @@ type Chart struct {
 	Name string
 	Dir  string
 
+	// RepoDir is the chart directory relative to the repository root, empty
+	// when the chart is not inside it. Only used to place annotations.
+	RepoDir string
+
 	Findings []check.Finding
 
 	// Verdicts is what each selected engine does with this chart. Empty when
@@ -65,6 +69,10 @@ type Report struct {
 	// Delivery names the engine manifests idem read. Reading files outside the
 	// chart directory has to be as visible as which helm it rendered with.
 	Delivery []string
+
+	// Root is the repository idem searched, used to check that a file an
+	// annotation would point at actually exists.
+	Root string
 
 	// Engines are the engine names whose verdicts to display. Empty shows all.
 	//
@@ -177,7 +185,7 @@ func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string)
 
 	shown := make([]engine.Verdict, 0, len(verdicts))
 	for _, v := range verdicts {
-		if len(show) == 0 || slices.Contains(show, v.Engine) {
+		if shows(show, v.Engine) {
 			shown = append(shown, v)
 		}
 	}
@@ -206,6 +214,14 @@ func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string)
 		b.WriteString("      upstream, and pinning the value meanwhile.\n")
 	}
 }
+
+// shows reports whether this engine's verdict is displayed. Empty shows all.
+func shows(engines []string, name string) bool {
+	return len(engines) == 0 || slices.Contains(engines, name)
+}
+
+// whyOf is analyze.Why, wrapped so the formatters share one spelling.
+func whyOf(function string) string { return analyze.Why(function) }
 
 // result renders a verdict word. CHURNS is the one word that should catch the
 // eye in a wall of output; unknown is an admission and must not compete.
@@ -344,7 +360,7 @@ func writePotential(b *strings.Builder, charts []Chart) bool {
 		shown := min(len(c.Potential), maxFields)
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, u := range c.Potential[:shown] {
-			note := analyze.Why(u.Function)
+			note := whyOf(u.Function)
 			if settled {
 				note += ", did not fire this render"
 			}

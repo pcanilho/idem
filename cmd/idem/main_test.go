@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -496,5 +497,68 @@ func TestAutoFallsBackToAllThreeWhenTheDetectedEngineIsUnknown(t *testing.T) {
 func TestSelectEnginesStillRejectsAnUnknownFlag(t *testing.T) {
 	if _, err := selectEngines("fleet", nil); err == nil {
 		t.Error("selectEngines() error = nil, want the bad flag rejected")
+	}
+}
+
+func TestJSONOutputParses(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/churn", "-o", "json")
+
+	var got map[string]any
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("output does not parse as JSON: %v\n%s", err, stdout)
+	}
+	if _, ok := got["findings"]; !ok {
+		t.Errorf("JSON = %v, want a findings key", got)
+	}
+}
+
+func TestAMachineFormatIsNotCorruptedByTheExitLine(t *testing.T) {
+	requireHelm(t)
+
+	// The text form appends "exit 2 — a chart could not be rendered". Doing
+	// that to JSON would leave it unparseable for the tool consuming it.
+	code, stdout, _ := invoke(t, "testdata/broken", "-o", "json")
+
+	if code != exitFatal {
+		t.Fatalf("exit = %d, want %d", code, exitFatal)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Errorf("output does not parse as JSON: %v\n%s", err, stdout)
+	}
+}
+
+func TestMarkdownOutputIsEmptyForACleanRun(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/clean", "-o", "markdown")
+
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("stdout = %q, want empty so CI posts no comment", stdout)
+	}
+}
+
+func TestGitHubOutputEmitsWorkflowCommands(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/churn", "-o", "github")
+
+	if !strings.Contains(stdout, "::") {
+		t.Errorf("stdout = %q, want workflow commands", stdout)
+	}
+}
+
+func TestAnUnknownOutputFormatIsRejected(t *testing.T) {
+	code, _, stderr := invoke(t, "testdata/clean", "-o", "sarif")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	for _, want := range []string{"sarif", "json", "markdown", "github"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to mention %q", stderr, want)
+		}
 	}
 }

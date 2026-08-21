@@ -75,8 +75,9 @@ The static analyzer works too: a chart that calls a non-deterministic function b
 identically is reported as a **potential** finding — its own section, never counted, never
 fatal — because the failure that motivated `idem` was a pin that silently stopped applying.
 
-Not yet built: `-o json`/`markdown`/`github`, dependency resolution, `--new-from-rev`,
-`--cluster` and `doctor`. Engine
+All four output formats work: `text`, `json`, `markdown` and `github`.
+
+Not yet built: dependency resolution, `--new-from-rev`, `--cluster` and `doctor`. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

@@ -68,6 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
 	fs.StringVar(&opt.engine, "engine", "auto", "argocd, flux, helm, all, or auto")
+	fs.StringVar(&opt.output, "o", "text", "text, json, markdown or github")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -89,6 +90,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Validated before anything is rendered, so a bad value fails in a
 	// millisecond rather than after a minute of helm.
 	if _, err := selectEngines(opt.engine, nil); err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
+	format, err := formatter(opt.output)
+	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
 	}
@@ -145,7 +152,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
 	}
 
-	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds, Delivery: deliveryCfg.Files, Engines: shown}
+	rep := report.Report{
+		Helm: helmVersion, Rounds: opt.rounds,
+		Delivery: deliveryCfg.Files, Engines: shown, Root: root,
+	}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref)) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
@@ -157,6 +167,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:       result.Chart.Name,
 			Dir:        result.Chart.Dir,
+			RepoDir:    chartPath(root, result.Chart.Dir),
 			Findings:   applied.Churning,
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
@@ -166,20 +177,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 		})
 	}
 
-	if err := rep.Text(stdout); err != nil {
+	if err := format(rep, stdout); err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
 	}
 
-	// The exit code is stated in the output as well as returned. A CI log that
-	// ends in a bare non-zero status makes the reader go looking for the
-	// reason, and the reason is already on screen.
+	// The exit code is stated in the output as well as returned: a CI log that
+	// ends in a bare non-zero status makes the reader go looking for a reason
+	// already on screen. Text only - appending a sentence to JSON would leave
+	// it unparseable, and every machine format already carries the counts.
+	text := opt.output == "text"
 	switch {
 	case rep.Unevaluable() > 0:
-		fmt.Fprintln(stdout, "  exit 2 — a chart could not be rendered")
+		if text {
+			fmt.Fprintln(stdout, "  exit 2 — a chart could not be rendered")
+		}
 		return exitFatal
 	case opt.strict && rep.Churning() > 0:
-		fmt.Fprintln(stdout, "  exit 1")
+		if text {
+			fmt.Fprintln(stdout, "  exit 1")
+		}
 		return exitFinding
 	}
 	return exitOK
@@ -225,6 +242,7 @@ type options struct {
 	chartVersion string
 	jobs         int
 	engine       string
+	output       string
 	showVersion  bool
 }
 
@@ -291,6 +309,24 @@ func chartPath(root, dir string) string {
 		return ""
 	}
 	return filepath.ToSlash(rel)
+}
+
+// formatter resolves -o to the rendering it names.
+//
+// Validated before anything is rendered, so a typo costs a millisecond rather
+// than a minute of helm.
+func formatter(name string) (func(report.Report, io.Writer) error, error) {
+	switch name {
+	case "text":
+		return report.Report.Text, nil
+	case "json":
+		return report.Report.JSON, nil
+	case "markdown":
+		return report.Report.Markdown, nil
+	case "github":
+		return report.Report.GitHub, nil
+	}
+	return nil, fmt.Errorf("unknown output format %q: valid values are text, json, markdown, github", name)
 }
 
 // selectEngines resolves which engines' verdicts to display.
