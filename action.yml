@@ -1,0 +1,102 @@
+name: idem
+description: Check whether Helm charts render consistently under the GitOps engine you run
+author: pcanilho
+
+branding:
+  icon: repeat
+  color: blue
+
+inputs:
+  args:
+    description: |
+      Arguments passed to idem. The output format is supplied separately via
+      `output`, so do not pass -o here.
+    required: false
+    default: "."
+
+  version:
+    description: |
+      Release to install, e.g. "v0.1.0". "latest" resolves the newest release
+      at run time, which is convenient but means a new release can change your
+      CI result with no change to your workflow. Pin it for reproducible runs.
+    required: false
+    default: latest
+
+  output:
+    description: |
+      github    inline annotations on the diff (default)
+      text      human-readable, for reading in the log
+      json      machine-readable
+      markdown  shaped for `gh pr comment --body-file`
+    required: false
+    default: github
+
+  working-directory:
+    description: Directory to run in.
+    required: false
+    default: "."
+
+  helm-version:
+    description: |
+      Helm to install and render with. idem shells out to whatever `helm` is on
+      PATH, and results can depend on which one: ArgoCD 3.4 shipped Helm 3.19
+      and 3.5 ships Helm 4.2. Pin this to whatever your ArgoCD runs, or leave
+      empty to use the helm already on the runner.
+    required: false
+    default: ""
+
+outputs:
+  findings:
+    description: Number of findings reported.
+    value: ${{ steps.run.outputs.findings }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install helm
+      if: inputs.helm-version != ''
+      uses: azure/setup-helm@v4
+      with:
+        version: ${{ inputs.helm-version }}
+
+    - name: Install idem
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        case "$(uname -m)" in
+          x86_64|amd64) arch=amd64 ;;
+          arm64|aarch64) arch=arm64 ;;
+          *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+        esac
+
+        if [ "$VERSION" = "latest" ]; then
+          VERSION=$(gh release view --repo pcanilho/idem --json tagName -q .tagName)
+          echo "::notice::resolved idem latest to $VERSION -- pin \`version:\` for reproducible runs"
+        fi
+
+        mkdir -p "$RUNNER_TEMP/idem"
+        gh release download "$VERSION" --repo pcanilho/idem \
+          --pattern "idem_${os}_${arch}.tar.gz" --dir "$RUNNER_TEMP/idem"
+        tar -xzf "$RUNNER_TEMP/idem"/idem_*.tar.gz -C "$RUNNER_TEMP/idem"
+        echo "$RUNNER_TEMP/idem" >> "$GITHUB_PATH"
+
+    - name: Run idem
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -uo pipefail
+        idem ${{ inputs.args }} -o ${{ inputs.output }}
+        status=$?
+
+        # 0 = ran clean, 1 = findings with --strict, 2 = could not render.
+        # Only 2 is a failure of idem itself; 1 is a deliberate gate.
+        if [ $status -eq 2 ]; then
+          echo "::error::idem could not render one or more charts"
+        fi
+        exit $status

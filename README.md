@@ -57,7 +57,8 @@ Two different values. Five renders give five passwords.
 ## Status
 
 **Early, and not yet released.** The comparison engine, manifest parsing, path addressing and
-chart-reference handling are built and tested. The CLI is not. Everything below is the
+chart-reference handling are built and tested. The CLI is not, and `action.yml` downloads a
+release that does not exist yet. Everything below is the
 intended interface — a specification, not a demo. The `helm template` snippet above is the one
 thing you can reproduce today.
 
@@ -185,7 +186,7 @@ That is the whole surface:
       --new-from-merge-base REF   same, against the merge base with REF
       --repo        chart repository URL, as helm's --repo
       --version     chart version
-  -o                text, json or markdown                (default text)
+  -o                text, json, markdown or github        (default text)
   -v                expand every finding
 ```
 
@@ -235,6 +236,53 @@ the whole CI integration:
 
 **No HTML, CSV or SARIF in v1.** JSON covers every machine consumer, markdown covers the human
 one that matters, and each additional format is a rendering to maintain forever.
+
+### GitHub Actions
+
+`idem` ships an action, and it is thin on purpose — the tool knows how to emit annotations, the
+action only installs and runs it:
+
+```yaml
+- uses: pcanilho/idem@v1
+  with:
+    args: ./charts --new-from-merge-base ${{ github.base_ref }}
+    helm-version: 4.2.1       # match whatever your ArgoCD runs
+```
+
+The action lives in this repo rather than a separate one, is composite rather than Docker (no
+image pull), and pins nothing for you: `version: latest` resolves at run time and says so in the
+log, because a new release silently changing your CI result is the same class of surprise this
+tool exists to report.
+
+`-o github` emits workflow commands (`::error file=…,line=…::`), so findings appear **inline on
+the diff** in Files Changed — no token, no API calls, no `pull-requests: write` permission.
+
+**Which findings can be pinned to a line, and which cannot.** This is worth stating plainly,
+because a tool that annotates the wrong line is worse than one that annotates nothing:
+
+| Finding | Repo location | Annotation |
+|---|---|---|
+| Floating dependency | `Chart.yaml`, the dependency's own line | **exact line** |
+| Potential (static scan) | the template, at the function call | **exact line** |
+| Observed, local chart | the template, from `# Source:` — no line | **file-level** |
+| Observed, remote chart | nothing in the repo | **summary only** |
+
+`helm template` marks each document with the template that produced it but carries no line
+numbers, and connecting a rendered field back to the template line that emitted it is the
+attribution problem `idem` deliberately does not attempt. So an observed finding annotates the
+file, not a guessed line.
+
+Findings with no repo location — anything from an OCI or `--repo` chart — are not dropped; they
+go in the summary comment instead:
+
+```yaml
+- run: idem ./charts -o markdown > /tmp/idem.md
+- run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
+```
+
+Use both together: annotations for what has a line, one comment for the rest. GitHub also caps
+how many annotations it will render per run, so `-o github` prints the cap it hit rather than
+letting findings disappear silently.
 
 **There is no rules file and no exceptions file, deliberately.** Suppression is something you
 need *after* you have run a tool and disagreed with it — nobody has exceptions on day one. If
