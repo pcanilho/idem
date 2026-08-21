@@ -39,6 +39,14 @@ type Chart struct {
 // serial tail - and so that --jobs bounds all the work, not just some of it.
 type Inspect func(Chart) ([]analyze.Use, error)
 
+// Prepare readies a chart for rendering, returning the spec to render and a
+// cleanup to run once its rounds are done.
+//
+// Runs before the rounds rather than alongside them: every round renders the
+// same prepared chart, and letting each round resolve dependencies for itself
+// would do the work N times and race on the same directory.
+type Prepare func(Chart) (engine.Spec, func(), error)
+
 // Result is one chart's outcome. Err set means the chart could not be
 // rendered, which is exit 2 - never a silent skip.
 type Result struct {
@@ -57,7 +65,7 @@ type Result struct {
 //
 // Results come back in the order the charts were given, whatever order they
 // finished in. A tool that reports non-determinism cannot exhibit it.
-func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, inspect Inspect) []Result {
+func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, inspect Inspect, prepare Prepare) []Result {
 	// One semaphore for every render in the run, so the two levels of
 	// parallelism cannot multiply into charts*rounds processes at once.
 	gate := make(chan struct{}, resolveJobs(jobs))
@@ -66,7 +74,7 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, i
 	var wg sync.WaitGroup
 	for i, c := range charts {
 		wg.Go(func() {
-			results[i] = one(ctx, r, c, rounds, gate, inspect)
+			results[i] = one(ctx, r, c, rounds, gate, inspect, prepare)
 		})
 	}
 	wg.Wait()
@@ -78,9 +86,24 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, i
 //
 // The chart's goroutine never holds the gate itself - only the renders do - so
 // charts waiting on their rounds cannot starve the pool.
-func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}, inspect Inspect) Result {
+func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}, inspect Inspect, prepare Prepare) Result {
 	if rounds < 2 {
 		return Result{Chart: c, Err: fmt.Errorf("checking %s: rounds is %d, and at least 2 renders are needed", c.Name, rounds)}
+	}
+
+	spec := c.Spec
+	if prepare != nil {
+		gate <- struct{}{}
+		prepared, cleanup, err := prepare(c)
+		<-gate
+
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err != nil {
+			return Result{Chart: c, Err: fmt.Errorf("preparing %s: %w", c.Name, err)}
+		}
+		spec = prepared
 	}
 
 	renders := make([][]manifest.Object, rounds)
@@ -96,7 +119,7 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 			gate <- struct{}{}
 			defer func() { <-gate }()
 
-			renders[round], errs[round] = r.Render(ctx, c.Spec)
+			renders[round], errs[round] = r.Render(ctx, spec)
 		})
 	}
 

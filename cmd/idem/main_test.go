@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -560,5 +561,49 @@ func TestAnUnknownOutputFormatIsRejected(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr = %q, want it to mention %q", stderr, want)
 		}
+	}
+}
+
+func TestNoDepsAndDependencyUpdateContradictEachOther(t *testing.T) {
+	code, _, stderr := invoke(t, "testdata/clean", "--no-deps", "--dependency-update")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "contradict") {
+		t.Errorf("stderr = %q, want the conflict explained", stderr)
+	}
+}
+
+func TestAChartMissingSubchartsUnderNoDepsSaysWhatToRun(t *testing.T) {
+	requireHelm(t)
+
+	// Airgapped or byte-reproducible runs fetch nothing. The chart becomes
+	// unevaluable rather than silently skipped, with the command that fixes it.
+	code, stdout, _ := invoke(t, "testdata/umbrella", "--no-deps")
+
+	if code != exitFatal {
+		t.Fatalf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stdout, "helm dependency build") {
+		t.Errorf("stdout = %q, want the command named", stdout)
+	}
+}
+
+func TestAChartMissingSubchartsIsResolvedWithoutTouchingIt(t *testing.T) {
+	requireHelm(t)
+
+	// The default path: copy out, resolve there, discard. idem never writes to
+	// your repository unless you pass --dependency-update.
+	code, stdout, stderr := invoke(t, "testdata/umbrella")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d (stderr: %s)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "resolved in a temp dir") {
+		t.Errorf("stdout = %q, want the resolution reported", stdout)
+	}
+	if _, err := os.Stat("testdata/umbrella/parent/charts"); err == nil {
+		t.Error("testdata/umbrella/parent/charts exists; idem wrote into the chart")
 	}
 }

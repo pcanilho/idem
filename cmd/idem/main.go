@@ -18,10 +18,12 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/chartref"
 	"github.com/pcanilho/idem/internal/delivery"
+	"github.com/pcanilho/idem/internal/deps"
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
@@ -69,6 +71,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
 	fs.StringVar(&opt.engine, "engine", "auto", "argocd, flux, helm, all, or auto")
 	fs.StringVar(&opt.output, "o", "text", "text, json, markdown or github")
+	fs.BoolVar(&opt.dependencyUpdate, "dependency-update", false, "resolve missing dependencies in place, not a temp dir")
+	fs.BoolVar(&opt.noDeps, "no-deps", false, "never fetch dependencies")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -95,6 +99,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	format, err := formatter(opt.output)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
+	mode, err := dependencyMode(opt)
 	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
@@ -152,11 +162,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
 	}
 
+	prepare, resolutions := preparer(ctx, mode, h)
+
 	rep := report.Report{
 		Helm: helmVersion, Rounds: opt.rounds,
 		Delivery: deliveryCfg.Files, Engines: shown, Root: root,
 	}
-	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref)) {
+	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref), prepare) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
 		evidence := engines.Evidence{
@@ -168,6 +180,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Name:       result.Chart.Name,
 			Dir:        result.Chart.Dir,
 			RepoDir:    chartPath(root, result.Chart.Dir),
+			Deps:       resolutions.of(result.Chart.Dir),
 			Findings:   applied.Churning,
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
@@ -244,6 +257,9 @@ type options struct {
 	engine       string
 	output       string
 	showVersion  bool
+
+	dependencyUpdate bool
+	noDeps           bool
 }
 
 // specFor builds the render request for one chart.
@@ -371,6 +387,62 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
+// dependencyMode turns the two dependency flags into one decision.
+func dependencyMode(opt options) (deps.Mode, error) {
+	switch {
+	case opt.noDeps && opt.dependencyUpdate:
+		return deps.Never, fmt.Errorf("--no-deps and --dependency-update contradict each other: one forbids fetching, the other writes the result into your chart")
+	case opt.noDeps:
+		return deps.Never, nil
+	case opt.dependencyUpdate:
+		return deps.InPlace, nil
+	}
+	return deps.TempDir, nil
+}
+
+// resolutions records how each chart was made renderable, for the provenance
+// line. Written from the worker pool, so it is guarded.
+type resolutions struct {
+	mu   sync.Mutex
+	kind map[string]string
+}
+
+func (r *resolutions) record(dir string, kind deps.Kind) {
+	if kind == deps.Vendored {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kind[dir] = kind.String()
+}
+
+func (r *resolutions) of(dir string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.kind[dir]
+}
+
+// preparer resolves a chart's dependencies before its rounds render.
+//
+// A chart whose subcharts are absent cannot render at all, and the fix must
+// not dirty the working tree: by default the chart is copied out, resolved
+// there, and the copy discarded.
+func preparer(ctx context.Context, mode deps.Mode, h helm.Helm) (scan.Prepare, *resolutions) {
+	seen := &resolutions{kind: map[string]string{}}
+
+	return func(c scan.Chart) (engine.Spec, func(), error) {
+		dir, kind, cleanup, err := mode.Prepare(ctx, c.Dir, h)
+		if err != nil {
+			return engine.Spec{}, nil, err
+		}
+		seen.record(c.Dir, kind)
+
+		spec := c.Spec
+		spec.ChartRef = dir
+		return spec, cleanup, nil
+	}, seen
+}
+
 // inspector reads a chart's source for the functions idem flags.
 //
 // Every chart is scanned, not only the churning ones: a chart that renders

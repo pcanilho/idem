@@ -95,6 +95,18 @@ func stripPullPreamble(out []byte) []byte {
 	}
 }
 
+// DependencyBuild fetches the subcharts a chart's Chart.lock pins.
+func (h Helm) DependencyBuild(ctx context.Context, dir string) error {
+	_, err := h.run(ctx, "dependency", "build", dir)
+	return err
+}
+
+// DependencyUpdate re-resolves subcharts and rewrites Chart.lock.
+func (h Helm) DependencyUpdate(ctx context.Context, dir string) error {
+	_, err := h.run(ctx, "dependency", "update", dir)
+	return err
+}
+
 // run executes helm and returns stdout, folding stderr into any error.
 //
 // helm's own stderr is the actionable part of a failure - "found in Chart.yaml

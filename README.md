@@ -77,7 +77,9 @@ fatal — because the failure that motivated `idem` was a pin that silently stop
 
 All four output formats work: `text`, `json`, `markdown` and `github`.
 
-Not yet built: dependency resolution, `--new-from-rev`, `--cluster` and `doctor`. Engine
+Dependency resolution works as described below, without ever writing to your repository.
+
+Not yet built: `--new-from-rev`, `--cluster` and `doctor`. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

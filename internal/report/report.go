@@ -40,6 +40,10 @@ type Chart struct {
 	// when the chart is not inside it. Only used to place annotations.
 	RepoDir string
 
+	// Deps is how the chart was made renderable, when that took any work.
+	// Empty means it was renderable as it stood.
+	Deps string
+
 	Findings []check.Finding
 
 	// Verdicts is what each selected engine does with this chart. Empty when
@@ -139,7 +143,7 @@ func (r Report) Text(w io.Writer) error {
 		indent = "  "
 	}
 	fmt.Fprintf(&b, "%s%s\n", indent, r.verdict())
-	fmt.Fprintf(&b, "  helm %s · %d rounds%s\n", r.Helm, r.Rounds, r.deliveryNote())
+	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s\n", r.Helm, r.Rounds, r.depsNote(), r.deliveryNote())
 	writeRemediation(&b, r.Charts)
 
 	_, err := io.WriteString(w, b.String())
@@ -271,6 +275,33 @@ func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding) {
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
 		fmt.Fprintf(tw, "    \t… and %d more %s\t\n", elided, plural(elided, "field", "fields"))
 	}
+}
+
+// depsNote says what idem had to do to render at all.
+//
+// Only when something was actually resolved: on a repository that vendors its
+// subcharts - which is most of them - nothing happened and saying so is noise.
+func (r Report) depsNote() string {
+	counts := make(map[string]int)
+	for _, c := range r.Charts {
+		if c.Deps != "" {
+			counts[c.Deps]++
+		}
+	}
+	if len(counts) == 0 {
+		return ""
+	}
+
+	resolved := 0
+	parts := make([]string, 0, len(counts)+1)
+	for _, kind := range slices.Sorted(maps.Keys(counts)) {
+		resolved += counts[kind]
+		parts = append(parts, fmt.Sprintf("%d %s", counts[kind], kind))
+	}
+	if vendored := len(r.Charts) - resolved; vendored > 0 {
+		parts = append([]string{fmt.Sprintf("%d vendored", vendored)}, parts...)
+	}
+	return " · " + strings.Join(parts, ", ")
 }
 
 // deliveryNote acknowledges the manifests idem read outside the chart tree.
