@@ -9,11 +9,13 @@ package remediate
 import (
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/diff"
 )
 
 // Entry is one ArgoCD ignoreDifferences entry.
@@ -40,16 +42,11 @@ func Entries(findings []check.Finding) []Entry {
 		key := ref.Key()
 		entry, seen := byKey[key]
 		if !seen {
-			group, _, _ := strings.Cut(ref.APIVersion, "/")
-			if !strings.Contains(ref.APIVersion, "/") {
-				// A core object's apiVersion is just "v1" - no group at all.
-				group = ""
-			}
-			entry = &Entry{Group: group, Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name}
+			entry = &Entry{Group: groupOf(ref.APIVersion), Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name}
 			byKey[key] = entry
 		}
 		for _, p := range f.Change.Paths {
-			entry.Pointers = append(entry.Pointers, p.Path.JSONPointer())
+			entry.Pointers = append(entry.Pointers, evaluablePointers(ref, p.Path.JSONPointer())...)
 		}
 	}
 
@@ -58,6 +55,12 @@ func Entries(findings []check.Finding) []Entry {
 		entry := byKey[key]
 		slices.Sort(entry.Pointers)
 		entry.Pointers = slices.Compact(entry.Pointers)
+		// Every pointer for this object turned out to be one ArgoCD would
+		// never evaluate. An entry with no jsonPointers is a block that
+		// silently does nothing, which is the failure being removed here.
+		if len(entry.Pointers) == 0 {
+			continue
+		}
 		out = append(out, *entry)
 	}
 
@@ -67,6 +70,96 @@ func Entries(findings []check.Finding) []Entry {
 		return strings.Compare(sortKey(a), sortKey(b))
 	})
 	return out
+}
+
+// groupOf extracts the API group. A core object's apiVersion is just "v1",
+// which is no group at all rather than a group named "v1".
+func groupOf(apiVersion string) string {
+	group, _, found := strings.Cut(apiVersion, "/")
+	if !found {
+		return ""
+	}
+	return group
+}
+
+// evaluablePointers turns one pointer derived from a RENDER into the pointers
+// ArgoCD will actually evaluate - which is not the same thing.
+//
+// ArgoCD normalises an object before applying ignoreDifferences, so a pointer
+// describing the rendered shape can address a path that no longer exists. When
+// that happens the RFC6902 remove op fails and argo-cd's shouldLogError
+// explicitly suppresses "doc is missing path" - no error, no warning, not even
+// a debug line, and the suppression the user pasted simply never applies.
+//
+// Returns two pointers where both forms are needed, and none where the path is
+// not reliably addressable at all.
+func evaluablePointers(ref diff.ObjectRef, pointer string) []string {
+	segments := pointerSegments(pointer)
+	if len(segments) == 0 {
+		return nil
+	}
+
+	// Removed from both sides before ignoreDifferences runs, so a pointer at
+	// it can never match.
+	if pointer == "/metadata/creationTimestamp" {
+		return nil
+	}
+	// ArgoCD injects a */* -> /status ignore by default, making this redundant.
+	if segments[0] == "status" {
+		return nil
+	}
+
+	group := groupOf(ref.APIVersion)
+	switch {
+	case group == "" && ref.Kind == "Secret":
+		if segments[0] != "stringData" {
+			break
+		}
+		// NormalizeSecret base64-encodes stringData into data and deletes the
+		// stringData key, so the diff only ever sees /data. But the
+		// RespectIgnoreDifferences sync path applies pointers to the raw
+		// target, which still has stringData - so /data suppresses the diff
+		// while /stringData is what stops selfHeal overwriting the value.
+		// Whichever path a user is on, the other pointer is a silent no-op.
+		return []string{"/data" + strings.TrimPrefix(pointer, "/stringData"), pointer}
+
+	case group == "rbac.authorization.k8s.io" && (ref.Kind == "Role" || ref.Kind == "ClusterRole"):
+		// normalizeRole nulls an empty rules array, and nulls rules entirely
+		// for an aggregated ClusterRole. An index into it addresses nothing
+		// dependable.
+		if indexedUnder(segments, "rules") {
+			return nil
+		}
+
+	case group == "" && ref.Kind == "Endpoints":
+		// normalizeEndpoint sorts subsets before diffing, so index N in the
+		// render is not index N in what ArgoCD compares.
+		if indexedUnder(segments, "subsets") {
+			return nil
+		}
+	}
+
+	return []string{pointer}
+}
+
+// pointerSegments splits an RFC 6901 pointer.
+//
+// Exact rather than heuristic: the encoding escapes "/" as "~1", so a segment
+// can never contain a raw slash.
+func pointerSegments(pointer string) []string {
+	if pointer == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimPrefix(pointer, "/"), "/")
+}
+
+// indexedUnder reports whether the pointer indexes into the named top-level array.
+func indexedUnder(segments []string, field string) bool {
+	if len(segments) < 2 || segments[0] != field {
+		return false
+	}
+	_, err := strconv.Atoi(segments[1])
+	return err == nil
 }
 
 func sortKey(e Entry) string {

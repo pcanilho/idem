@@ -274,6 +274,15 @@ func writeRemediation(b *strings.Builder, charts []Chart) {
 	for line := range strings.SplitSeq(strings.TrimRight(remediate.YAML(entries), "\n"), "\n") {
 		b.WriteString("    " + line + "\n")
 	}
+	// These pointers are computed for ArgoCD's default diff. Under
+	// ServerSideDiff=true the ignore normalizer never sees the rendered config
+	// at all - pointers must describe the API server's dry-run output, which
+	// two `helm template` runs cannot observe. Saying so beats implying the
+	// block works everywhere. (ServerSideApply=true is a different option on a
+	// different code path and does not affect these pointers.)
+	b.WriteString("\n  Computed for ArgoCD's default diff. With ServerSideDiff=true, pointers must\n")
+	b.WriteString("  describe the API server's dry-run output, which idem cannot see.\n")
+
 	// Blank line so an exit-code line printed after the report does not read
 	// as part of the YAML the user is about to paste.
 	b.WriteString("\n")

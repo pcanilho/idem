@@ -438,3 +438,19 @@ func TestRemediationBlockIsIndentedWithTheRestOfTheOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestRemediationSaysWhichDiffModeItsPointersAssume(t *testing.T) {
+	// Under ServerSideDiff=true the ignore normalizer never touches the
+	// rendered config at all - pointers must describe the API server's dry-run
+	// output, which two `helm template` runs cannot see. The same block can be
+	// correct in one ArgoCD install and inert in another, so idem says which
+	// one it computed for rather than implying it works everywhere.
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".data.key")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "ServerSideDiff") {
+		t.Errorf("Text() = %q, want the diff-mode caveat", got)
+	}
+}
