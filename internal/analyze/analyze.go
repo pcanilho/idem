@@ -72,6 +72,12 @@ var Functions = []Function{
 	{"now", "time"},
 	{"ago", "time"},
 	{"getHostByName", "DNS"},
+	// keys and values build a slice from Go map iteration order and never
+	// sort it. Unlike a fresh UUID the result looks plausible in a diff, so a
+	// reviewer waves it through - which makes these the most dangerous of the
+	// set rather than the most obscure. sortAlpha is the fix.
+	{"keys", "map order"},
+	{"values", "map order"},
 	{Lookup, "cluster state"},
 }
 
@@ -226,7 +232,7 @@ func scan(file, body string) []Use {
 				Function: line[m[0]:m[1]],
 				File:     file,
 				Line:     i + 1,
-				Call:     looksLikeCall(line, m[1]),
+				Call:     looksLikeCall(line, m[0], m[1]),
 			})
 		}
 	}
@@ -234,18 +240,46 @@ func scan(file, body string) []Use {
 }
 
 // looksLikeCall reports whether the name at this position reads as an
-// invocation rather than a word in a comment.
+// invocation rather than a word in prose or a field path.
 //
-// Evidence quality only - never a verdict. A template call is followed by its
-// arguments or by the end of the action, so the next non-space character is
-// punctuation or a digit; prose continues with another word.
-func looksLikeCall(line string, end int) bool {
+// It has to be strict, because `keys` and `values` are ordinary words: without
+// this, every `.Values.keys` and every YAML field called `keys:` becomes a
+// warning, and a tool that cries wolf about the potential case teaches you to
+// distrust it about the observed one.
+//
+// The asymmetry with lookup is deliberate and runs the other way. There, a
+// false positive downgrades a verdict to `unknown` and costs nothing, so
+// detection over-matches; every use is still recorded here whatever this
+// returns. Only the potential findings are filtered by it, where a false
+// positive costs trust and a false negative costs at most a warning about
+// something the observed check would catch anyway if it ever fired.
+func looksLikeCall(line string, start, end int) bool {
 	rest := strings.TrimLeft(line[end:], " \t")
-	if rest == "" {
+	if rest != "" && unicode.IsLetter(rune(rest[0])) {
+		return false
+	}
+	return inFunctionPosition(line[:start])
+}
+
+// callPrefixes are the tokens a function name can directly follow.
+var callPrefixes = []string{"{{", "{{-", "(", "|", ":=", "="}
+
+// callKeywords are template keywords that take a function as their argument.
+var callKeywords = []string{"if", "with", "range", "and", "or", "not", "default", "else"}
+
+// inFunctionPosition reports whether what precedes the name puts it in
+// function position rather than in a field path or a sentence.
+func inFunctionPosition(before string) bool {
+	before = strings.TrimRight(before, " \t")
+	if before == "" {
+		return false
+	}
+	if slices.ContainsFunc(callPrefixes, func(p string) bool { return strings.HasSuffix(before, p) }) {
 		return true
 	}
-	next := rune(rest[0])
-	return !unicode.IsLetter(next)
+
+	fields := strings.Fields(before)
+	return slices.Contains(callKeywords, fields[len(fields)-1])
 }
 
 // scanArchive reads a vendored subchart without unpacking it.
@@ -301,10 +335,10 @@ func scanArchive(p string) ([]Use, error) {
 func Potential(uses []Use) []Use {
 	best := make(map[string]Use)
 	for _, u := range uses {
-		if u.Function == Lookup {
+		if u.Function == Lookup || !u.Call {
 			continue
 		}
-		if seen, ok := best[u.Function]; ok && (seen.Call || !u.Call) {
+		if _, ok := best[u.Function]; ok {
 			continue
 		}
 		best[u.Function] = u

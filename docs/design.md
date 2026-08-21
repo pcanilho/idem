@@ -203,7 +203,19 @@ Helm 4.2 pin, so one list covers both lines:
 `randAlphaNum`, `randAlpha`, `randNumeric`, `randAscii`, `randBytes`, `randInt`, `shuffle`,
 `uuidv4`, `bcrypt`, `htpasswd`, `genPrivateKey`, `genCA`, `genCAWithKey`, `genSelfSignedCert`,
 `genSelfSignedCertWithKey`, `genSignedCert`, `genSignedCertWithKey`, `encryptAES`, `now`,
-`ago`, `getHostByName` — plus `lookup`.
+`ago`, `getHostByName`, `keys`, `values` — plus `lookup`.
+
+`keys` and `values` were missed by the first audit and are arguably the worst of the set. They
+build a slice from Go's map iteration order and never sort it, so they reorder on **every**
+render — and unlike a fresh UUID the result looks plausible in a diff, so a human reviewing the
+output waves it through. `sortAlpha` is the fix. Because both are ordinary English words, they
+are only reported where they read as an actual call: `.Values.keys` and a YAML field named
+`keys:` are not warnings.
+
+`env` and `expandenv` are deliberately absent: Helm **deletes** them from the function map, so a
+chart calling one fails to parse. `hostname` is absent because sprig v3.3.0 has no such function.
+`getHostByName` is included even though Helm stubs it to `""` without `--enable-dns`, since a
+chart cannot control the flag its consumer passes.
 
 Deterministic despite appearances, and deliberately **not** flagged: `derivePassword`,
 `buildCustomCert`, `decryptAES`.

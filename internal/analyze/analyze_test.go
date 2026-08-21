@@ -418,8 +418,8 @@ func TestTheFlaggedSetMatchesTheAudit(t *testing.T) {
 	// docs/design.md §5 pins this list, audited against sprig v3.3.0 - which
 	// both Helm 3.19 and Helm 4.2 pin, so one list covers both lines. If the
 	// set changes, that document changes with it.
-	if got, want := len(Functions), 22; got != want {
-		t.Errorf("Functions has %d entries, want %d (21 sprig + lookup)", got, want)
+	if got, want := len(Functions), 24; got != want {
+		t.Errorf("Functions has %d entries, want %d (23 sprig + lookup)", got, want)
 	}
 }
 
@@ -467,6 +467,17 @@ func TestPotentialPrefersACallSiteOverAMention(t *testing.T) {
 	}
 }
 
+func TestPotentialUsesTheFirstCallSiteWhenThereAreSeveral(t *testing.T) {
+	uses := []Use{
+		{Function: "now", File: "a.yaml", Line: 3, Call: true},
+		{Function: "now", File: "b.yaml", Line: 9, Call: true},
+	}
+
+	if got := Potential(uses); len(got) != 1 || got[0].Line != 3 {
+		t.Errorf("Potential() = %+v, want the first call site", got)
+	}
+}
+
 func TestPotentialExcludesLookup(t *testing.T) {
 	// lookup is what STABILISES a value under an engine that resolves it, and
 	// its presence is already reported as the Flux and Helm verdict. Listing
@@ -493,5 +504,84 @@ func TestPotentialIsOrderedBySourcePosition(t *testing.T) {
 
 	if got[0].File != "a.yaml" {
 		t.Errorf("Potential() = %+v, want source order", got)
+	}
+}
+
+func TestMapOrderFunctionsAreFlagged(t *testing.T) {
+	// `keys` and `values` build a SLICE from Go map iteration order and never
+	// sort it, so they reorder on every render. Unlike a fresh UUID this looks
+	// plausible in a diff, so a human reviewing the output waves it through -
+	// which makes it the worst of the set, not the most obscure.
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "cm.yaml"),
+		"data:\n  a: {{ keys .Values.config | join \",\" }}\n  b: {{ values .Values.config | join \",\" }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	names := namesOf(got)
+	for _, want := range []string{"keys", "values"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("Find() = %v, want %q flagged", names, want)
+		}
+	}
+}
+
+func TestAFieldNamedKeysIsNotMistakenForTheFunction(t *testing.T) {
+	// "keys" and "values" are ordinary words. Flagging `.Values.keys` or a
+	// YAML field called keys: would bury the real warnings in noise, and a
+	// tool that cries wolf about the potential case teaches you to distrust it
+	// about the observed one.
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "cm.yaml"),
+		"keys:\n  - a\ndata:\n  x: {{ .Values.keys }}\n  y: {{ .Values.values }}\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	if len(Potential(got)) != 0 {
+		t.Errorf("Potential() = %+v, want none - none of these is a call", Potential(got))
+	}
+}
+
+func TestPotentialKeepsOnlyCallSites(t *testing.T) {
+	// The asymmetry is deliberate and the reverse of lookup's. A false
+	// positive in a verdict costs nothing (it downgrades to unknown); a false
+	// positive here costs trust. So potential findings take only what reads as
+	// a real call, accepting that an unrecognised one is missed - the observed
+	// check still catches it if it ever actually fires.
+	uses := []Use{
+		{Function: "now", File: "a.yaml", Line: 1, Call: false},
+		{Function: "genCA", File: "a.yaml", Line: 2, Call: true},
+	}
+
+	got := Potential(uses)
+
+	if len(got) != 1 || got[0].Function != "genCA" {
+		t.Errorf("Potential() = %+v, want only the call site", got)
+	}
+}
+
+func TestACallIsRecognisedInEveryOrdinaryTemplatePosition(t *testing.T) {
+	dir := chartDir(t, "acme")
+	write(t, filepath.Join(dir, "templates", "s.yaml"), strings.Join([]string{
+		`a: {{ now }}`,
+		`b: {{- randAlphaNum 8 }}`,
+		`c: {{ $x := uuidv4 }}`,
+		`d: {{ .Values.p | default (randBytes 16) }}`,
+		`e: {{ if getHostByName "x" }}y{{ end }}`,
+	}, "\n")+"\n")
+
+	got, err := Find(dir)
+	if err != nil {
+		t.Fatalf("Find() error = %v", err)
+	}
+	names := namesOf(Potential(got))
+	for _, want := range []string{"now", "randAlphaNum", "uuidv4", "randBytes", "getHostByName"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("Potential() = %v, want %q recognised as a call", names, want)
+		}
 	}
 }
