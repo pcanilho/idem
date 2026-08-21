@@ -1,2 +1,10 @@
 /dist/
 /idem
+
+# Local working plan -- not documentation. The committed docs are README.md and
+# docs/design.md.
+#
+# ANCHORED TO THE REPO ROOT ON PURPOSE. Unanchored, `PLAN_V1.md` matches a file
+# of that name in ANY directory -- and because git sets core.ignorecase on
+# macOS, the match is case-insensitive too.
+/PLAN_V1.md
