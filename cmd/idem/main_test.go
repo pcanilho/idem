@@ -449,3 +449,52 @@ func TestACleanChartGetsNoVerdictBlock(t *testing.T) {
 		t.Errorf("stdout = %q, want no verdicts when there is nothing to explain", stdout)
 	}
 }
+
+func TestAutoUsesTheEnginesTheRepositoryActuallyUses(t *testing.T) {
+	got, err := selectEngines("auto", []string{"argocd"})
+	if err != nil {
+		t.Fatalf("selectEngines() error = %v", err)
+	}
+	if strings.Join(got, ",") != "argocd" {
+		t.Errorf("selectEngines() = %v, want just argocd", got)
+	}
+}
+
+func TestAutoShowsAllThreeWhenNoDeliveryConfigWasFound(t *testing.T) {
+	// No signal either way is exactly when you are evaluating a chart and want
+	// to know what every engine would do with it.
+	got, err := selectEngines("auto", nil)
+	if err != nil {
+		t.Fatalf("selectEngines() error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("selectEngines() = %v, want all three", got)
+	}
+}
+
+func TestAnExplicitEngineOverridesWhatWasDetected(t *testing.T) {
+	got, err := selectEngines("flux", []string{"argocd"})
+	if err != nil {
+		t.Fatalf("selectEngines() error = %v", err)
+	}
+	if strings.Join(got, ",") != "flux" {
+		t.Errorf("selectEngines() = %v, want flux", got)
+	}
+}
+
+func TestAutoFallsBackToAllThreeWhenTheDetectedEngineIsUnknown(t *testing.T) {
+	// A kind idem does not model must not narrow the answer to nothing.
+	got, err := selectEngines("auto", []string{"fleet"})
+	if err != nil {
+		t.Fatalf("selectEngines() error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("selectEngines() = %v, want all three", got)
+	}
+}
+
+func TestSelectEnginesStillRejectsAnUnknownFlag(t *testing.T) {
+	if _, err := selectEngines("fleet", nil); err == nil {
+		t.Error("selectEngines() error = nil, want the bad flag rejected")
+	}
+}

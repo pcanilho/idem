@@ -66,7 +66,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
-	fs.StringVar(&opt.engine, "engine", "all", "argocd, flux, helm, or all")
+	fs.StringVar(&opt.engine, "engine", "auto", "argocd, flux, helm, all, or auto")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -85,8 +85,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 
-	targets, err := engines.Select(opt.engine)
-	if err != nil {
+	// Validated before anything is rendered, so a bad value fails in a
+	// millisecond rather than after a minute of helm.
+	if _, err := selectEngines(opt.engine, nil); err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
 	}
@@ -121,6 +122,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		deliveryCfg = delivery.Config{}
 	}
 
+	shown, err := selectEngines(opt.engine, deliveryCfg.Engines)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
 	h := helm.New(opt.helmBin)
 	ctx := context.Background()
 
@@ -137,7 +144,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
 	}
 
-	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds, Delivery: deliveryCfg.Files}
+	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds, Delivery: deliveryCfg.Files, Engines: shown}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
@@ -147,7 +154,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Findings:   applied.Churning,
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
-			Verdicts:   verdictsFor(ref, result, targets),
+			Verdicts:   verdictsFor(ref, result),
 			Err:        result.Err,
 		})
 	}
@@ -279,11 +286,51 @@ func chartPath(root, dir string) string {
 	return filepath.ToSlash(rel)
 }
 
-// verdictsFor works out what each selected engine does with this chart.
-//
 // Only charts that actually churn get verdicts: a verdict answers "what does
 // this finding mean for me", and a clean chart has no finding to explain.
-func verdictsFor(ref chartref.Ref, result scan.Result, targets []engines.Target) []engine.Verdict {
+// selectEngines resolves which engines' verdicts to display.
+//
+// "auto" takes the engines the repository actually uses, which is what the
+// delivery config just told us. With no signal either way it shows all three,
+// because that is exactly when you are evaluating a chart and want to know.
+func selectEngines(flag string, detected []string) ([]string, error) {
+	if flag != "auto" {
+		targets, err := engines.Select(flag)
+		if err != nil {
+			return nil, err
+		}
+		return names(targets), nil
+	}
+
+	var out []string
+	for _, id := range detected {
+		if targets, err := engines.Select(id); err == nil {
+			out = append(out, names(targets)...)
+		}
+	}
+	// Nothing detected, or nothing idem models. Either way, narrowing to
+	// nothing would report less than it checked.
+	if len(out) == 0 {
+		return names(engines.All()), nil
+	}
+	return out, nil
+}
+
+func names(targets []engines.Target) []string {
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, t.Name())
+	}
+	return out
+}
+
+// verdictsFor works out what each engine does with this chart.
+//
+// Always every engine, whatever --engine selects for display: the "no lookup
+// anywhere, so this is a chart defect" conclusion is only reachable from an
+// engine that resolves lookup, and it is worth having even when the reader
+// only asked about ArgoCD.
+func verdictsFor(ref chartref.Ref, result scan.Result) []engine.Verdict {
 	if result.Err != nil || len(result.Findings) == 0 {
 		return nil
 	}
@@ -300,8 +347,9 @@ func verdictsFor(ref chartref.Ref, result scan.Result, targets []engines.Target)
 		ev.Err = fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind)
 	}
 
-	out := make([]engine.Verdict, 0, len(targets))
-	for _, t := range targets {
+	all := engines.All()
+	out := make([]engine.Verdict, 0, len(all))
+	for _, t := range all {
 		out = append(out, t.Verdict(ev))
 	}
 	return out

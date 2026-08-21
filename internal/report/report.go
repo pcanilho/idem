@@ -60,6 +60,14 @@ type Report struct {
 	// Delivery names the engine manifests idem read. Reading files outside the
 	// chart directory has to be as visible as which helm it rendered with.
 	Delivery []string
+
+	// Engines are the engine names whose verdicts to display. Empty shows all.
+	//
+	// A chart's verdicts are always computed for every engine even when only
+	// one is shown, because the "no lookup anywhere, so this is a chart defect"
+	// conclusion is only reachable from an engine that resolves lookup.
+	// Narrowing the display must not quietly discard it.
+	Engines []string
 }
 
 // Churning counts charts with at least one finding.
@@ -97,7 +105,7 @@ func (r Report) Text(w io.Writer) error {
 		if c.Err != nil || len(c.Findings) == 0 {
 			continue
 		}
-		writeChart(&b, c)
+		writeChart(&b, c, r.Engines)
 		detail = true
 	}
 	if writeSuppressed(&b, r.Charts) {
@@ -125,7 +133,7 @@ func (r Report) Text(w io.Writer) error {
 // writeChart prints one chart's findings, grouped by the template that
 // produced each object - so a chart that regenerates six fields in one
 // template reads as one place to look, not six.
-func writeChart(b *strings.Builder, c Chart) {
+func writeChart(b *strings.Builder, c Chart, show []string) {
 	groups := make(map[string][]check.Finding)
 	for _, f := range c.Findings {
 		key := f.Source
@@ -145,7 +153,7 @@ func writeChart(b *strings.Builder, c Chart) {
 		tw.Flush()
 	}
 
-	writeVerdicts(b, c.Verdicts)
+	writeVerdicts(b, c.Verdicts, show)
 }
 
 // writeVerdicts prints what each engine does with this chart.
@@ -154,16 +162,23 @@ func writeChart(b *strings.Builder, c Chart) {
 // whether the chart calls lookup at all, which is a property of the chart. It
 // becomes per-finding only with --cluster, where each value can be observed
 // separately.
-func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict) {
+func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string) {
 	if len(verdicts) == 0 {
 		return
+	}
+
+	shown := make([]engine.Verdict, 0, len(verdicts))
+	for _, v := range verdicts {
+		if len(show) == 0 || slices.Contains(show, v.Engine) {
+			shown = append(shown, v)
+		}
 	}
 
 	b.WriteString("\n")
 	tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 
 	var previous engine.Verdict
-	for i, v := range verdicts {
+	for i, v := range shown {
 		because := v.Because
 		// Flux and Helm reach the same answer for the same reason. Printing
 		// the sentence twice makes the reader compare two identical lines to

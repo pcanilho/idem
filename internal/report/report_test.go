@@ -589,3 +589,56 @@ func TestProvenanceSaysNothingWhenThereWasNoDeliveryConfig(t *testing.T) {
 		t.Errorf("Text() = %q, want no mention when none was found", got)
 	}
 }
+
+func allThreeChurning() []engine.Verdict {
+	return []engine.Verdict{
+		{Engine: "argocd", Result: engine.Churns, Because: "every sync, forever", Observed: true},
+		{Engine: "flux", Result: engine.Churns, Because: "on every chart or values change"},
+		{Engine: "helm", Result: engine.Churns, Because: "on every `helm upgrade`"},
+	}
+}
+
+func chartWithEngines(vs []engine.Verdict, show []string) Report {
+	return Report{
+		Charts: []Chart{{
+			Name:     "home",
+			Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".data.password")},
+			Verdicts: vs,
+		}},
+		Engines: show,
+		Helm:    "4.2.4", Rounds: 2,
+	}
+}
+
+func TestTextShowsOnlyTheSelectedEngines(t *testing.T) {
+	got := text(t, chartWithEngines(allThreeChurning(), []string{"argocd"}))
+
+	if !strings.Contains(got, "every sync, forever") {
+		t.Errorf("Text() = %q, want the argocd row", got)
+	}
+	if strings.Contains(got, "helm upgrade") {
+		t.Errorf("Text() = %q, want no helm row when only argocd was asked for", got)
+	}
+}
+
+func TestTheChartDefectNoteSurvivesNarrowingToOneEngine(t *testing.T) {
+	// The whole reason all three are computed even when one is shown. "No
+	// lookup anywhere, so this is a chart bug" is only reachable from an
+	// engine that DOES resolve lookup - and it is the single most useful thing
+	// idem says. Narrowing the display must not silently discard it.
+	got := text(t, chartWithEngines(allThreeChurning(), []string{"argocd"}))
+
+	if !strings.Contains(got, "No `lookup` anywhere") {
+		t.Errorf("Text() = %q, want the chart-defect conclusion kept", got)
+	}
+}
+
+func TestAnEmptyEngineSelectionShowsEveryVerdict(t *testing.T) {
+	got := text(t, chartWithEngines(allThreeChurning(), nil))
+
+	for _, want := range []string{"argocd", "flux", "helm"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want the %s row", got, want)
+		}
+	}
+}

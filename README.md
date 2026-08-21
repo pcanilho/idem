@@ -189,7 +189,7 @@ That is the whole surface:
   -f, --values      values file, repeatable                     (as helm)
       --set         set a value, repeatable                     (as helm)
       --rounds      renders to compare                        (default 2)
-      --engine      argocd, flux, helm, or all
+      --engine      argocd, flux, helm, all, or auto
                     (default: auto-detected; all three when undetectable)
       --strict      exit non-zero on findings         (default: report only)
       --helm        helm binary to render with   (default: first on PATH)
