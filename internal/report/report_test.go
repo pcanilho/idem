@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/diff"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/objpath"
@@ -452,5 +453,139 @@ func TestRemediationSaysWhichDiffModeItsPointersAssume(t *testing.T) {
 
 	if !strings.Contains(got, "ServerSideDiff") {
 		t.Errorf("Text() = %q, want the diff-mode caveat", got)
+	}
+}
+
+func suppressed(name, pointer, file string, selfHeal, respected bool) delivery.Suppressed {
+	return delivery.Suppressed{
+		Finding: finding("home/templates/s.yaml", name, ".data.key"),
+		By: delivery.Rule{
+			Kind: "Secret", Name: name, Pointers: []string{pointer},
+			File: file, SelfHeal: selfHeal, Respected: respected,
+		},
+	}
+}
+
+func TestTextListsAlreadySuppressedFindingsSeparately(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", true, true)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "already suppressed") {
+		t.Errorf("Text() = %q, want a section for what is already handled", got)
+	}
+	if !strings.Contains(got, "Secret/creds") {
+		t.Errorf("Text() = %q, want the object named", got)
+	}
+}
+
+func TestTextNamesTheManifestThatSuppressedAFinding(t *testing.T) {
+	// A suppression that changes what idem says must be traceable, or the
+	// reader cannot check the reasoning.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", true, true)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "deployment/apps/home.yaml") {
+		t.Errorf("Text() = %q, want the manifest named", got)
+	}
+}
+
+func TestTextFlagsASuppressionThatSelfHealWillUndo(t *testing.T) {
+	// ignoreDifferences without RespectIgnoreDifferences hides the diff while
+	// selfHeal re-applies the object anyway. The user believes this is handled
+	// and it is not - which is worth more than the original finding.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "lab",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/lab.yaml", true, false)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "selfHeal") {
+		t.Errorf("Text() = %q, want the broken suppression called out", got)
+	}
+	if !strings.Contains(got, "RespectIgnoreDifferences=true") {
+		t.Errorf("Text() = %q, want the one-line fix", got)
+	}
+}
+
+func TestAWorkingSuppressionIsNotFlaggedAsBroken(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", true, true)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "selfHeal will re-apply") {
+		t.Errorf("Text() = %q, want no warning - RespectIgnoreDifferences is set", got)
+	}
+}
+
+func TestASuppressionWithoutSelfHealIsNotFlagged(t *testing.T) {
+	// Without selfHeal nothing re-applies behind the user's back, so the
+	// missing sync option costs them nothing.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", false, false)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "selfHeal will re-apply") {
+		t.Errorf("Text() = %q, want no warning - nothing re-applies", got)
+	}
+}
+
+func TestASuppressedFindingStillCountsForNow(t *testing.T) {
+	// Whether a matched suppression should leave the churn count, and so
+	// change --strict's exit code, is deliberately still open. Until then it
+	// is shown but counted, because silently dropping it would decide the
+	// question by accident.
+	r := Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", true, true)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Churning(); got != 1 {
+		t.Errorf("Churning() = %d, want 1", got)
+	}
+}
+
+func TestProvenanceNamesTheDeliveryConfigItRead(t *testing.T) {
+	// idem already says which helm and how many rounds. Reading files outside
+	// the chart directory must be just as visible.
+	got := text(t, Report{
+		Charts:   []Chart{clean("home")},
+		Helm:     "4.2.4",
+		Rounds:   2,
+		Delivery: []string{"deployment/apps/home.yaml", "deployment/apps/lab.yaml"},
+	})
+
+	if !strings.Contains(got, "delivery config") {
+		t.Errorf("Text() = %q, want the delivery manifests acknowledged", got)
+	}
+}
+
+func TestProvenanceSaysNothingWhenThereWasNoDeliveryConfig(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{clean("home")}, Helm: "4.2.4", Rounds: 2})
+
+	if strings.Contains(got, "delivery config") {
+		t.Errorf("Text() = %q, want no mention when none was found", got)
 	}
 }

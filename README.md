@@ -67,10 +67,12 @@ and tells you whether you are looking at a chart defect or an ArgoCD limitation.
 The `ignoreDifferences` emitter works too: one pasteable block per run, carrying every
 differing field even where the display above it elides some.
 
+`idem` also reads your ArgoCD `Application` / `ApplicationSet` and Flux `HelmRelease`, so a
+finding you have already covered with an `ignoreDifferences` block is reported as handled rather
+than shouted about again — and it will not re-emit config you already have.
+
 Not yet built: the static analyzer, `-o json`/`markdown`/`github`, dependency resolution,
-`--new-from-rev`, `--cluster` and `doctor`. `idem` does not yet read your Application or
-HelmRelease, so it cannot tell that a finding is already covered by an `ignoreDifferences`
-block you added. Engine
+`--new-from-rev`, `--cluster` and `doctor`. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

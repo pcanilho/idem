@@ -17,6 +17,10 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/remediate"
 )
 
 // respectOption is the sync option without which ignoreDifferences hides the
@@ -387,4 +391,87 @@ func covers(p, candidate string) bool {
 // covered" and never counted either way.
 func (r Rule) MayCover(ref ObjectRef) bool {
 	return len(r.JQ) > 0 && r.Selects(ref)
+}
+
+// Suppressed is a finding an engine has already been told to ignore.
+type Suppressed struct {
+	Finding check.Finding
+	By      Rule
+}
+
+// Applied is what the delivery config says about a chart's findings.
+type Applied struct {
+	// Churning are the findings still unaccounted for, with any covered
+	// fields removed.
+	Churning []check.Finding
+
+	// Suppressed are findings a rule definitely covers.
+	Suppressed []Suppressed
+
+	// Maybe are findings a rule reaches only through a jq expression idem
+	// cannot evaluate. Never counted either way.
+	Maybe []Suppressed
+}
+
+// Apply splits findings by what the delivery config already handles.
+//
+// Works field by field rather than finding by finding. Suppressing a whole
+// finding because one of its fields is covered would hide the rest, which is
+// the one mistake this must not make.
+func Apply(rules []Rule, findings []check.Finding) Applied {
+	var out Applied
+
+	for _, f := range findings {
+		ref := objectRef(f.Change.Object)
+
+		var uncovered []diff.PathDiff
+		var by Rule
+		for _, p := range f.Change.Paths {
+			pointers := remediate.EvaluablePointers(f.Change.Object, p.Path.JSONPointer())
+			rule, covered := coveringRule(rules, ref, pointers)
+			if !covered {
+				uncovered = append(uncovered, p)
+				continue
+			}
+			by = rule
+		}
+
+		// A finding with no fields - an object rendered in one round and not
+		// another - has nothing a pointer could address, so no rule covers it.
+		if len(f.Change.Paths) > 0 && len(uncovered) == 0 {
+			out.Suppressed = append(out.Suppressed, Suppressed{Finding: f, By: by})
+			continue
+		}
+
+		f.Change.Paths = uncovered
+		out.Churning = append(out.Churning, f)
+
+		for _, r := range rules {
+			if r.MayCover(ref) {
+				out.Maybe = append(out.Maybe, Suppressed{Finding: f, By: r})
+				break
+			}
+		}
+	}
+
+	return out
+}
+
+func coveringRule(rules []Rule, ref ObjectRef, pointers []string) (Rule, bool) {
+	for _, r := range rules {
+		if r.Covers(ref, pointers) {
+			return r, true
+		}
+	}
+	return Rule{}, false
+}
+
+// objectRef narrows a rendered object to the identity a rule matches on.
+func objectRef(o diff.ObjectRef) ObjectRef {
+	group, _, found := strings.Cut(o.APIVersion, "/")
+	if !found {
+		// A core object's apiVersion is just "v1" - no group at all.
+		group = ""
+	}
+	return ObjectRef{Group: group, Kind: o.Kind, Namespace: o.Namespace, Name: o.Name}
 }

@@ -13,11 +13,13 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
 
 	"github.com/pcanilho/idem/internal/chartref"
+	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
@@ -108,6 +110,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
+	// Read the delivery config before rendering: what the user already told
+	// their engine to ignore changes what is worth reporting. Finding none is
+	// the normal case - plenty of estates keep charts and config in separate
+	// repositories - so a failure here is a note, never a stop.
+	root := delivery.Root(target)
+	deliveryCfg, err := delivery.Load(root)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: could not read delivery config under %s: %v\n", root, err)
+		deliveryCfg = delivery.Config{}
+	}
+
 	h := helm.New(opt.helmBin)
 	ctx := context.Background()
 
@@ -124,14 +137,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
 	}
 
-	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds}
+	rep := report.Report{Helm: helmVersion, Rounds: opt.rounds, Delivery: deliveryCfg.Files}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs) {
+		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
+
 		rep.Charts = append(rep.Charts, report.Chart{
-			Name:     result.Chart.Name,
-			Dir:      result.Chart.Dir,
-			Findings: result.Findings,
-			Verdicts: verdictsFor(ref, result, targets),
-			Err:      result.Err,
+			Name:       result.Chart.Name,
+			Dir:        result.Chart.Dir,
+			Findings:   applied.Churning,
+			Suppressed: applied.Suppressed,
+			Maybe:      applied.Maybe,
+			Verdicts:   verdictsFor(ref, result, targets),
+			Err:        result.Err,
 		})
 	}
 
@@ -242,6 +259,24 @@ func resolve(ref chartref.Ref) ([]target, error) {
 // rounds would manufacture the very churn idem is looking for.
 func releaseName(raw string) string {
 	return path.Base(strings.TrimSuffix(raw, "/"))
+}
+
+// chartPath expresses a chart directory the way an Application names it:
+// relative to the repository root.
+//
+// Empty when the chart sits outside the repository idem found, which joins to
+// nothing rather than to everything - delivery.For refuses an empty path for
+// exactly that reason.
+func chartPath(root, dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 // verdictsFor works out what each selected engine does with this chart.

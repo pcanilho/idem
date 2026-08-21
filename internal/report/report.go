@@ -14,6 +14,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/remediate"
 )
@@ -40,6 +41,11 @@ type Chart struct {
 	// the chart is clean, or when no engine lens was requested.
 	Verdicts []engine.Verdict
 
+	// Suppressed are findings the delivery config already covers, and Maybe
+	// are those a jq expression might cover. Shown, never guessed at.
+	Suppressed []delivery.Suppressed
+	Maybe      []delivery.Suppressed
+
 	// Err is set when the chart could not be rendered at all. That is exit 2
 	// and always fatal - a chart silently skipped is the bug idem exists for.
 	Err error
@@ -50,13 +56,21 @@ type Report struct {
 	Charts []Chart
 	Helm   string
 	Rounds int
+
+	// Delivery names the engine manifests idem read. Reading files outside the
+	// chart directory has to be as visible as which helm it rendered with.
+	Delivery []string
 }
 
 // Churning counts charts with at least one finding.
 func (r Report) Churning() int {
 	n := 0
 	for _, c := range r.Charts {
-		if c.Err == nil && len(c.Findings) > 0 {
+		// A suppressed finding still counts, for now. Whether a matched
+		// suppression should leave the count - and so change --strict's exit
+		// code - is still an open decision, and silently dropping it here
+		// would settle that question by accident.
+		if c.Err == nil && (len(c.Findings) > 0 || len(c.Suppressed) > 0) {
 			n++
 		}
 	}
@@ -86,6 +100,9 @@ func (r Report) Text(w io.Writer) error {
 		writeChart(&b, c)
 		detail = true
 	}
+	if writeSuppressed(&b, r.Charts) {
+		detail = true
+	}
 	if writeUnevaluable(&b, r.Charts) {
 		detail = true
 	}
@@ -98,7 +115,7 @@ func (r Report) Text(w io.Writer) error {
 		indent = "  "
 	}
 	fmt.Fprintf(&b, "%s%s\n", indent, r.verdict())
-	fmt.Fprintf(&b, "  helm %s · %d rounds\n", r.Helm, r.Rounds)
+	fmt.Fprintf(&b, "  helm %s · %d rounds%s\n", r.Helm, r.Rounds, r.deliveryNote())
 	writeRemediation(&b, r.Charts)
 
 	_, err := io.WriteString(w, b.String())
@@ -211,6 +228,61 @@ func writeFinding(tw io.Writer, f check.Finding) {
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
 		fmt.Fprintf(tw, "    \t… and %d more %s\n", elided, plural(elided, "field", "fields"))
 	}
+}
+
+// deliveryNote acknowledges the manifests idem read outside the chart tree.
+func (r Report) deliveryNote() string {
+	if len(r.Delivery) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · delivery config from %d %s", len(r.Delivery), plural(len(r.Delivery), "manifest", "manifests"))
+}
+
+// writeSuppressed lists findings the delivery config already covers, and
+// reports whether there were any.
+//
+// Kept apart from the churning findings because they are a different kind of
+// statement: one is what idem measured, the other is what the user's own
+// config says about it.
+func writeSuppressed(b *strings.Builder, charts []Chart) bool {
+	var covered, broken []delivery.Suppressed
+	for _, c := range charts {
+		for _, s := range c.Suppressed {
+			// ignoreDifferences hides the diff, but without
+			// RespectIgnoreDifferences selfHeal re-applies the object anyway -
+			// so the user believes this is handled when it is not.
+			if s.By.SelfHeal && !s.By.Respected {
+				broken = append(broken, s)
+				continue
+			}
+			covered = append(covered, s)
+		}
+	}
+	if len(covered) == 0 && len(broken) == 0 {
+		return false
+	}
+
+	if len(covered) > 0 {
+		b.WriteString("\n  already suppressed by your delivery config\n")
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, s := range covered {
+			fmt.Fprintf(tw, "    %s\t%s\t%s\n",
+				s.Finding.Change.Object.Display(), strings.Join(s.By.Pointers, " "), s.By.File)
+		}
+		tw.Flush()
+	}
+
+	if len(broken) > 0 {
+		b.WriteString("\n  suppressed, but selfHeal will re-apply it anyway\n")
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, s := range broken {
+			fmt.Fprintf(tw, "    %s\t%s\n", s.Finding.Change.Object.Display(), s.By.File)
+		}
+		tw.Flush()
+		b.WriteString("      add RespectIgnoreDifferences=true to that Application's syncOptions\n")
+	}
+
+	return true
 }
 
 // writeUnevaluable lists charts that never rendered, and reports whether there

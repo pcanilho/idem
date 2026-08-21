@@ -46,7 +46,7 @@ func Entries(findings []check.Finding) []Entry {
 			byKey[key] = entry
 		}
 		for _, p := range f.Change.Paths {
-			entry.Pointers = append(entry.Pointers, evaluablePointers(ref, p.Path.JSONPointer())...)
+			entry.Pointers = append(entry.Pointers, EvaluablePointers(ref, p.Path.JSONPointer())...)
 		}
 	}
 
@@ -82,8 +82,12 @@ func groupOf(apiVersion string) string {
 	return group
 }
 
-// evaluablePointers turns one pointer derived from a RENDER into the pointers
+// EvaluablePointers turns one pointer derived from a RENDER into the pointers
 // ArgoCD will actually evaluate - which is not the same thing.
+//
+// Exported because matching needs exactly the same translation as emitting: a
+// user's /data/KEY rule has to match a finding idem derived as /stringData/KEY,
+// or idem re-reports churn that was handled long ago.
 //
 // ArgoCD normalises an object before applying ignoreDifferences, so a pointer
 // describing the rendered shape can address a path that no longer exists. When
@@ -93,7 +97,7 @@ func groupOf(apiVersion string) string {
 //
 // Returns two pointers where both forms are needed, and none where the path is
 // not reliably addressable at all.
-func evaluablePointers(ref diff.ObjectRef, pointer string) []string {
+func EvaluablePointers(ref diff.ObjectRef, pointer string) []string {
 	segments := pointerSegments(pointer)
 	if len(segments) == 0 {
 		return nil
