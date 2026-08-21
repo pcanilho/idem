@@ -268,3 +268,52 @@ func TestVersionReportsTheBinaryVersion(t *testing.T) {
 		t.Errorf("Version() = %q, want a bare version like 4.2.4", v)
 	}
 }
+
+func TestStripPullPreambleRemovesHelmsOCIChatter(t *testing.T) {
+	// `helm template oci://...` writes two lines to STDOUT before the YAML:
+	//
+	//   Pulled: registry-1.docker.io/bitnamicharts/postgresql:18.8.12
+	//   Digest: sha256:a501...
+	//   ---
+	//   # Source: ...
+	//
+	// They parse as a perfectly valid YAML mapping, so the stream decodes as a
+	// document with no 'kind' and every OCI chart came back unevaluable.
+	in := "Pulled: registry-1.docker.io/bitnamicharts/postgresql:18.8.12\n" +
+		"Digest: sha256:a501179fbc20fd33d426444213ab8e1446cf981fb554788e93e2e250b245319e\n" +
+		"---\n# Source: postgresql/templates/secret.yaml\nkind: Secret\n"
+
+	got := string(stripPullPreamble([]byte(in)))
+	want := "---\n# Source: postgresql/templates/secret.yaml\nkind: Secret\n"
+	if got != want {
+		t.Errorf("stripPullPreamble() = %q, want %q", got, want)
+	}
+}
+
+func TestStripPullPreambleLeavesOrdinaryOutputAlone(t *testing.T) {
+	in := "---\n# Source: a/templates/b.yaml\nkind: ConfigMap\n"
+
+	if got := string(stripPullPreamble([]byte(in))); got != in {
+		t.Errorf("stripPullPreamble() = %q, want it unchanged", got)
+	}
+}
+
+func TestStripPullPreambleOnlyStripsAtTheStart(t *testing.T) {
+	// A ConfigMap may legitimately carry a key called Digest. Only helm's own
+	// preamble, before any document has begun, is chatter.
+	in := "kind: ConfigMap\ndata:\n  Pulled: yes\n  Digest: sha256:abc\n"
+
+	if got := string(stripPullPreamble([]byte(in))); got != in {
+		t.Errorf("stripPullPreamble() = %q, want it unchanged", got)
+	}
+}
+
+func TestStripPullPreambleLeavesAnUnrecognisedPreambleForTheParserToReject(t *testing.T) {
+	// If helm starts emitting something else, idem must fail loudly rather
+	// than guess at which leading lines are safe to discard.
+	in := "Fetched: something new\n---\nkind: Secret\n"
+
+	if got := string(stripPullPreamble([]byte(in))); got != in {
+		t.Errorf("stripPullPreamble() = %q, want unknown chatter left in place", got)
+	}
+}

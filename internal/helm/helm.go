@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"os/exec"
@@ -60,11 +61,38 @@ func (h Helm) Render(ctx context.Context, spec engine.Spec) ([]manifest.Object, 
 	if err != nil {
 		return nil, err
 	}
-	objs, err := manifest.Parse(out)
+	objs, err := manifest.Parse(bytes.NewReader(stripPullPreamble(out.Bytes())))
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s output for %s: %w", h.bin(), spec.ChartRef, err)
 	}
 	return objs, nil
+}
+
+// pullPreamble are the lines `helm template` writes to STDOUT, ahead of the
+// YAML, when it has to fetch the chart from a registry first.
+//
+// They are an allowlist rather than "drop everything before the first ---" on
+// purpose: anything else appearing there is something idem does not understand,
+// and the parser rejecting it loudly beats silently discarding output.
+var pullPreamble = []string{"Pulled: ", "Digest: "}
+
+// stripPullPreamble removes helm's registry chatter from the head of a render.
+//
+// Those two lines are a valid YAML mapping, so without this the stream decodes
+// as a document with no 'kind' and every OCI chart comes back unevaluable.
+func stripPullPreamble(out []byte) []byte {
+	for {
+		line, rest, found := bytes.Cut(out, []byte("\n"))
+		if !found {
+			return out
+		}
+		if !slices.ContainsFunc(pullPreamble, func(p string) bool {
+			return bytes.HasPrefix(line, []byte(p))
+		}) {
+			return out
+		}
+		out = rest
+	}
 }
 
 // run executes helm and returns stdout, folding stderr into any error.
