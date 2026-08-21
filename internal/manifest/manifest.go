@@ -150,7 +150,7 @@ func sourceOf(node *yaml.Node) string {
 	if n.Kind != yaml.MappingNode || len(n.Content) == 0 {
 		return ""
 	}
-	for _, line := range strings.Split(n.Content[0].HeadComment, "\n") {
+	for line := range strings.SplitSeq(n.Content[0].HeadComment, "\n") {
 		line = strings.TrimSpace(line)
 		if after, found := strings.CutPrefix(line, sourcePrefix); found {
 			return strings.TrimSpace(after)
