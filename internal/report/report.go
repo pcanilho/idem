@@ -15,6 +15,7 @@ import (
 
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/engine"
+	"github.com/pcanilho/idem/internal/remediate"
 )
 
 // maxFields caps how many differing fields one object lists.
@@ -98,6 +99,7 @@ func (r Report) Text(w io.Writer) error {
 	}
 	fmt.Fprintf(&b, "%s%s\n", indent, r.verdict())
 	fmt.Fprintf(&b, "  helm %s · %d rounds\n", r.Helm, r.Rounds)
+	writeRemediation(&b, r.Charts)
 
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -247,6 +249,34 @@ func errorLines(err error) []string {
 		}
 	}
 	return out
+}
+
+// writeRemediation prints the config that stops the churn.
+//
+// One block for the entire run, after the verdict, so it is pasted once rather
+// than once per chart. It is emitted from the full finding - not from what the
+// display showed - because the display caps fields per object and a block
+// missing those fields would not actually stop the churn.
+func writeRemediation(b *strings.Builder, charts []Chart) {
+	var findings []check.Finding
+	for _, c := range charts {
+		if c.Err == nil {
+			findings = append(findings, c.Findings...)
+		}
+	}
+
+	entries := remediate.Entries(findings)
+	if len(entries) == 0 {
+		return
+	}
+
+	b.WriteString("\n  Add to your ArgoCD Application to stop the churn:\n\n")
+	for line := range strings.SplitSeq(strings.TrimRight(remediate.YAML(entries), "\n"), "\n") {
+		b.WriteString("    " + line + "\n")
+	}
+	// Blank line so an exit-code line printed after the report does not read
+	// as part of the YAML the user is about to paste.
+	b.WriteString("\n")
 }
 
 // verdict is the sentence the whole run reduces to.

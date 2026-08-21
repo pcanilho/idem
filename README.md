@@ -64,8 +64,13 @@ the exit codes below.
 Three-engine verdicts work: `idem` reports what a finding means under ArgoCD, Flux and Helm,
 and tells you whether you are looking at a chart defect or an ArgoCD limitation.
 
-Not yet built: the `ignoreDifferences` emitter, the static analyzer, `-o json`/`markdown`/
-`github`, dependency resolution, `--new-from-rev`, `--cluster` and `doctor`. Engine
+The `ignoreDifferences` emitter works too: one pasteable block per run, carrying every
+differing field even where the display above it elides some.
+
+Not yet built: the static analyzer, `-o json`/`markdown`/`github`, dependency resolution,
+`--new-from-rev`, `--cluster` and `doctor`. `idem` does not yet read your Application or
+HelmRelease, so it cannot tell that a finding is already covered by an `ignoreDifferences`
+block you added. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

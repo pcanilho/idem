@@ -370,3 +370,71 @@ func TestTextShowsNoVerdictBlockWhenThereAreNone(t *testing.T) {
 		t.Errorf("Text() = %q, want no verdict rows", got)
 	}
 }
+
+func TestTextEmitsOneRemediationBlockForTheWholeRun(t *testing.T) {
+	// "so you paste once, not N times" - the block is per run, not per chart
+	// and not per finding.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "home-creds", ".data.key")}},
+			{Name: "lab", Findings: []check.Finding{finding("lab/templates/db.yaml", "lab-creds", ".data.password")}},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if n := strings.Count(got, "ignoreDifferences"); n != 1 {
+		t.Errorf("Text() emitted %d remediation blocks, want 1:\n%s", n, got)
+	}
+	for _, want := range []string{"home-creds", "lab-creds", "RespectIgnoreDifferences=true"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want it to contain %q", got, want)
+		}
+	}
+	// An exit-code line follows the report, and must not read as part of the
+	// YAML the user is about to paste.
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Errorf("Text() = %q, want a blank line after the block", got)
+	}
+}
+
+func TestRemediationCarriesFieldsTheDisplayElided(t *testing.T) {
+	// The display caps an object at a handful of fields. The block below it is
+	// what the user pastes, and a capped block would fail to stop the churn it
+	// claims to stop.
+	var fields []string
+	for _, k := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		fields = append(fields, ".data."+k)
+	}
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "big", fields...)}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "more") {
+		t.Fatalf("Text() = %q, want the display to have elided something", got)
+	}
+	if !strings.Contains(got, "/data/h") {
+		t.Errorf("Text() = %q, want the elided field still present in the pasteable block", got)
+	}
+}
+
+func TestNoRemediationBlockWhenNothingChurns(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{clean("home")}, Helm: "4.2.4", Rounds: 2})
+
+	if strings.Contains(got, "ignoreDifferences") {
+		t.Errorf("Text() = %q, want no remediation for a clean run", got)
+	}
+}
+
+func TestRemediationBlockIsIndentedWithTheRestOfTheOutput(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".data.key")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	for line := range strings.SplitSeq(strings.TrimRight(got, "\n"), "\n") {
+		if line != "" && !strings.HasPrefix(line, "  ") {
+			t.Errorf("line %q is not indented; Text() = %q", line, got)
+		}
+	}
+}
