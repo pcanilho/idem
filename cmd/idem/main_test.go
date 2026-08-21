@@ -607,3 +607,27 @@ func TestAChartMissingSubchartsIsResolvedWithoutTouchingIt(t *testing.T) {
 		t.Error("testdata/umbrella/parent/charts exists; idem wrote into the chart")
 	}
 }
+
+func TestTheTwoRatchetFlagsAreTwoWaysToSayOneThing(t *testing.T) {
+	code, _, stderr := invoke(t, "testdata/clean", "--new-from-rev", "HEAD", "--new-from-merge-base", "main")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "give one") {
+		t.Errorf("stderr = %q, want the conflict explained", stderr)
+	}
+}
+
+func TestAnUnknownRevisionIsReportedRatherThanIgnored(t *testing.T) {
+	// Treating a typo'd revision as "nothing changed" would quietly make the
+	// gate pass on everything.
+	code, _, stderr := invoke(t, "testdata/clean", "--new-from-rev", "no-such-revision-xyz")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "no-such-revision-xyz") {
+		t.Errorf("stderr = %q, want the bad revision named", stderr)
+	}
+}

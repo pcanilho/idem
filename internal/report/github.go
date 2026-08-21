@@ -27,7 +27,7 @@ func (r Report) GitHub(w io.Writer) error {
 
 	var errors, warnings, unplaceable int
 
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		for _, f := range c.Findings {
 			file, ok := r.locate(c, trimChartPrefix(f.Source))
 			if !ok {
@@ -70,7 +70,7 @@ func (r Report) GitHub(w io.Writer) error {
 		}
 	}
 
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		if c.Err != nil {
 			fmt.Fprintf(&b, "::error::idem: %s could not be rendered: %s\n", c.Name, data(c.Err.Error()))
 		}

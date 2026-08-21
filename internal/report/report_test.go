@@ -820,3 +820,139 @@ func TestTextNamesWhatAChurningSecretCosts(t *testing.T) {
 		t.Errorf("Text() = %q, want the silent case named", silent)
 	}
 }
+
+func changed(name string, findings ...check.Finding) Chart {
+	return Chart{Name: name, Changed: true, Findings: findings}
+}
+
+func untouched(name string, findings ...check.Finding) Chart {
+	return Chart{Name: name, Findings: findings}
+}
+
+func TestTheRatchetShowsOnlyChartsChangedSinceTheRevision(t *testing.T) {
+	got := text(t, Report{
+		Since: "main",
+		Charts: []Chart{
+			changed("home", secretFinding("home-creds", ".data.password")),
+			untouched("lab", secretFinding("lab-creds", ".data.password")),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "home-creds") {
+		t.Errorf("Text() = %q, want the changed chart's finding", got)
+	}
+	if strings.Contains(got, "lab-creds") {
+		t.Errorf("Text() = %q, want the pre-existing finding hidden", got)
+	}
+}
+
+func TestTheRatchetCountsWhatItIsHiding(t *testing.T) {
+	// Nothing is stored and nothing is suppressed: dropping the flag always
+	// shows everything, and the count says how much that would be.
+	got := text(t, Report{
+		Since: "main",
+		Charts: []Chart{
+			changed("home", secretFinding("home-creds", ".data.password")),
+			untouched("lab", secretFinding("a", ".data.p"), secretFinding("b", ".data.p")),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "2 pre-existing findings not shown") {
+		t.Errorf("Text() = %q, want the hidden findings counted", got)
+	}
+	if !strings.Contains(got, "drop the flag") {
+		t.Errorf("Text() = %q, want the way to see them", got)
+	}
+}
+
+func TestTheRatchetVerdictNamesTheRevision(t *testing.T) {
+	got := text(t, Report{
+		Since: "main",
+		Charts: []Chart{
+			changed("home", secretFinding("creds", ".data.password")),
+			changed("ops"),
+			untouched("lab"),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "1 of the 2 charts changed since main will churn under ArgoCD") {
+		t.Errorf("Text() = %q, want the ratchet's own sentence", got)
+	}
+}
+
+func TestTheRatchetGatesOnlyOnWhatChanged(t *testing.T) {
+	// A permanently red pipeline gets deleted rather than fixed. --strict must
+	// fail on this branch's work, not on the estate's history.
+	r := Report{
+		Since: "main",
+		Charts: []Chart{
+			changed("home"),
+			untouched("lab", secretFinding("creds", ".data.password")),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Churning(); got != 0 {
+		t.Errorf("Churning() = %d, want 0 - nothing this branch touched churns", got)
+	}
+}
+
+func TestAPreExistingUnrenderableChartDoesNotFailTheRatchet(t *testing.T) {
+	// Otherwise an estate with one broken chart can never adopt the flag, and
+	// that is the situation the ratchet exists for.
+	r := Report{
+		Since:  "main",
+		Charts: []Chart{changed("home"), {Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Unevaluable(); got != 0 {
+		t.Errorf("Unevaluable() = %d, want 0 - that chart was already broken", got)
+	}
+}
+
+func TestAChartThisBranchBrokeStillFailsTheRatchet(t *testing.T) {
+	r := Report{
+		Since:  "main",
+		Charts: []Chart{{Name: "home", Changed: true, Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Unevaluable(); got != 1 {
+		t.Errorf("Unevaluable() = %d, want 1", got)
+	}
+}
+
+func TestWithoutTheRatchetEverythingIsShown(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{untouched("lab", secretFinding("creds", ".data.password"))},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "creds") {
+		t.Errorf("Text() = %q, want every finding when no revision was given", got)
+	}
+	if strings.Contains(got, "pre-existing") {
+		t.Errorf("Text() = %q, want no ratchet wording", got)
+	}
+}
+
+func TestTheRatchetSaysPlainlyWhenNothingChanged(t *testing.T) {
+	// "All 0 charts render consistently" is true and useless; the reader wants
+	// to know the gate had nothing to look at.
+	got := text(t, Report{
+		Since:  "main",
+		Charts: []Chart{untouched("lab", secretFinding("creds", ".data.p"))},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "All 0 charts") {
+		t.Errorf("Text() = %q, want no vacuous count", got)
+	}
+	if !strings.Contains(got, "No charts changed since main") {
+		t.Errorf("Text() = %q, want it said plainly", got)
+	}
+}

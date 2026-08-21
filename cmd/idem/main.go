@@ -27,6 +27,7 @@ import (
 	"github.com/pcanilho/idem/internal/discover"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
+	"github.com/pcanilho/idem/internal/gitrev"
 	"github.com/pcanilho/idem/internal/helm"
 	"github.com/pcanilho/idem/internal/report"
 	"github.com/pcanilho/idem/internal/scan"
@@ -73,6 +74,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.output, "o", "text", "text, json, markdown or github")
 	fs.BoolVar(&opt.dependencyUpdate, "dependency-update", false, "resolve missing dependencies in place, not a temp dir")
 	fs.BoolVar(&opt.noDeps, "no-deps", false, "never fetch dependencies")
+	fs.StringVar(&opt.newFromRev, "new-from-rev", "", "report only findings in charts changed since REV")
+	fs.StringVar(&opt.newFromMergeBase, "new-from-merge-base", "", "same, against the merge base with REF")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -129,6 +132,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
+	ctx := context.Background()
+
 	// Read the delivery config before rendering: what the user already told
 	// their engine to ignore changes what is worth reporting. Finding none is
 	// the normal case - plenty of estates keep charts and config in separate
@@ -146,8 +151,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
+	since, touched, err := ratchet(ctx, opt, root)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
 	h := helm.New(opt.helmBin)
-	ctx := context.Background()
 
 	// Read the version first: it is printed with every result, and it fails
 	// fast and clearly when there is no helm to render with at all.
@@ -166,7 +176,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rep := report.Report{
 		Helm: helmVersion, Rounds: opt.rounds,
-		Delivery: deliveryCfg.Files, Engines: shown, Root: root,
+		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since,
 	}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref), prepare) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
@@ -181,6 +191,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Dir:        result.Chart.Dir,
 			RepoDir:    chartPath(root, result.Chart.Dir),
 			Deps:       resolutions.of(result.Chart.Dir),
+			Changed:    gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
 			Findings:   applied.Churning,
 			Suppressed: applied.Suppressed,
 			Maybe:      applied.Maybe,
@@ -260,6 +271,9 @@ type options struct {
 
 	dependencyUpdate bool
 	noDeps           bool
+
+	newFromRev       string
+	newFromMergeBase string
 }
 
 // specFor builds the render request for one chart.
@@ -387,6 +401,31 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
+// ratchet resolves which charts this run is allowed to fail on.
+//
+// Everything is still rendered and compared: the flag governs what fails the
+// build, not what gets checked, which is what lets idem say how many
+// pre-existing findings it is holding back.
+func ratchet(ctx context.Context, opt options, root string) (string, []string, error) {
+	switch {
+	case opt.newFromRev != "" && opt.newFromMergeBase != "":
+		return "", nil, fmt.Errorf("--new-from-rev and --new-from-merge-base are two ways to pick the same baseline; give one")
+
+	case opt.newFromRev != "":
+		changed, err := gitrev.Changed(ctx, root, opt.newFromRev)
+		return opt.newFromRev, changed, err
+
+	case opt.newFromMergeBase != "":
+		base, err := gitrev.MergeBase(ctx, root, opt.newFromMergeBase)
+		if err != nil {
+			return "", nil, err
+		}
+		changed, err := gitrev.Changed(ctx, root, base)
+		return opt.newFromMergeBase, changed, err
+	}
+	return "", nil, nil
+}
+
 // dependencyMode turns the two dependency flags into one decision.
 func dependencyMode(opt options) (deps.Mode, error) {
 	switch {

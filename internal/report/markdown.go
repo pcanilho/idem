@@ -25,7 +25,7 @@ func (r Report) Markdown(w io.Writer) error {
 
 	var rows strings.Builder
 	var suppressed int
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		for _, f := range c.Findings {
 			writeRows(&rows, c, f)
 		}
@@ -46,8 +46,8 @@ func (r Report) Markdown(w io.Writer) error {
 			suppressed, plural(suppressed, "finding", "findings"))
 	}
 
-	writeUnevaluableRows(&b, r.Charts)
-	writeFixBlock(&b, r.Charts)
+	writeUnevaluableRows(&b, r.inScope())
+	writeFixBlock(&b, r.inScope())
 
 	fmt.Fprintf(&b, "<sub>helm %s · %d rounds%s</sub>\n", r.Helm, r.Rounds, r.unevaluableNote())
 
@@ -58,7 +58,7 @@ func (r Report) Markdown(w io.Writer) error {
 // headline is the churn sentence alone. What could not be rendered goes in the
 // footer, so the heading answers one question.
 func (r Report) headline() string {
-	total, churning := len(r.Charts), r.Churning()
+	total, churning := len(r.inScope()), r.Churning()
 	if churning == 0 {
 		return fmt.Sprintf("%d %s could not be rendered", r.Unevaluable(), plural(r.Unevaluable(), "chart", "charts"))
 	}

@@ -44,6 +44,9 @@ type Chart struct {
 	// Empty means it was renderable as it stood.
 	Deps string
 
+	// Changed marks a chart touched since Report.Since. Meaningless without it.
+	Changed bool
+
 	Findings []check.Finding
 
 	// Verdicts is what each selected engine does with this chart. Empty when
@@ -78,6 +81,10 @@ type Report struct {
 	// annotation would point at actually exists.
 	Root string
 
+	// Since names the revision the ratchet measures from. Empty means no
+	// ratchet, and every chart is reported.
+	Since string
+
 	// Engines are the engine names whose verdicts to display. Empty shows all.
 	//
 	// A chart's verdicts are always computed for every engine even when only
@@ -87,10 +94,35 @@ type Report struct {
 	Engines []string
 }
 
+// considered reports whether a chart is in scope for this run.
+//
+// With a ratchet, only charts changed since the revision are: adding a checker
+// to an existing estate finds a pile of pre-existing issues, and a permanently
+// red pipeline gets deleted rather than fixed.
+func (r Report) considered(c Chart) bool {
+	return r.Since == "" || c.Changed
+}
+
+// hidden counts what the ratchet is holding back, so it can be reported rather
+// than silently dropped.
+func (r Report) hidden() int {
+	n := 0
+	for _, c := range r.Charts {
+		if r.considered(c) {
+			continue
+		}
+		n += len(c.Findings) + len(c.Suppressed)
+		if c.Err != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // Churning counts charts with at least one finding.
 func (r Report) Churning() int {
 	n := 0
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		// A suppressed finding still counts, for now. Whether a matched
 		// suppression should leave the count - and so change --strict's exit
 		// code - is still an open decision, and silently dropping it here
@@ -102,10 +134,28 @@ func (r Report) Churning() int {
 	return n
 }
 
+// inScope is the charts this run reports on.
+func (r Report) inScope() []Chart {
+	if r.Since == "" {
+		return r.Charts
+	}
+	var out []Chart
+	for _, c := range r.Charts {
+		if c.Changed {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Unevaluable counts charts that could not be rendered.
+//
+// Scoped by the ratchet too: a chart that was already unrenderable before this
+// branch is not this branch's problem, and an estate with one of those could
+// otherwise never adopt the flag at all.
 func (r Report) Unevaluable() int {
 	n := 0
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		if c.Err != nil {
 			n++
 		}
@@ -117,21 +167,23 @@ func (r Report) Unevaluable() int {
 func (r Report) Text(w io.Writer) error {
 	var b strings.Builder
 
+	scope := r.inScope()
+
 	detail := false
-	for _, c := range r.Charts {
+	for _, c := range scope {
 		if c.Err != nil || len(c.Findings) == 0 {
 			continue
 		}
 		writeChart(&b, c, r.Engines)
 		detail = true
 	}
-	if writeSuppressed(&b, r.Charts) {
+	if writeSuppressed(&b, scope) {
 		detail = true
 	}
-	if writePotential(&b, r.Charts) {
+	if writePotential(&b, scope) {
 		detail = true
 	}
-	if writeUnevaluable(&b, r.Charts) {
+	if writeUnevaluable(&b, scope) {
 		detail = true
 	}
 
@@ -143,8 +195,12 @@ func (r Report) Text(w io.Writer) error {
 		indent = "  "
 	}
 	fmt.Fprintf(&b, "%s%s\n", indent, r.verdict())
+	if n := r.hidden(); n > 0 {
+		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
+			indent, n, plural(n, "finding", "findings"))
+	}
 	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s\n", r.Helm, r.Rounds, r.depsNote(), r.deliveryNote())
-	writeRemediation(&b, r.Charts)
+	writeRemediation(&b, scope)
 
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -491,7 +547,21 @@ func writeRemediation(b *strings.Builder, charts []Chart) {
 // repo-server does - lookup resolves to {} by construction - so this is an
 // observation about ArgoCD, not an extrapolation to it.
 func (r Report) verdict() string {
-	total, churning, unevaluable := len(r.Charts), r.Churning(), r.Unevaluable()
+	scope := r.inScope()
+	total, churning, unevaluable := len(scope), r.Churning(), r.Unevaluable()
+
+	// Nothing to gate on. "All 0 charts render consistently" is true and
+	// useless; the reader wants to know the gate had nothing to look at.
+	if r.Since != "" && total == 0 {
+		return fmt.Sprintf("No charts changed since %s.", r.Since)
+	}
+
+	// The ratchet's sentence says what it measured against, because "1 of 2"
+	// is a different claim when 14 other charts were left out of the count.
+	if r.Since != "" && churning > 0 {
+		return fmt.Sprintf("%d of the %d %s changed since %s will churn under ArgoCD.",
+			churning, total, plural(total, "chart", "charts"), r.Since)
+	}
 
 	if churning == 0 && unevaluable == 0 {
 		if total == 1 {

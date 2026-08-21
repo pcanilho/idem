@@ -121,7 +121,7 @@ func (r Report) JSON(w io.Writer) error {
 	}
 
 	var all []check.Finding
-	for _, c := range r.Charts {
+	for _, c := range r.inScope() {
 		if c.Err != nil {
 			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
 		}
