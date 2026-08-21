@@ -156,7 +156,7 @@ func writeChart(b *strings.Builder, c Chart, show []string) {
 
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, f := range groups[source] {
-			writeFinding(tw, f)
+			writeFinding(tw, f, c.Findings)
 		}
 		tw.Flush()
 	}
@@ -230,26 +230,30 @@ func defect(verdicts []engine.Verdict) bool {
 	return false
 }
 
-func writeFinding(tw io.Writer, f check.Finding) {
+func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding) {
 	object := f.Change.Object.Display()
 
 	// An object present in one render and absent from another has no differing
 	// field to name; the disappearance is the finding.
 	if len(f.Change.Paths) == 0 {
-		fmt.Fprintf(tw, "    %s\t%s\n", object, f.Change.Type)
+		fmt.Fprintf(tw, "    %s\t%s\t\n", object, f.Change.Type)
 		return
 	}
+
+	// What it costs goes on the first line only: it is a property of the
+	// object, not of each field.
+	cost := consequenceOf(f, siblings).Text
 
 	shown := min(len(f.Change.Paths), maxFields)
 	for i, p := range f.Change.Paths[:shown] {
 		if i == 0 {
-			fmt.Fprintf(tw, "    %s\t%s\n", object, p.Path)
+			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, p.Path, cost)
 			continue
 		}
-		fmt.Fprintf(tw, "    \t%s\n", p.Path)
+		fmt.Fprintf(tw, "    \t%s\t\n", p.Path)
 	}
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
-		fmt.Fprintf(tw, "    \t… and %d more %s\n", elided, plural(elided, "field", "fields"))
+		fmt.Fprintf(tw, "    \t… and %d more %s\t\n", elided, plural(elided, "field", "fields"))
 	}
 }
 

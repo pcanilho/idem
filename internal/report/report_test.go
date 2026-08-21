@@ -796,3 +796,27 @@ func TestPotentialLinesStayReadablyNarrow(t *testing.T) {
 		}
 	}
 }
+
+func TestTextNamesWhatAChurningSecretCosts(t *testing.T) {
+	// "rolls 2 Deployments" and "silent — no checksum" are the difference
+	// between an annoyance and a credential drifting from its database.
+	rolls := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{
+			secretFinding("creds", ".data.password"),
+			workload("Deployment", "api", checksumPath),
+			workload("Deployment", "ui", checksumPath),
+		}}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+	if !strings.Contains(rolls, "rolls 2 Deployments") {
+		t.Errorf("Text() = %q, want the rollout counted", rolls)
+	}
+
+	silent := text(t, Report{
+		Charts: []Chart{{Name: "lab", Findings: []check.Finding{secretFinding("pg", ".data.password")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+	if !strings.Contains(silent, "silent — no checksum") {
+		t.Errorf("Text() = %q, want the silent case named", silent)
+	}
+}
