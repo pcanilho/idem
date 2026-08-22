@@ -4,24 +4,48 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/pcanilho/idem.svg)](https://pkg.go.dev/github.com/pcanilho/idem)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Check your Helm charts against the GitOps engine you actually run.**
+**Some Helm charts never finish deploying, and your GitOps engine will not tell you which.**
 
-`idem` renders your chart more than once, compares the results, and tells you which objects will
-never settle — under ArgoCD, under Flux, under plain Helm — along with the config that fixes it.
+`idem` renders a chart more than once, compares the results, and names the objects that will
+never settle — under ArgoCD, under Flux, under plain Helm — with the config that stops it.
 
-```console
-$ idem ./examples/stable-chart
-✓ stable-chart renders consistently under ArgoCD.
-  helm 4.2.4 · 2 rounds
+**See the problem in ten seconds**, on the most-pulled chart in the ecosystem. No install:
+
+```sh
+helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep postgres-password
+helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep postgres-password
 ```
 
-Why that matters: a chart that renders differently every time never converges. The app sits
-`OutOfSync`, `selfHeal` re-applies it, and any workload with a `checksum/` annotation rolls its
-pods — again and again, for as long as it is deployed.
+Two different values. Five renders give five passwords — so the app sits `OutOfSync` forever,
+`selfHeal` re-applies it, and any workload with a `checksum/` annotation rolls its pods again and
+again for as long as it is deployed.
+
+That is what `idem` finds, before you merge it — and it writes the fix:
+
+```console
+$ idem ./examples/churning-chart --engine argocd
+
+  examples/churning-chart/templates/main.yaml
+    Secret/churning-chart-secret   .data.password   silent — no checksum
+
+      argocd   CHURNS   on every re-render — at least daily, and without cluster access
+
+  1 of 1 chart will churn under ArgoCD.
+
+  Add to your ArgoCD Application to stop the churn:
+
+    spec:
+      ignoreDifferences:
+        - kind: Secret
+          name: churning-chart-secret
+          jsonPointers: [/data/password]
+      syncPolicy:
+        syncOptions: [RespectIgnoreDifferences=true]
+```
 
 ---
 
-## The failure this exists for
+## Why charts churn
 
 Three Harbor `Deployment`s in my homelab reached **revision 658 over 729 days**. Nothing was
 wrong with the cluster. The chart did this, which is an extremely common idiom:
@@ -40,21 +64,12 @@ The same chart rewrote a Postgres superuser password until it no longer matched 
 and that `StatefulSet` had no `checksum/` annotation, so **nothing restarted and nothing
 alerted.** It was silently broken for two years.
 
-You cannot catch this with `argocd app diff` either —
-[from its own docs](https://argo-cd.readthedocs.io/en/stable/user-guide/commands/argocd_app_diff/):
+`argocd app diff` will not catch it either. [From its own
+docs](https://argo-cd.readthedocs.io/en/stable/user-guide/commands/argocd_app_diff/):
 
 > *Kubernetes Secrets are ignored from this diff.*
 
-The objects where this bug lives are exactly the ones ArgoCD will not show you.
-
-**See it for yourself in ten seconds**, on the most-pulled chart in the ecosystem:
-
-```sh
-helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep postgres-password
-helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep postgres-password
-```
-
-Two different values. Five renders give five passwords.
+The objects where this bug lives are the ones ArgoCD will not show you.
 
 ---
 
@@ -71,19 +86,33 @@ go install github.com/pcanilho/idem@latest
 
 ---
 
-## Try it
-
-Point it at a chart, a directory of charts, or a registry:
+## Quick start
 
 ```sh
-idem ./charts                  # every chart under a directory
+idem ./charts
+```
+
+That is the whole thing: point it at a directory and it finds every chart under it. A chart with
+nothing wrong costs two lines —
+
+```console
+$ idem ./examples/stable-chart
+✓ stable-chart renders consistently under ArgoCD.
+  helm 4.2.4 · 2 rounds
+```
+
+— which is what most runs look like, and why `--strict` is opt-in rather than the default.
+
+It also takes one chart, or one you have not adopted yet — and the `./examples/…` charts ship in
+this repository, so clone it to run them exactly as shown:
+
+```sh
 idem ./charts/my-app           # one chart
 idem myapp --repo https://charts.example.com
 idem oci://registry.example.com/charts/myapp
 ```
 
-Here is a chart that churns. The real run prints more — a matching Flux block, and the
-non-deterministic functions it found — but this is the shape of it:
+The hero trimmed the report to ArgoCD. A real run answers for every engine you use:
 
 ```console
 $ idem ./examples/churning-chart
@@ -121,7 +150,7 @@ against different shapes.
 
 ---
 
-## Three engines, three different answers
+## ArgoCD vs Flux vs Helm
 
 | Engine | Does `lookup` resolve? | So a `lookup`-guarded value is… |
 |---|---|---|
@@ -150,7 +179,7 @@ drift loop that no amount of rendering reveals.
 
 ---
 
-## In CI
+## CI
 
 Findings are informative by default. `--strict` turns them into a failing build:
 
@@ -172,7 +201,8 @@ no token, no API calls, no extra permissions. To post one summary comment instea
 A clean run writes **nothing**, so the guard is what stops a comment saying everything is fine on
 every pull request that touches a chart.
 
-Adopting `idem` on an estate that already has problems? Report only what your branch changed:
+**Day one on a real estate will find things** — that is the point, and it is also why the first
+run should not be the gate. Report only what your branch changed:
 
 ```sh
 idem ./charts --new-from-merge-base main
@@ -184,7 +214,7 @@ that is a gap in what was checked rather than a finding about it.
 
 ---
 
-## Before the commit, not after
+## pre-commit
 
 `idem` ships a hook for [pre-commit](https://pre-commit.com) and
 [prek](https://github.com/j178/prek):
@@ -212,7 +242,7 @@ commit. To report without blocking one, override the default `--strict`:
 
 ---
 
-## Already fixed it? `idem` knows
+## Your ArgoCD and Flux config
 
 `idem` reads the ArgoCD `Application` / `ApplicationSet` and Flux `HelmRelease` in your
 repository. That tells it three things:
@@ -230,7 +260,7 @@ reports that as a trap rather than as handled, because you believe it is fixed a
 
 ---
 
-## Find it in a cluster you already run
+## `idem doctor` — churn that already happened
 
 Everything above predicts churn. `idem doctor` finds churn that has already happened — no chart
 needed:
@@ -250,7 +280,7 @@ where the object carries evidence of one.
 
 ---
 
-## Compare two renders yourself
+## `idem diff` — two renders, and kustomize
 
 The comparison engine on its own — no helm, no network, no cluster. This is also how you point
 `idem` at kustomize:
@@ -263,7 +293,7 @@ idem diff a.yaml b.yaml
 
 ---
 
-## Commands and flags
+## Flags
 
 ```
 idem [chart] [flags]     check a chart, or every chart under a directory
@@ -313,26 +343,28 @@ idem ./charts -o yaml | yq '.remediation[] | select(.engine == "argocd")'
 
 ---
 
-## What it does not do
+## Limits
 
-- Checking a chart does not talk to your cluster unless you pass `--context`, and even then only
-  to render — never to apply, create, update, or own anything. (`idem doctor` is the exception by
-  definition: a cluster is the whole point, and it uses your current context. It only ever reads.)
-- It never writes to your repository. Subcharts resolve in a temp directory unless you ask
-  otherwise with `--dependency-update`.
-- It does not reconstruct your delivery pipeline — no kustomize overlays, no `postBuild`
-  substitution, no post-renderers. It renders what you point it at and names what it could not
-  see.
-- It does not prove a chart is free of secrets. It proves the output is *stable*, which is the
-  property ArgoCD actually needs.
-- It renders twice **back to back**, so it cannot see non-determinism that unfolds over *time*:
+- **It renders twice, back to back**, so it cannot see non-determinism that unfolds over *time*:
   an unpinned dependency range, a floating `:latest` tag, a re-published chart version. A clean
   run means "this renders consistently right now, with this helm" — not "this chart is pinned
   forever".
+- **It does not reconstruct your delivery pipeline** — no kustomize overlays, no `postBuild`
+  substitution, no post-renderers. It renders what you point it at, and names in the output
+  whatever it could not resolve rather than rendering defaults and calling that an answer.
+- **It reads, never writes.** Not your cluster (`--context` renders through the API server;
+  `doctor` only does `kubectl get`), and not your repository (subcharts resolve in a temp
+  directory unless you pass `--dependency-update`).
+- **It proves output is stable, not that a chart is safe.** Stability is the property your engine
+  needs; it is not a secrets scan or a policy check.
+
+**It needs `helm` on your `PATH`, and which one matters.** `idem` renders with whatever `helm`
+it finds — pin it with `--helm`, and pin it in CI to whatever your ArgoCD runs, because ArgoCD
+3.4 shipped Helm 3.19 and 3.5 ships Helm 4.2. The version used is printed on every run.
 
 ---
 
-## How it compares
+## Compared to other tools
 
 | Tool | Compares | Finds a chart that churns? | Writes the fix? |
 |---|---|---|---|

@@ -51,7 +51,7 @@ runs:
   steps:
     - name: Install helm
       if: inputs.helm-version != ''
-      uses: azure/setup-helm@v4
+      uses: azure/setup-helm@v5
       with:
         version: ${{ inputs.helm-version }}
 

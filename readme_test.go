@@ -33,6 +33,7 @@ func TestTheREADMEShowsWhatTheBinaryActuallyPrints(t *testing.T) {
 		name string
 		args []string
 	}{
+		{"the hero block", []string{"./examples/churning-chart", "--engine", "argocd"}},
 		{"the churning example", []string{"./examples/churning-chart"}},
 		{"the clean example", []string{"./examples/stable-chart"}},
 	} {
@@ -42,9 +43,9 @@ func TestTheREADMEShowsWhatTheBinaryActuallyPrints(t *testing.T) {
 				t.Fatalf("idem %v failed: %s%s", tc.args, stdout, stderr)
 			}
 
-			shown := consoleBlock(t, string(readme), "$ idem "+tc.args[0])
+			shown := consoleBlock(t, string(readme), "$ idem "+strings.Join(tc.args, " "))
 			if len(shown) == 0 {
-				t.Fatalf("no console block in the README for `idem %s`", tc.args[0])
+				t.Fatalf("no console block in the README for `idem %s`", strings.Join(tc.args, " "))
 			}
 
 			// Line by line: a whole-block match would fail on the surrounding

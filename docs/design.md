@@ -163,9 +163,10 @@ ArgoCD works differently, on purpose. Jesse Suen, ArgoCD co-creator, in
 > *Fundamentally, we work differently than helm because we invoke `helm template` early and
 > often. Whereas helm only invokes this at point of install or upgrade.*
 
-Cluster access for repo-server is a long-standing request —
-[argo-cd#5202](https://github.com/argoproj/argo-cd/issues/5202), open since January 2021 — and
-architecturally unlikely to change.
+Cluster access for the repo-server is the blocker discussed in
+[argo-cd#5202](https://github.com/argoproj/argo-cd/issues/5202) — open since January 2021, and
+architecturally unlikely to change. Note the issue is titled *"Helm lookup Function Support"*:
+cluster access is what the thread concludes would be needed, not what it asks for.
 
 Helm upstream was asked for a deterministic render mode in
 [helm#10689](https://github.com/helm/helm/issues/10689). It received exactly one comment — from
@@ -209,9 +210,11 @@ Helm 4.2 pin, so one list covers both lines:
 `ago`, `getHostByName`, `keys`, `values` — plus `lookup`.
 
 `keys` and `values` were missed by the first audit and are arguably the worst of the set. They
-build a slice from Go's map iteration order and never sort it, so they reorder on **every**
-render — and unlike a fresh UUID the result looks plausible in a diff, so a human reviewing the
-output waves it through. `sortAlpha` is the fix. Because both are ordinary English words, they
+build a slice from Go's map iteration order and never sort it, so they reorder **unpredictably
+between renders** — not on every one: Go randomises the iteration start offset, so two
+consecutive renders can coincide, which makes this *worse* to catch by hand rather than better.
+Unlike a fresh UUID the result looks plausible in a diff, so a human reviewing the output waves
+it through. `sortAlpha` is the fix. Because both are ordinary English words, they
 are only reported where they read as an actual call: `.Values.keys` and a YAML field named
 `keys:` are not warnings.
 
@@ -628,7 +631,22 @@ false paths. Everything else falls back to positional matching.
 
 ## 11. Output
 
-Three renderings of one `Report` struct, and the split is deliberate.
+Five renderings of one `Report` struct, and the split is deliberate. `json` and `yaml` share a
+builder rather than being written twice — see §13.
+
+### `-o github` annotates the file, not a line
+
+An observed finding gets `::error file=…::` with **no `line=`**, so GitHub renders it at the top
+of the file in Files Changed. That is deliberate and it is what §9's rule requires: helm's
+`# Source:` comment carries a path and nothing else, so any line number would be invented, and an
+annotation pointing confidently at the wrong line is worse than one pointing at the file.
+
+Potential findings *do* carry `line=`, because the analyzer read the template and knows exactly
+where the call is. The asymmetry is the provenance rule showing through: idem annotates a line
+when it measured one and a file when it did not.
+
+Annotations are also capped at ten per level, because GitHub renders no more than that per run —
+so the cap is stated in the output rather than letting the eleventh disappear silently.
 
 **`text`** is a status line that occasionally expands, not a report. The modal run finds
 nothing and prints two lines; a run with findings prints one line per finding and one
