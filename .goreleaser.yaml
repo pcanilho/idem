@@ -14,7 +14,9 @@ before:
 
 builds:
   - id: idem
-    main: ./cmd/idem
+    # The module root, so `go install github.com/pcanilho/idem@latest` is the
+    # whole command. A single-binary module has no reason to bury it.
+    main: .
     binary: idem
     env:
       # idem shells out rather than linking anything, so a static binary costs

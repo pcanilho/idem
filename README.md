@@ -106,11 +106,14 @@ Once released:
 brew install pcanilho/tap/idem
 ```
 
-That pulls in `helm`, which `idem` cannot render without. Or, if you would rather build it:
+That pulls in `helm`, which `idem` cannot render without. To build it yourself:
 
 ```sh
-go install github.com/pcanilho/idem/cmd/idem@latest
+go install github.com/pcanilho/idem@latest
 ```
+
+Or take a binary straight from the
+[releases page](https://github.com/pcanilho/idem/releases) — linux and darwin, amd64 and arm64.
 
 `idem` shells out to whichever `helm` is on your `PATH`, and prints which one it used —
 results can depend on it. `idem doctor` and `--context` additionally need `kubectl`; everything

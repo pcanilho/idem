@@ -1,0 +1,60 @@
+# Runs on every pull request.
+#
+# helm is installed even though most tests would pass without it: idem's suite
+# SKIPS everything that needs helm when helm is absent, so a green run on a
+# runner without it would prove very little about the part that matters.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, because idem is a developer tool people run locally and a CI
+        # tool people run on Linux - and path handling has differed between
+        # them before.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Modernizers
+        # `go fix` is part of this repository's workflow, so CI holds it to a
+        # fixed point rather than letting the next person discover a diff.
+        run: |
+          go fix ./...
+          if ! git diff --quiet; then
+            echo "::error::go fix would change these files -- run 'go fix ./...' and commit:"
+            git --no-pager diff --stat
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./... -race
