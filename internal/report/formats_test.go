@@ -166,6 +166,47 @@ func TestYAMLIsTheJSONContractInAnotherEncoding(t *testing.T) {
 	}
 }
 
+// The no-trailing-whitespace invariant holds for EVERY format, not just text.
+//
+// text was the one that broke it, but diff/doctor/drift use the same tabwriter
+// and markdown embeds an indented YAML block, so any of them could regress.
+// json and yaml are encoder output and should never have it - asserting them
+// too costs nothing and pins the encoders' settings.
+func TestNoFormatEndsALineInWhitespace(t *testing.T) {
+	r := Report{
+		Root: repoWith(t, "charts/home/templates/s.yaml"),
+		Charts: []Chart{func() Chart {
+			c := churnsUnderFlux("home", secretFinding("creds", ".stringData.password"))
+			c.RepoDir = "charts/home"
+			// A finding with no consequence: its last column is empty, which is
+			// what makes tabwriter pad the one before it.
+			c.Findings = append(c.Findings, finding("home/templates/cm.yaml", "home-cm", ".data.token"))
+			c.Potential = []analyze.Use{{Function: "randAlphaNum", File: "templates/s.yaml", Line: 3, Call: true}}
+			return c
+		}()},
+		Helm: "4.2.4", Rounds: 2,
+	}
+
+	for _, tc := range []struct {
+		name string
+		f    func(Report, io.Writer) error
+	}{
+		{"text", Report.Text},
+		{"json", Report.JSON},
+		{"yaml", Report.YAML},
+		{"markdown", Report.Markdown},
+		{"github", Report.GitHub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i, line := range strings.Split(render(t, r, tc.f), "\n") {
+				if line != strings.TrimRight(line, " \t") {
+					t.Errorf("line %d ends in whitespace: %q", i+1, line)
+				}
+			}
+		})
+	}
+}
+
 // --- markdown ---
 
 func TestMarkdownIsEmptyWhenThereIsNothingToSay(t *testing.T) {

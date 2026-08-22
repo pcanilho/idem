@@ -67,8 +67,7 @@ func (r Report) Markdown(w io.Writer) error {
 
 	fmt.Fprintf(&b, "<sub>helm %s · %d rounds%s</sub>\n", r.Helm, r.Rounds, r.unevaluableNote())
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }
 
 // headline is the churn sentence alone. What could not be rendered goes in the

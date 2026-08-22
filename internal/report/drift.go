@@ -20,8 +20,7 @@ func Drift(w io.Writer, drifts []doctor.Drift, namespace string) error {
 
 	if len(drifts) == 0 {
 		fmt.Fprintf(&b, "\n  Nothing has been written after apply in %s.\n", scope(namespace))
-		_, err := io.WriteString(w, b.String())
-		return err
+		return emit(w, b.String())
 	}
 
 	fmt.Fprintf(&b, "\n  Written after apply, in %s\n", scope(namespace))
@@ -55,8 +54,7 @@ func Drift(w io.Writer, drifts []doctor.Drift, namespace string) error {
 		writeTwoOwners(&b, d)
 	}
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }
 
 func scope(namespace string) string {

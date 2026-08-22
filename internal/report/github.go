@@ -82,8 +82,7 @@ func (r Report) GitHub(w io.Writer) error {
 
 	writeCaps(&b, errors, warnings, unplaceable)
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }
 
 // writeCaps says what GitHub will not show, rather than letting it vanish.

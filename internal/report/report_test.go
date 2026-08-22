@@ -553,6 +553,36 @@ func TestTheDiffModeCaveatHedgesWhenOnlySomeApplicationsStateTheMode(t *testing.
 	}
 }
 
+// No line may end in whitespace, in any section.
+//
+// tabwriter pads every column to the width of the widest cell, including the
+// LAST one - so a finding with no consequence, or a path row whose trailing
+// cell is empty, ends in spaces. It is invisible on a terminal and very visible
+// in a diff of captured output, which is exactly what a CI log or a golden file
+// is. idem's output is meant to be pasted and compared.
+func TestNoLineEndsInWhitespace(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:    "api",
+			RepoDir: "charts/api",
+			Findings: []check.Finding{
+				// No consequence: nothing joins this object to a workload, so
+				// the last column is empty and the row gets padded.
+				finding("api/templates/deploy.yaml", "api-cm", ".data.token"),
+				finding("api/templates/secret.yaml", "api-creds", ".stringData.a", ".stringData.b"),
+			},
+			Potential: []analyze.Use{potentialUse("api/templates/deploy.yaml", 6, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for i, line := range strings.Split(got, "\n") {
+		if line != strings.TrimRight(line, " \t") {
+			t.Errorf("line %d ends in whitespace: %q", i+1, line)
+		}
+	}
+}
+
 func suppressed(name, pointer, file string, selfHeal, respected bool) delivery.Suppressed {
 	return delivery.Suppressed{
 		Finding: finding("home/templates/s.yaml", name, ".data.key"),

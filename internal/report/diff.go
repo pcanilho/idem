@@ -21,8 +21,7 @@ func Diff(w io.Writer, findings []check.Finding, left, right string, limit int) 
 
 	if len(findings) == 0 {
 		fmt.Fprintf(&b, "\n  ✓ %s and %s are identical.\n", left, right)
-		_, err := io.WriteString(w, b.String())
-		return err
+		return emit(w, b.String())
 	}
 
 	fmt.Fprintf(&b, "\n  %s → %s\n\n", left, right)
@@ -40,6 +39,5 @@ func Diff(w io.Writer, findings []check.Finding, left, right string, limit int) 
 	n := len(findings)
 	fmt.Fprintf(&b, "\n  %d %s.\n", n, plural(n, "object differs", "objects differ"))
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }

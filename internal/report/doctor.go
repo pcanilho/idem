@@ -24,8 +24,7 @@ func Doctor(w io.Writer, d doctor.Diagnosis, context string, sources map[string]
 
 	if len(d.Suspects) == 0 {
 		fmt.Fprintf(&b, "\n  Nothing rolling far above the cluster median of %.2f rollouts/day.\n", d.Median)
-		_, err := io.WriteString(w, b.String())
-		return err
+		return emit(w, b.String())
 	}
 
 	// Numbers are padded in the verb rather than by the tabwriter, because
@@ -46,8 +45,7 @@ func Doctor(w io.Writer, d doctor.Diagnosis, context string, sources map[string]
 	b.WriteString("\n  This is triage, not proof: deploying often looks the same from here.\n")
 	writeConfirm(&b, d, context, sources)
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }
 
 // writeConfirm names the exact command that would establish the cause.

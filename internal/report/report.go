@@ -341,8 +341,7 @@ func (r Report) Text(w io.Writer) error {
 		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())))
 	writeRemediation(&b, scope, r.Engines)
 
-	_, err := io.WriteString(w, b.String())
-	return err
+	return emit(w, b.String())
 }
 
 // writeChart prints one chart's findings, grouped by the template that
@@ -504,6 +503,29 @@ func (r Report) usePath(c Chart, file string) string {
 		return path
 	}
 	return file
+}
+
+// emit writes a rendered report, with trailing whitespace removed from every
+// line.
+//
+// One choke point rather than a conditional at each of the eleven tabwriter
+// call sites. tabwriter pads every column to the width of the widest cell
+// INCLUDING the last, so any row whose final cell is empty - a finding with no
+// consequence, a continuation row - ends in spaces. Invisible on a terminal,
+// very visible in a diff of captured output, which is what a CI log and a
+// golden file both are. Doing it here also means a row added later cannot
+// reintroduce it.
+func emit(w io.Writer, s string) error {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i, line := range strings.Split(s, "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(strings.TrimRight(line, " \t"))
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // shows reports whether this engine's verdict is displayed. Empty shows all.
