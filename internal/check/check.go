@@ -159,6 +159,22 @@ func merge(into map[string]Finding, c diff.Change, sources map[string]string) {
 		return
 	}
 
+	// A round that disagreed about whether the object EXISTS beats one that
+	// only disagreed about its fields, and the two must not be welded together.
+	//
+	// Keeping the first type while appending later rounds' paths produced
+	// `only-in-left` carrying field paths, and both readers of that combination
+	// branch on len(Paths) == 0: the report then described field churn instead
+	// of saying the object sometimes does not render, and remediate emitted an
+	// ignoreDifferences entry that cannot fix a disappearing object.
+	if existing.Change.Type != diff.Differs {
+		return
+	}
+	if c.Type != diff.Differs {
+		into[key] = Finding{Source: existing.Source, Change: c}
+		return
+	}
+
 	seenPaths := make(map[string]struct{}, len(existing.Change.Paths))
 	for _, p := range existing.Change.Paths {
 		seenPaths[p.Path.JSONPointer()] = struct{}{}

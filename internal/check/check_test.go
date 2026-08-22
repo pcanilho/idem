@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pcanilho/idem/internal/diff"
 	"github.com/pcanilho/idem/internal/manifest"
 )
 
@@ -270,5 +271,65 @@ spec: {token: ` + token + `}
 	}
 	if got.Skipped != 0 {
 		t.Errorf("Skipped = %d, want 0", got.Skipped)
+	}
+}
+
+// An object whose PRESENCE varies keeps the presence verdict.
+//
+// merge kept the first round's change type and appended later rounds' paths to
+// it, so an object that is absent in round 2 and merely different in round 3
+// ended up typed only-in-left WITH field paths. Two things then read that
+// combination wrongly, both by branching on len(Paths) == 0:
+//
+//   - report.writeFinding took the field branch, so the user was never told the
+//     object sometimes does not render at all - the more serious fact.
+//   - remediate.skip emitted an ignoreDifferences entry for it, which cannot
+//     possibly fix an object that intermittently disappears.
+//
+// Presence beats fields: if any round disagrees about whether the object exists,
+// that is the finding.
+func TestAnObjectThatSometimesVanishesKeepsThePresenceVerdict(t *testing.T) {
+	const present = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keep
+data: {k: one}
+`
+	const absent = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: other
+data: {k: one}
+`
+	const differs = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keep
+data: {k: two}
+`
+
+	got, err := Compare([][]manifest.Object{parse(t, present), parse(t, absent), parse(t, differs)})
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+
+	var keep *Finding
+	for i := range got.Findings {
+		if got.Findings[i].Change.Object.Name == "keep" {
+			keep = &got.Findings[i]
+		}
+	}
+	if keep == nil {
+		t.Fatalf("no finding for ConfigMap/keep: %+v", got.Findings)
+	}
+
+	if keep.Change.Type != diff.OnlyInLeft {
+		t.Errorf("Type = %v, want only-in-left - round 2 did not render it at all", keep.Change.Type)
+	}
+	if len(keep.Change.Paths) != 0 {
+		t.Errorf("Paths = %+v, want none: a field list makes the report and the fix block both treat this as ordinary field churn", keep.Change.Paths)
 	}
 }

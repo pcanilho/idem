@@ -48,33 +48,78 @@ func Charts(root string) ([]Chart, error) {
 	}
 
 	var out []Chart
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		// Dot directories are caches and VCS metadata, never charts a user
-		// means to check. The root itself is exempt: "idem ." must work.
-		if path != root && strings.HasPrefix(d.Name(), ".") {
-			return fs.SkipDir
-		}
-		if _, statErr := os.Stat(filepath.Join(path, chartFile)); statErr != nil {
-			return nil
-		}
-		out = append(out, Chart{Dir: path, Name: nameOf(path)})
-		return fs.SkipDir
-	})
-	if err != nil {
+	// Resolved directories already walked, so a symlink pointing at an ancestor
+	// cannot loop. Keyed by the RESOLVED path, because two different links to
+	// one directory are the same chart.
+	seen := map[string]bool{}
+
+	if err := walk(root, root, seen, &out); err != nil {
 		return nil, err
 	}
+
 	slices.SortFunc(out, func(a, b Chart) int { return strings.Compare(a.Dir, b.Dir) })
 
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no chart found under %s: no directory contains a %s", root, chartFile)
 	}
 	return out, nil
+}
+
+// walk finds charts under dir, following symlinked directories.
+//
+// filepath.WalkDir deliberately does not follow symlinks: its DirEntry comes
+// from Lstat, so `d.IsDir()` is false for a link even when it points at a
+// directory. That silently dropped every symlinked chart from a run - no
+// finding, no warning, not even an unevaluable count - which in a CI gate is
+// exactly the coverage gap idem exists to prevent. Symlinked charts are
+// ordinary: one chart shared between two estates, or a vendored path linked
+// into place.
+//
+// Following them means owning loop detection, which is why WalkDir declines to.
+func walk(root, dir string, seen map[string]bool, out *[]Chart) error {
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		// A broken link is not an error for the run: it names no chart, and
+		// helm would give a better message than idem could invent.
+		return nil
+	}
+	if seen[real] {
+		return nil
+	}
+	seen[real] = true
+
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// A symlink: resolve it, and walk it if it is a directory.
+		//
+		// Except when it IS this walk's root - WalkDir reports its own starting
+		// path through Lstat too, so without this the recursion re-enters,
+		// finds the path already in seen, and returns having found nothing.
+		if path != dir && d.Type()&fs.ModeSymlink != 0 {
+			info, statErr := os.Stat(path)
+			if statErr != nil || !info.IsDir() {
+				return nil
+			}
+			return walk(root, path, seen, out)
+		}
+
+		if !d.IsDir() && path != dir {
+			return nil
+		}
+		// Dot directories are caches and VCS metadata, never charts a user
+		// means to check. The root itself is exempt: "idem ." must work.
+		if path != root && path != dir && strings.HasPrefix(d.Name(), ".") {
+			return fs.SkipDir
+		}
+		if _, statErr := os.Stat(filepath.Join(path, chartFile)); statErr != nil {
+			return nil
+		}
+		*out = append(*out, Chart{Dir: path, Name: nameOf(path)})
+		return fs.SkipDir
+	})
 }
 
 // nameOf reads metadata.name from Chart.yaml.

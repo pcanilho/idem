@@ -3,6 +3,7 @@ package discover
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -203,5 +204,56 @@ func TestChartsSortGloballyNotPerDirectory(t *testing.T) {
 		if i >= len(got) || got[i].Dir != want[i] {
 			t.Fatalf("Charts() = %v, want %v", dirs(got), want)
 		}
+	}
+}
+
+// A symlinked chart directory must be found, not silently skipped.
+//
+// Charts validated its root with os.Stat (which follows symlinks) but walked
+// with filepath.WalkDir, whose DirEntry comes from Lstat - so `!d.IsDir()`
+// rejected every symlink and a linked chart vanished from the run with no
+// warning and no unevaluable count. In a CI gate that is a silent coverage
+// gap, which is the failure idem exists to prevent.
+//
+// Symlinked chart directories are ordinary: a monorepo sharing one chart
+// between two estates, or a vendored path linked into place.
+func TestASymlinkedChartIsFound(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(t.TempDir(), "linked-chart")
+	chart(t, real, "linked")
+	chart(t, filepath.Join(root, "plain"), "plain")
+	if err := os.Symlink(real, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	got, err := Charts(root)
+	if err != nil {
+		t.Fatalf("Charts: %v", err)
+	}
+
+	var names []string
+	for _, c := range got {
+		names = append(names, c.Name)
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"linked", "plain"}) {
+		t.Errorf("Charts() = %v, want both plain and linked", names)
+	}
+}
+
+// A symlink loop must not hang or recurse forever.
+func TestASymlinkLoopTerminates(t *testing.T) {
+	root := t.TempDir()
+	chart(t, filepath.Join(root, "real"), "real")
+	if err := os.Symlink(root, filepath.Join(root, "loop")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	got, err := Charts(root)
+	if err != nil {
+		t.Fatalf("Charts: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("Charts() found %d charts, want 1: %+v", len(got), got)
 	}
 }
