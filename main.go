@@ -99,7 +99,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.chartVersion, "chart-version", "", "chart version to fetch, as helm's --version")
 	fs.BoolVar(&opt.showVersion, "version", false, "print idem's version and exit")
 
-	target, err := parseArgs(fs, args)
+	operands, err := parseArgs(fs, args)
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		// Asking for help is not an error. It goes to stdout so a pipe can
@@ -146,10 +146,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	// The one verb idem has. Disambiguated by disk, the same way a chart
-	// reference is: a directory actually named "doctor" is a chart.
-	if target == "doctor" && !exists("doctor") {
+	// The verbs. Disambiguated by disk, the same way a chart reference is: a
+	// directory actually named "doctor" is a chart, not the verb.
+	if verb(operands, "diff") {
+		return runDiff(operands[1:], stdout, stderr)
+	}
+	if verb(operands, "doctor") {
 		return runDoctor(context.Background(), opt, stdout, stderr)
+	}
+
+	target, err := chartTarget(operands)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
 	}
 
 	ref := chartref.ClassifyWithRepo(target, opt.repo, exists)
@@ -363,8 +372,9 @@ objects will never settle — under ArgoCD, under Flux, under plain Helm — alo
 with the config that stops it.
 
 usage:
-  idem [chart] [flags]   check a chart, or every chart under a directory
-  idem doctor [flags]    ask a cluster you already run what keeps rolling
+  idem [chart] [flags]     check a chart, or every chart under a directory
+  idem diff a.yaml b.yaml  compare two renders you produced yourself
+  idem doctor [flags]      ask a cluster you already run what keeps rolling
 
 examples:
   idem ./charts                      check every chart in a directory
@@ -387,12 +397,12 @@ flags:
 // Go's flag package stops at the first operand, so `idem ./charts --strict`
 // would silently ignore --strict - and a CI gate the user believes is
 // enforcing but is not is worse than no gate at all.
-func parseArgs(fs *flag.FlagSet, args []string) (string, error) {
+func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var operands []string
 	rest := args
 	for {
 		if err := fs.Parse(rest); err != nil {
-			return "", err
+			return nil, err
 		}
 		if fs.NArg() == 0 {
 			break
@@ -401,6 +411,74 @@ func parseArgs(fs *flag.FlagSet, args []string) (string, error) {
 		rest = fs.Args()[1:]
 	}
 
+	return operands, nil
+}
+
+// verb reports whether the operands name one of idem's verbs.
+//
+// Disambiguated by disk: a directory actually named "diff" or "doctor" is a
+// chart, and idem checks it rather than second-guessing the user.
+func verb(operands []string, name string) bool {
+	return len(operands) > 0 && operands[0] == name && !exists(name)
+}
+
+// runDiff compares two renders the user produced themselves.
+//
+// The comparison engine on its own - no helm, no network, no cluster.
+// Detecting non-determinism means rendering more than once, which is why
+// `idem <chart>` invokes the renderer itself; this is for when you would
+// rather produce the renderings yourself, and it is what makes kustomize a
+// target: `kustomize build a/ > a.yaml`, twice, then diff.
+func runDiff(files []string, stdout, stderr io.Writer) int {
+	if len(files) != 2 {
+		fmt.Fprintf(stderr, "idem: diff takes exactly two files, got %d\n", len(files))
+		fmt.Fprintf(stderr, "      usage: idem diff a.yaml b.yaml\n")
+		return exitFatal
+	}
+
+	rounds := make([][]manifest.Object, 0, len(files))
+	for _, name := range files {
+		objects, err := readManifests(name)
+		if err != nil {
+			fmt.Fprintf(stderr, "idem: %v\n", err)
+			return exitFatal
+		}
+		rounds = append(rounds, objects)
+	}
+
+	result, err := check.Compare(rounds)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: comparing %s and %s: %v\n", files[0], files[1], err)
+		return exitFatal
+	}
+
+	if err := report.Diff(stdout, result.Findings, files[0], files[1]); err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+	return exitOK
+}
+
+// readManifests parses one file of rendered Kubernetes objects.
+func readManifests(name string) ([]manifest.Object, error) {
+	body, err := os.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", name, err)
+	}
+	defer body.Close()
+
+	objects, err := manifest.Parse(body)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", name, err)
+	}
+	return objects, nil
+}
+
+// chartTarget is the single chart reference a check runs against.
+//
+// Zero operands means the working directory, which is what a user typing
+// `idem` in a chart repository means.
+func chartTarget(operands []string) (string, error) {
 	switch len(operands) {
 	case 0:
 		return ".", nil

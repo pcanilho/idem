@@ -1489,3 +1489,24 @@ func TestAPathThatCannotBeResolvedIsPrintedAsItCame(t *testing.T) {
 		t.Errorf("Text() = %q, want the original source kept when it cannot be resolved", got)
 	}
 }
+
+func TestTheDiffCountAgreesWithItsVerb(t *testing.T) {
+	// "1 object differ" is what keying plural() on the noun alone produces,
+	// and it has now gone wrong three times in this codebase.
+	var one, two strings.Builder
+	f := secretFinding("creds", ".data.password")
+
+	if err := Diff(&one, []check.Finding{f}, "a.yaml", "b.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Diff(&two, []check.Finding{f, secretFinding("other", ".data.x")}, "a.yaml", "b.yaml"); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(one.String(), "1 object differs") {
+		t.Errorf("Diff() = %q, want singular agreement", one.String())
+	}
+	if !strings.Contains(two.String(), "2 objects differ.") {
+		t.Errorf("Diff() = %q, want plural agreement", two.String())
+	}
+}

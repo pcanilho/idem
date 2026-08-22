@@ -1265,3 +1265,92 @@ spec:
 		t.Fatalf("exit = %d, want the Application's values still read\n%s%s", code, stdout, stderr)
 	}
 }
+
+// `idem diff a.yaml b.yaml` has been documented since before the CLI existed
+// (README.md, docs/design.md §7) and never shipped. It is the comparison
+// engine exposed directly — no helm, no network, no cluster — and it is what
+// makes kustomize a target: `kustomize build a/ > a.yaml`, twice, then diff.
+
+const renderA = `apiVersion: v1
+kind: Secret
+metadata: {name: creds, namespace: home}
+data: {password: aaa}
+`
+
+const renderB = `apiVersion: v1
+kind: Secret
+metadata: {name: creds, namespace: home}
+data: {password: bbb}
+`
+
+func TestDiffComparesTwoRendersYouMadeYourself(t *testing.T) {
+	dir := tree(t, map[string]string{"a.yaml": renderA, "b.yaml": renderB})
+
+	code, stdout, stderr := invoke(t, "diff", filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml"))
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Secret/home/creds") {
+		t.Errorf("stdout = %q, want the differing object named", stdout)
+	}
+	if !strings.Contains(stdout, ".data.password") {
+		t.Errorf("stdout = %q, want the differing field named", stdout)
+	}
+}
+
+func TestDiffNeedsNoHelmAndNoCluster(t *testing.T) {
+	// The whole point of the verb: the comparison engine on its own. Pointed
+	// at a helm that does not exist, it must still work.
+	dir := tree(t, map[string]string{"a.yaml": renderA, "b.yaml": renderB})
+
+	code, _, stderr := invoke(t, "diff", filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml"), "--helm", "/nonexistent/helm")
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d — diff renders nothing, so it needs no helm: %s", code, exitOK, stderr)
+	}
+}
+
+func TestDiffOfIdenticalRendersIsClean(t *testing.T) {
+	dir := tree(t, map[string]string{"a.yaml": renderA, "b.yaml": renderA})
+
+	code, stdout, _ := invoke(t, "diff", filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml"))
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d", code, exitOK)
+	}
+	if strings.Contains(stdout, "password") {
+		t.Errorf("stdout = %q, want nothing reported", stdout)
+	}
+}
+
+func TestDiffWantsExactlyTwoFiles(t *testing.T) {
+	code, _, stderr := invoke(t, "diff", "only-one.yaml")
+
+	if code == exitOK {
+		t.Error("exit = 0, want a clear error")
+	}
+	if !strings.Contains(stderr, "two") {
+		t.Errorf("stderr = %q, want it to say how many files it takes", stderr)
+	}
+}
+
+func TestDiffSaysWhichFileItCouldNotRead(t *testing.T) {
+	dir := tree(t, map[string]string{"a.yaml": renderA})
+
+	_, _, stderr := invoke(t, "diff", filepath.Join(dir, "a.yaml"), filepath.Join(dir, "missing.yaml"))
+
+	if !strings.Contains(stderr, "missing.yaml") {
+		t.Errorf("stderr = %q, want the unreadable file named", stderr)
+	}
+}
+
+func TestHelpNamesTheDiffVerbNowThatItExists(t *testing.T) {
+	// The rule this whole phase exists to enforce: the help and the README
+	// promise only what the binary does.
+	_, stdout, _ := invoke(t, "--help")
+
+	if !strings.Contains(stdout, "idem diff") {
+		t.Errorf("stdout = %q, want the diff verb shown", stdout)
+	}
+}
