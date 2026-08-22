@@ -329,6 +329,13 @@ The reasoning, the evidence, and the places `idem` can itself be wrong are in
 [`docs/design.md`](docs/design.md) — including why there is no rules file, why input type is
 detected rather than declared, and what each engine actually does, checked against its source.
 
+## Contributing
+
+Bug reports are most useful with a chart that reproduces the problem — something the size of
+`examples/churning-chart` is worth more than any description. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how the codebase works, and
+[SECURITY.md](SECURITY.md) for what `idem` does and does not touch.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

@@ -1,0 +1,13 @@
+# idem has one dependency on purpose, so this is quiet by design — but the
+# GitHub Actions it uses in CI are dependencies too, and those do move.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
