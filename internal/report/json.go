@@ -198,14 +198,14 @@ func (r Report) JSON(w io.Writer) error {
 			})
 		}
 		for _, f := range c.Findings {
-			out.Findings = append(out.Findings, jsonFindingOf(c, f, c.Findings, conditionClient))
+			out.Findings = append(out.Findings, jsonFindingOf(r, c, f, c.Findings, conditionClient))
 		}
 		for _, f := range c.ServerOnly {
-			out.Findings = append(out.Findings, jsonFindingOf(c, f, c.ServerOnly, conditionCluster))
+			out.Findings = append(out.Findings, jsonFindingOf(r, c, f, c.ServerOnly, conditionCluster))
 		}
 		for _, s := range c.Suppressed {
 			out.Suppressed = append(out.Suppressed, jsonSuppressed{
-				Finding: jsonFindingOf(c, s.Finding, c.Findings, conditionClient),
+				Finding: jsonFindingOf(r, c, s.Finding, c.Findings, conditionClient),
 				By: jsonRule{
 					File: s.By.File, Pointers: s.By.Pointers,
 					SelfHeal: s.By.SelfHeal, Respected: s.By.Respected, Engine: s.By.Engine,
@@ -258,12 +258,12 @@ const (
 	conditionCluster = "cluster"
 )
 
-func jsonFindingOf(c Chart, f check.Finding, siblings []check.Finding, condition string) jsonFinding {
+func jsonFindingOf(r Report, c Chart, f check.Finding, siblings []check.Finding, condition string) jsonFinding {
 	cost := consequenceOf(f, siblings)
 
 	out := jsonFinding{
 		Chart:     c.Name,
-		Source:    f.Source,
+		Source:    r.sourcePath(c, f.Source),
 		Type:      f.Change.Type.String(),
 		Condition: condition,
 		Object: jsonObject{

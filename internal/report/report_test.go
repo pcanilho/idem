@@ -1449,3 +1449,43 @@ func TestTheFluxBlockIsNotShownWhenOnlyArgoCDWasAskedFor(t *testing.T) {
 		t.Errorf("Text() = %q, want only the engine that was asked for", got)
 	}
 }
+
+// The path idem prints is the one a reader is meant to open. `-o github`
+// already resolves it against the repository; `-o text` and `-o json` print a
+// chart-relative path that opens from nowhere, so the human format is the one
+// you cannot click and the JSON a policy engine reads cannot locate the file
+// either.
+
+func TestTextPrintsAPathTheReaderCanOpen(t *testing.T) {
+	root := repoWith(t, "charts/home/templates/secrets.yaml")
+	f := secretFinding("creds", ".data.password")
+	f.Source = "home/templates/secrets.yaml"
+
+	got := text(t, Report{
+		Root:   root,
+		Charts: []Chart{{Name: "home", RepoDir: "charts/home", Findings: []check.Finding{f}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "charts/home/templates/secrets.yaml") {
+		t.Errorf("Text() = %q, want the path resolved against the repository", got)
+	}
+}
+
+func TestAPathThatCannotBeResolvedIsPrintedAsItCame(t *testing.T) {
+	// A subchart vendored as a .tgz produces a path that resolves to nowhere.
+	// idem prints what helm said rather than inventing a location — the same
+	// reason `-o github` declines to annotate it.
+	f := secretFinding("creds", ".data.password")
+	f.Source = "home/charts/vendored/templates/x.yaml"
+
+	got := text(t, Report{
+		Root:   t.TempDir(),
+		Charts: []Chart{{Name: "home", RepoDir: "charts/home", Findings: []check.Finding{f}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "home/charts/vendored/templates/x.yaml") {
+		t.Errorf("Text() = %q, want the original source kept when it cannot be resolved", got)
+	}
+}

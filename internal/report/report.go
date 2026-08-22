@@ -280,7 +280,7 @@ func (r Report) Text(w io.Writer) error {
 		if c.Err != nil || (len(c.Findings) == 0 && len(c.ServerOnly) == 0) {
 			continue
 		}
-		writeChart(&b, c, r.Engines)
+		writeChart(&b, r, c, r.Engines)
 		detail = true
 	}
 	if writeSuppressed(&b, scope) {
@@ -322,15 +322,15 @@ func (r Report) Text(w io.Writer) error {
 // writeChart prints one chart's findings, grouped by the template that
 // produced each object - so a chart that regenerates six fields in one
 // template reads as one place to look, not six.
-func writeChart(b *strings.Builder, c Chart, show []string) {
-	writeGroups(b, c, c.Findings)
+func writeChart(b *strings.Builder, r Report, c Chart, show []string) {
+	writeGroups(b, r, c, c.Findings)
 
 	// Under its own heading, because the reader has to know these did NOT
 	// happen under `helm template`: the object is real, the churn is real, and
 	// the engine it applies to is not the one the rest of the output names.
 	if len(c.ServerOnly) > 0 {
 		b.WriteString("\n  identical under `helm template`; differs with `lookup` resolved\n")
-		writeGroups(b, c, c.ServerOnly)
+		writeGroups(b, r, c, c.ServerOnly)
 	}
 
 	writeVerdicts(b, c.Verdicts, show)
@@ -339,10 +339,10 @@ func writeChart(b *strings.Builder, c Chart, show []string) {
 // writeGroups prints findings grouped by the template that produced each
 // object - so a chart that regenerates six fields in one template reads as one
 // place to look, not six.
-func writeGroups(b *strings.Builder, c Chart, findings []check.Finding) {
+func writeGroups(b *strings.Builder, r Report, c Chart, findings []check.Finding) {
 	groups := make(map[string][]check.Finding)
 	for _, f := range findings {
-		key := f.Source
+		key := r.sourcePath(c, f.Source)
 		if key == "" {
 			key = c.Name + " " + unknownSource
 		}
@@ -401,6 +401,24 @@ func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string)
 		b.WriteString("      That is a chart defect rather than an ArgoCD limitation — worth reporting\n")
 		b.WriteString("      upstream, and pinning the value meanwhile.\n")
 	}
+}
+
+// sourcePath is the path to print for a finding: resolved against the
+// repository when idem can confirm the file is there, and exactly what helm
+// said when it cannot.
+//
+// The printed path is the one the reader is meant to open, so a chart-relative
+// path opens from nowhere. Resolution is `locate`, the same check `-o github`
+// already uses to decide whether to annotate - a path that resolves to a file
+// nobody has is worse than the original, which at least says what helm saw.
+func (r Report) sourcePath(c Chart, source string) string {
+	if source == "" {
+		return ""
+	}
+	if path, ok := r.locate(c, trimChartPrefix(source)); ok {
+		return path
+	}
+	return source
 }
 
 // shows reports whether this engine's verdict is displayed. Empty shows all.

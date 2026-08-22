@@ -452,3 +452,20 @@ func TestEveryFormatReportsAnUnrenderableChartOutsideRatchetScope(t *testing.T) 
 		t.Errorf("GitHub() = %q, want the chart reported", got)
 	}
 }
+
+func TestJSONCarriesAPathAPolicyEngineCanOpen(t *testing.T) {
+	root := repoWith(t, "charts/home/templates/secrets.yaml")
+	f := secretFinding("creds", ".data.password")
+	f.Source = "home/templates/secrets.yaml"
+
+	got := asJSON(t, Report{
+		Root:   root,
+		Charts: []Chart{{Name: "home", RepoDir: "charts/home", Findings: []check.Finding{f}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	source := got["findings"].([]any)[0].(map[string]any)["source"]
+	if source != "charts/home/templates/secrets.yaml" {
+		t.Errorf("source = %v, want the repository-relative path", source)
+	}
+}
