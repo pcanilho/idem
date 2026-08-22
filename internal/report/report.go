@@ -41,6 +41,12 @@ type Chart struct {
 	// when the chart is not inside it. Only used to place annotations.
 	RepoDir string
 
+	// Release is the release name, when the delivery config named one that
+	// differs from the chart name. Empty means idem used the chart name.
+	// Reported for the same reason the namespace is: .Release.Name is in the
+	// name of nearly every object below.
+	Release string
+
 	// Namespace is the release namespace this chart rendered into, and
 	// NamespaceFrom what decided it: the delivery manifest that claims the
 	// chart, NamespaceFromFlag when the user said, or empty when idem defaulted.
@@ -270,8 +276,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s%s\n",
-		r.Helm, r.Rounds, r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())
+	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s%s%s\n",
+		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())
 	writeRemediation(&b, scope)
 
 	_, err := io.WriteString(w, b.String())
@@ -490,6 +496,19 @@ func (r Report) namespaceNote() string {
 		return fmt.Sprintf(" · namespace %s (%s)", ns, NamespaceFromFlag)
 	}
 	return fmt.Sprintf(" · namespace %s (%s)", ns, from)
+}
+
+// releaseNote says the release names did not come from the chart directories.
+//
+// Summarised, not listed: it is one clause however many charts it covers, and
+// each object's own line already carries the name it produced.
+func (r Report) releaseNote() string {
+	for _, c := range r.Charts {
+		if c.Release != "" {
+			return " · release names from delivery config"
+		}
+	}
+	return ""
 }
 
 // deliveryNote acknowledges the manifests idem read outside the chart tree.

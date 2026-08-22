@@ -19,10 +19,11 @@ type jsonReport struct {
 	Engines  []string `json:"engines,omitempty"`
 	Delivery []string `json:"delivery,omitempty"`
 
-	// Namespaces is which namespace each chart rendered into and what decided
-	// it, because it changes the identity of every object below and a
-	// consumer cannot tell "the repository says so" from "idem picked one".
-	Namespaces []jsonNamespace `json:"namespaces,omitempty"`
+	// Releases is how each chart was rendered - release name and namespace,
+	// and what decided them. Both change the identity of every object below,
+	// and a consumer cannot tell "the repository says so" from "idem picked
+	// one" without being told.
+	Releases []jsonRelease `json:"releases,omitempty"`
 
 	Summary     jsonSummary       `json:"summary"`
 	Findings    []jsonFinding     `json:"findings"`
@@ -33,8 +34,12 @@ type jsonReport struct {
 	Remediation []jsonEntry       `json:"remediation,omitempty"`
 }
 
-type jsonNamespace struct {
-	Chart     string `json:"chart"`
+type jsonRelease struct {
+	Chart string `json:"chart"`
+
+	// Release is the release name when the delivery config named one, absent
+	// when idem used the chart name.
+	Release   string `json:"release,omitempty"`
 	Namespace string `json:"namespace"`
 
 	// From is the manifest that decided it, "--namespace" when the user did,
@@ -167,8 +172,8 @@ func (r Report) JSON(w io.Writer) error {
 	var all []check.Finding
 	for _, c := range r.inScope() {
 		if c.Namespace != "" {
-			out.Namespaces = append(out.Namespaces, jsonNamespace{
-				Chart: c.Name, Namespace: c.Namespace, From: c.NamespaceFrom,
+			out.Releases = append(out.Releases, jsonRelease{
+				Chart: c.Name, Release: c.Release, Namespace: c.Namespace, From: c.NamespaceFrom,
 			})
 		}
 		for _, f := range c.Findings {

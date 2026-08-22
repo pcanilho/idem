@@ -585,3 +585,135 @@ spec:
 		t.Errorf("NamespaceFor() = %q, want empty", ns)
 	}
 }
+
+// What a chart is rendered WITH is as much a fact of the delivery config as
+// where it is deployed. Rendering a chart with no values at all makes idem
+// report "could not be rendered" about charts that render perfectly well for
+// the Application that owns them - and their `required` guards say exactly
+// that, which is the chart working, not failing.
+
+const withHelmValues = `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: home-app}
+spec:
+  destination: {namespace: home}
+  source:
+    path: charts/home
+    helm:
+      releaseName: home-release
+      valueFiles:
+        - values-prod.yaml
+        - /shared/base.yaml
+      valuesObject:
+        cluster: truenas
+        replicas: 3
+      parameters:
+        - name: image.tag
+          value: v1.2.3
+`
+
+func TestTheReleaseNameComesFromTheApplication(t *testing.T) {
+	// ArgoCD renders with spec.source.helm.releaseName, and .Release.Name is
+	// in the name of nearly every object a chart produces.
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withHelmValues)
+
+	if got := load(t, dir).ValuesFor("charts/home").Release; got != "home-release" {
+		t.Errorf("Release = %q, want home-release", got)
+	}
+}
+
+func TestValueFilesAreReadInOrder(t *testing.T) {
+	// Later files win in helm, so order is semantic, not cosmetic.
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withHelmValues)
+
+	got := load(t, dir).ValuesFor("charts/home").ValueFiles
+	want := []string{"charts/home/values-prod.yaml", "shared/base.yaml"}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("ValueFiles = %v, want %v - a leading slash is repo-root relative, otherwise source-relative", got, want)
+	}
+}
+
+func TestParametersBecomeSetArguments(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withHelmValues)
+
+	got := load(t, dir).ValuesFor("charts/home").Sets
+
+	if !slices.Contains(got, "image.tag=v1.2.3") {
+		t.Errorf("Sets = %v, want the parameter", got)
+	}
+}
+
+func TestValuesObjectIsCarriedAsAMap(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withHelmValues)
+
+	got := load(t, dir).ValuesFor("charts/home").Inline
+
+	if got["cluster"] != "truenas" {
+		t.Errorf("Inline[cluster] = %v, want truenas", got["cluster"])
+	}
+	if got["replicas"] != 3 {
+		t.Errorf("Inline[replicas] = %v, want 3 - the type has to survive", got["replicas"])
+	}
+}
+
+func TestTheValuesStringIsParsedLikeAValuesFile(t *testing.T) {
+	// spec.source.helm.values is raw YAML in a string. ArgoCD parses it; so
+	// must idem, or a nested key arrives as one flat string.
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: home-app}
+spec:
+  source:
+    path: charts/home
+    helm:
+      values: |
+        image:
+          tag: v9
+`)
+
+	got := load(t, dir).ValuesFor("charts/home").Inline
+	image, ok := got["image"].(map[string]any)
+
+	if !ok || image["tag"] != "v9" {
+		t.Errorf("Inline = %#v, want the YAML parsed into a nested map", got)
+	}
+}
+
+func TestATemplatedValueIsRecordedRatherThanGuessed(t *testing.T) {
+	// A generator substitutes this per generated Application. idem has no
+	// generator, so it neither invents a value nor pretends the key is absent.
+	dir := t.TempDir()
+	write(t, dir, "apps/set.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: flux}
+spec:
+  template:
+    spec:
+      source:
+        path: charts/platform/flux-bootstrap
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+          parameters:
+            - name: webRoute.enabled
+              value: '{{ .enabled }}'
+`)
+
+	got := load(t, dir).ValuesFor("charts/platform/flux-bootstrap")
+
+	if len(got.Inline) != 0 || len(got.Sets) != 0 {
+		t.Errorf("Inline = %v, Sets = %v, want neither guessed at", got.Inline, got.Sets)
+	}
+	if !slices.Contains(got.Templated, "cluster") || !slices.Contains(got.Templated, "webRoute.enabled") {
+		t.Errorf("Templated = %v, want both keys recorded as unresolvable", got.Templated)
+	}
+}

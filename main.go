@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/pcanilho/idem/internal/analyze"
+	"gopkg.in/yaml.v3"
+
 	"github.com/pcanilho/idem/internal/chartref"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/cluster"
@@ -189,13 +191,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	queue := make([]scan.Chart, 0, len(charts))
-	namespaces := make(map[string][2]string, len(charts))
-	for _, c := range charts {
-		ns, from := releaseNamespace(deliveryCfg, opt, chartPath(root, c.ref))
-		namespaces[c.ref] = [2]string{ns, from}
+	// One directory for every values block idem has to materialise, removed
+	// when the run ends. Never written into the user's tree: idem does not
+	// dirty a working directory it was only asked to read.
+	inlineDir, err := os.MkdirTemp("", "idem-values-")
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+	defer os.RemoveAll(inlineDir)
 
-		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt, ns)}
+	queue := make([]scan.Chart, 0, len(charts))
+	releases := make(map[string]release, len(charts))
+	for _, c := range charts {
+		path := chartPath(root, c.ref)
+
+		inline, err := writeInline(inlineDir, c.release, deliveryCfg.ValuesFor(path).Inline)
+		if err != nil {
+			fmt.Fprintf(stderr, "idem: could not write the values %s supplies to %s: %v\n",
+				deliveryCfg.ValuesFor(path).File, c.release, err)
+		}
+
+		rel := resolveRelease(deliveryCfg, opt, root, path, c.release, inline)
+		releases[c.ref] = rel
+
+		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt, rel)}
 
 		// A second, independent measurement of the same chart: through the API
 		// server, where lookup resolves and the chart sees the cluster's real
@@ -266,8 +286,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:          result.Chart.Name,
 			Dir:           result.Chart.Dir,
-			Namespace:     namespaces[result.Chart.Dir][0],
-			NamespaceFrom: namespaces[result.Chart.Dir][1],
+			Release:       deliveredRelease(releases[result.Chart.Dir], result.Chart.Name),
+			Namespace:     releases[result.Chart.Dir].namespace,
+			NamespaceFrom: releases[result.Chart.Dir].from,
 			RepoDir:       chartPath(root, result.Chart.Dir),
 			Deps:          resolutions.of(result.Chart.Dir),
 			Changed:       gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
@@ -362,15 +383,15 @@ type options struct {
 }
 
 // specFor builds the render request for one chart.
-func specFor(ref chartref.Ref, t target, opt options, namespace string) engine.Spec {
+func specFor(ref chartref.Ref, t target, opt options, rel release) engine.Spec {
 	return engine.Spec{
 		ChartRef:    t.ref,
-		Release:     t.release,
-		Namespace:   namespace,
+		Release:     rel.name,
+		Namespace:   rel.namespace,
 		Repo:        ref.Repo,
 		Version:     opt.chartVersion,
-		ValuesFiles: opt.valuesFiles,
-		SetValues:   opt.setValues,
+		ValuesFiles: rel.files,
+		SetValues:   rel.sets,
 	}
 }
 
@@ -398,6 +419,79 @@ func releaseNamespace(cfg delivery.Config, opt options, chartPath string) (strin
 		return ns, file
 	}
 	return defaultNamespace, ""
+}
+
+// deliveredRelease is the release name to report, which is nothing at all when
+// it is simply the chart name: saying "release home, chart home" on every line
+// of a 16-chart estate is noise, and the interesting case is when they differ.
+func deliveredRelease(rel release, chart string) string {
+	if rel.name == chart {
+		return ""
+	}
+	return rel.name
+}
+
+// release is everything the delivery config decided about rendering one chart.
+//
+// idem's unit of analysis is a release - chart plus values plus engine - and
+// this is the half that does not come from the chart directory.
+type release struct {
+	namespace string
+	from      string
+	name      string
+	files     []string
+	sets      []string
+
+	// unresolved names values a generator substitutes, which idem refused to
+	// invent. Carried so a chart that will not render can say what it lacked.
+	unresolved []string
+}
+
+// resolveRelease reads what the delivery config renders this chart with.
+//
+// Order is ArgoCD's: valueFiles, then values/valuesObject, then parameters.
+// The user's own -f and --set go last in each, because a flag typed at the
+// terminal is a deliberate override of what the repository says.
+func resolveRelease(cfg delivery.Config, opt options, root, chartPath, chartName, inline string) release {
+	ns, from := releaseNamespace(cfg, opt, chartPath)
+	rel := release{namespace: ns, from: from, name: chartName}
+
+	vals := cfg.ValuesFor(chartPath)
+	if vals.Release != "" {
+		rel.name = vals.Release
+	}
+	rel.unresolved = vals.Templated
+
+	for _, f := range vals.ValueFiles {
+		rel.files = append(rel.files, filepath.Join(root, f))
+	}
+	if inline != "" {
+		rel.files = append(rel.files, inline)
+	}
+	rel.files = append(rel.files, opt.valuesFiles...)
+	rel.sets = append(append(rel.sets, vals.Sets...), opt.setValues...)
+
+	return rel
+}
+
+// writeInline materialises spec.source.helm.valuesObject as a values file,
+// because that is the only way to hand helm a nested structure faithfully -
+// --set has its own escaping rules and would mangle a value containing a comma
+// or a dot.
+func writeInline(dir string, name string, values map[string]any) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+
+	body, err := yaml.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name+"-values.yaml")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // target is one chart to render.

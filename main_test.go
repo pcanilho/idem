@@ -282,7 +282,7 @@ func TestChartVersionReachesTheRenderSpec(t *testing.T) {
 		chartref.Ref{Raw: "postgresql", Kind: chartref.RepoURL, Repo: "https://charts.example.com"},
 		target{ref: "postgresql", release: "pg"},
 		options{chartVersion: "12.1.0"},
-		defaultNamespace,
+		release{namespace: defaultNamespace, name: "pg"},
 	)
 
 	if got, want := spec.Version, "12.1.0"; got != want {
@@ -301,7 +301,7 @@ func TestValuesFilesAndSetValuesReachTheRenderSpecInOrder(t *testing.T) {
 			valuesFiles: multiFlag{"base.yaml", "prod.yaml"},
 			setValues:   multiFlag{"a=1"},
 		},
-		defaultNamespace,
+		release{namespace: defaultNamespace, name: "c", files: []string{"base.yaml", "prod.yaml"}, sets: []string{"a=1"}},
 	)
 
 	if got := strings.Join(spec.ValuesFiles, ","); got != "base.yaml,prod.yaml" {
@@ -881,5 +881,112 @@ spec:
 
 	if !strings.Contains(stdout, "namespace elsewhere (--namespace)") {
 		t.Errorf("stdout = %q, want the flag to win and be credited", stdout)
+	}
+}
+
+const guardedChart = `apiVersion: v2
+name: needs
+version: 0.1.0
+`
+
+// requiredTemplate is the shape the estate uses: a chart that refuses to
+// render without a value its Application supplies. That guard working is the
+// chart being correct, not the chart being broken.
+const requiredTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-cm
+data:
+  cluster: {{ required "cluster is required (the Application supplies it)" .Values.cluster }}
+  tag: {{ .Values.image.tag | default "none" }}
+`
+
+func TestAChartRendersWithTheValuesItsApplicationSupplies(t *testing.T) {
+	requireHelm(t)
+
+	dir := tree(t, map[string]string{
+		"apps/needs.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: needs}
+spec:
+  source:
+    path: charts/needs
+    helm:
+      valuesObject:
+        cluster: truenas
+      parameters:
+        - name: image.tag
+          value: v1.2.3
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"))
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d — the Application supplies the value\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "renders consistently") {
+		t.Errorf("stdout = %q, want a clean render", stdout)
+	}
+}
+
+func TestTheReleaseNameComesFromTheApplicationToo(t *testing.T) {
+	requireHelm(t)
+
+	// .Release.Name is in the name of nearly every object a chart produces, so
+	// taking it from the chart directory reports identities the cluster will
+	// never have.
+	dir := tree(t, map[string]string{
+		"apps/needs.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: needs}
+spec:
+  source:
+    path: charts/needs
+    helm:
+      releaseName: chosen
+      valuesObject: {cluster: truenas}
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/needs"), "-o", "json")
+
+	if !strings.Contains(stdout, "chosen") {
+		t.Errorf("stdout = %q, want the Application's releaseName used", stdout)
+	}
+}
+
+func TestAValueFileNamedByTheApplicationIsPassedToHelm(t *testing.T) {
+	requireHelm(t)
+
+	dir := tree(t, map[string]string{
+		"apps/needs.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: needs}
+spec:
+  source:
+    path: charts/needs
+    helm:
+      valueFiles:
+        - /shared/base.yaml
+`,
+		"shared/base.yaml":               "cluster: from-a-file\n",
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"))
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d — a leading slash is repo-root relative\n%s%s", code, exitOK, stdout, stderr)
 	}
 }

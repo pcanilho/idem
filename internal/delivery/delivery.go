@@ -12,6 +12,7 @@ package delivery
 import (
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -72,13 +73,66 @@ type Destination struct {
 	Templated bool
 }
 
+// Values is what a delivery manifest renders a chart WITH.
+//
+// A chart is not the unit of analysis - a release is - and half of a release
+// is its values. Rendering with none makes idem report "could not be rendered"
+// about charts whose `required` guards are working exactly as written.
+type Values struct {
+	Path string
+	File string
+
+	// Release is spec.source.helm.releaseName. .Release.Name is in the name of
+	// nearly every object a chart produces, so getting it from the chart name
+	// instead reports identities the cluster will never have.
+	Release string
+
+	// ValueFiles are repository-relative, in order: later files win, so the
+	// order is semantic. A leading slash in the manifest means "from the repo
+	// root"; anything else is relative to spec.source.path.
+	ValueFiles []string
+
+	// Inline is spec.source.helm.valuesObject merged under the parsed
+	// spec.source.helm.values string, and Sets are the parameters as
+	// name=value. Kept apart because helm's precedence differs between them.
+	Inline map[string]any
+	Sets   []string
+
+	// Templated names the keys a generator substitutes, which idem cannot
+	// resolve and refuses to invent. Recorded so the reason a chart would not
+	// render can name them rather than reporting a bare failure.
+	Templated []string
+}
+
 // Config is what the delivery manifests in a tree say.
 type Config struct {
 	Root         string
 	Engines      []string
 	Rules        []Rule
 	Destinations []Destination
+	Values       []Values
 	Files        []string
+}
+
+// ValuesFor is what the delivery config renders this chart with.
+//
+// Two manifests claiming one chart are merged in neither direction: as with
+// NamespaceFor, idem has no Application of its own to choose between them, and
+// rendering with a mixture of two releases' values would produce a release
+// nobody deploys. The first is used and the rest ignored only when they agree
+// on being absent; otherwise nothing is returned.
+func (c Config) ValuesFor(chartPath string) Values {
+	var found []Values
+	for _, v := range c.Values {
+		if v.Path == "" || v.Path != chartPath {
+			continue
+		}
+		found = append(found, v)
+	}
+	if len(found) != 1 {
+		return Values{}
+	}
+	return found[0]
 }
 
 // NamespaceFor is the namespace the delivery config says this chart deploys
@@ -158,7 +212,7 @@ func Load(root string) (Config, error) {
 			rel = path
 		}
 
-		rules, dests, found := parse(body, rel)
+		rules, dests, values, found := parse(body, rel)
 		if len(found) == 0 {
 			return nil
 		}
@@ -167,6 +221,7 @@ func Load(root string) (Config, error) {
 		}
 		cfg.Rules = append(cfg.Rules, rules...)
 		cfg.Destinations = append(cfg.Destinations, dests...)
+		cfg.Values = append(cfg.Values, values...)
 		cfg.Files = append(cfg.Files, rel)
 		return nil
 	})
@@ -204,7 +259,20 @@ func mentionsDeliveryKind(body []byte) bool {
 // --- the shapes idem reads, and nothing more ---
 
 type source struct {
-	Path string `yaml:"path"`
+	Path string      `yaml:"path"`
+	Helm *helmSource `yaml:"helm"`
+}
+
+// helmSource is spec.source.helm - what ArgoCD renders the chart with.
+type helmSource struct {
+	ReleaseName  string         `yaml:"releaseName"`
+	ValueFiles   []string       `yaml:"valueFiles"`
+	Values       string         `yaml:"values"`
+	ValuesObject map[string]any `yaml:"valuesObject"`
+	Parameters   []struct {
+		Name  string `yaml:"name"`
+		Value string `yaml:"value"`
+	} `yaml:"parameters"`
 }
 
 type ignoreDifference struct {
@@ -260,9 +328,10 @@ type document struct {
 //
 // A document that will not decode is skipped rather than reported: most YAML
 // in a chart repository is Go template source and was never meant to parse.
-func parse(body []byte, file string) ([]Rule, []Destination, []string) {
+func parse(body []byte, file string) ([]Rule, []Destination, []Values, []string) {
 	var rules []Rule
 	var dests []Destination
+	var values []Values
 	var engines []string
 
 	decoder := yaml.NewDecoder(strings.NewReader(string(body)))
@@ -277,18 +346,109 @@ func parse(body []byte, file string) ([]Rule, []Destination, []string) {
 			engines = append(engines, "argocd")
 			rules = append(rules, argoRules(doc.Spec.appSpec, file)...)
 			dests = append(dests, argoDestinations(doc.Spec.appSpec, file)...)
+			values = append(values, argoValues(doc.Spec.appSpec, file)...)
 		case "ApplicationSet":
 			engines = append(engines, "argocd")
 			if doc.Spec.Template != nil {
 				rules = append(rules, argoRules(doc.Spec.Template.Spec, file)...)
 				dests = append(dests, argoDestinations(doc.Spec.Template.Spec, file)...)
+				values = append(values, argoValues(doc.Spec.Template.Spec, file)...)
 			}
 		case "HelmRelease":
 			engines = append(engines, "flux")
 			rules = append(rules, fluxRules(doc, file)...)
 		}
 	}
-	return rules, dests, engines
+	return rules, dests, values, engines
+}
+
+// templated reports whether a generator substitutes this at runtime. idem has
+// no generator, so anything carrying `{{` is a value it cannot know.
+func templated(s string) bool { return strings.Contains(s, "{{") }
+
+// argoValues reads spec.source.helm for every chart path the manifest claims.
+//
+// Templated entries are dropped and named rather than guessed at: a fabricated
+// value renders a release nobody deploys, and idem would be reporting on it as
+// if it were real.
+func argoValues(spec appSpec, file string) []Values {
+	sources := []source{}
+	if spec.Source != nil {
+		sources = append(sources, *spec.Source)
+	}
+	sources = append(sources, spec.Sources...)
+
+	var out []Values
+	for _, src := range sources {
+		if src.Helm == nil || src.Path == "" || templated(src.Path) {
+			continue
+		}
+
+		v := Values{Path: src.Path, File: file}
+		if !templated(src.Helm.ReleaseName) {
+			v.Release = src.Helm.ReleaseName
+		}
+
+		for _, f := range src.Helm.ValueFiles {
+			if templated(f) {
+				v.Templated = append(v.Templated, f)
+				continue
+			}
+			v.ValueFiles = append(v.ValueFiles, valueFilePath(src.Path, f))
+		}
+
+		// The `values` string is a values FILE in a string, so it parses the
+		// same way. valuesObject is layered over it, which is ArgoCD's own
+		// precedence.
+		v.Inline = parseValues(src.Helm.Values)
+		for key, val := range src.Helm.ValuesObject {
+			if text, ok := val.(string); ok && templated(text) {
+				v.Templated = append(v.Templated, key)
+				continue
+			}
+			if v.Inline == nil {
+				v.Inline = map[string]any{}
+			}
+			v.Inline[key] = val
+		}
+
+		for _, p := range src.Helm.Parameters {
+			if templated(p.Value) || templated(p.Name) {
+				v.Templated = append(v.Templated, p.Name)
+				continue
+			}
+			v.Sets = append(v.Sets, p.Name+"="+p.Value)
+		}
+
+		out = append(out, v)
+	}
+	return out
+}
+
+// valueFilePath resolves a valueFiles entry to a repository-relative path.
+//
+// A leading slash means the repository root rather than the filesystem root -
+// ArgoCD's own rule, and the reason a chart can move without its Application
+// changing.
+func valueFilePath(chartPath, file string) string {
+	if after, ok := strings.CutPrefix(file, "/"); ok {
+		return after
+	}
+	return path.Join(chartPath, file)
+}
+
+// parseValues reads the spec.source.helm.values string. Unparseable YAML is
+// nothing rather than an error: the manifest is the user's, not idem's, and a
+// values block idem cannot read is not a reason to refuse the whole run.
+func parseValues(text string) map[string]any {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal([]byte(text), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // argoDestinations reads spec.destination.namespace against every chart path
