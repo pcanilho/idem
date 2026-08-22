@@ -91,6 +91,16 @@ type Evidence struct {
 	Uses []analyze.Use
 	Err  error
 
+	// Client is what the `helm template` condition observed: true means the
+	// renders were identical. That condition IS what an engine without cluster
+	// access reconciles under, so for those engines this is the answer rather
+	// than evidence towards one.
+	//
+	// Nil means it was not established. It is a pointer for the same reason
+	// Cluster is: the zero value of a bool would make evidence nobody filled in
+	// read as "rendered identically", which is the one thing it must never say.
+	Client *bool
+
 	// Cluster is what the API-server condition observed, when idem was allowed
 	// to look: true means the chart rendered identically with lookup
 	// resolving. Nil means it was not measured, which is the whole difference
@@ -106,10 +116,28 @@ type Evidence struct {
 func (t Target) Verdict(ev Evidence) engine.Verdict {
 	uses := ev.Uses
 	// `helm template` resolves lookup to {} by construction, which IS the
-	// condition an engine without cluster access renders under. So the
-	// observed difference was not extrapolated to this engine - it was
-	// measured there, and no lookup in the chart can change it.
+	// condition an engine without cluster access renders under. So whatever
+	// that condition did was measured on this engine rather than extrapolated
+	// to it, in both directions, and no lookup in the chart can change it -
+	// nor can anything the API-server condition saw, which this engine cannot
+	// reach.
 	if !t.caps.LookupResolves {
+		switch {
+		case ev.Client == nil:
+			return engine.Verdict{
+				Engine:   t.name,
+				Result:   engine.Unknown,
+				Because:  "the `helm template` condition was not measured",
+				Observed: false,
+			}
+		case *ev.Client:
+			return engine.Verdict{
+				Engine:   t.name,
+				Result:   engine.Stable,
+				Because:  "renders identically without cluster access (observed)",
+				Observed: true,
+			}
+		}
 		return engine.Verdict{Engine: t.name, Result: engine.Churns, Because: t.churn, Observed: true}
 	}
 
@@ -141,6 +169,40 @@ func (t Target) Verdict(ev Evidence) engine.Verdict {
 			Engine:   t.name,
 			Result:   engine.Unknown,
 			Because:  fmt.Sprintf("could not scan this chart for `lookup`: %v", ev.Err),
+			Observed: false,
+		}
+	}
+
+	// Nothing was established about either condition, so there is nothing to
+	// reason from. Absent evidence is unknown, never fine.
+	if ev.Client == nil {
+		return engine.Verdict{
+			Engine:   t.name,
+			Result:   engine.Unknown,
+			Because:  "neither render condition was measured",
+			Observed: false,
+		}
+	}
+
+	// The renders matched without cluster access. Whether they still match
+	// WITH it depends entirely on whether the chart reads any cluster state,
+	// and only lookup can.
+	if *ev.Client {
+		if len(uses) == 0 {
+			return engine.Verdict{
+				Engine:   t.name,
+				Result:   engine.Stable,
+				Because:  "renders identically and calls no `lookup`, so cluster state cannot reach it",
+				Observed: false,
+			}
+		}
+
+		best, _ := analyze.Best(uses)
+		return engine.Verdict{
+			Engine: t.name,
+			Result: engine.Unknown,
+			Because: fmt.Sprintf("renders identically without a cluster, but calls `lookup` (%s:%d) — unmeasured with it resolving",
+				best.File, best.Line),
 			Observed: false,
 		}
 	}

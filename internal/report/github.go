@@ -28,26 +28,20 @@ func (r Report) GitHub(w io.Writer) error {
 	var errors, warnings, unplaceable int
 
 	for _, c := range r.inScope() {
+		// Both conditions annotate at error level: each is a difference idem
+		// observed, differing only in which engines reconcile it - and the
+		// message says which, so the reviewer is never left to assume.
 		for _, f := range c.Findings {
-			file, ok := r.locate(c, trimChartPrefix(f.Source))
-			if !ok {
-				unplaceable++
-				continue
-			}
-			if errors >= annotationCap {
-				errors++
-				continue
-			}
-			errors++
-
-			cost := consequenceOf(f, c.Findings).Text
-			fmt.Fprintf(&b, "::error file=%s::%s\n", property(file), message(f, cost))
+			annotate(&b, r, c, f, "", &errors, &unplaceable)
+		}
+		for _, f := range c.ServerOnly {
+			annotate(&b, r, c, f, " when `lookup` resolves", &errors, &unplaceable)
 		}
 
 		// idem cannot attribute an observed difference to a particular
 		// function, so on a chart that churned it must not say this one
 		// stayed quiet.
-		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && c.Err == nil
+		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && len(c.ServerOnly) == 0 && c.Err == nil
 
 		for _, u := range c.Potential {
 			file, ok := r.locate(c, u.File)
@@ -128,13 +122,30 @@ func (r Report) locate(c Chart, rel string) (string, bool) {
 	return path, true
 }
 
-func message(f check.Finding, cost string) string {
+// annotate writes one finding's workflow command, counting what it could not
+// place and what the cap held back rather than dropping either silently.
+func annotate(b *strings.Builder, r Report, c Chart, f check.Finding, when string, errors, unplaceable *int) {
+	file, ok := r.locate(c, trimChartPrefix(f.Source))
+	if !ok {
+		*unplaceable++
+		return
+	}
+	*errors++
+	if *errors > annotationCap {
+		return
+	}
+
+	cost := consequenceOf(f, siblingsOf(c)).Text
+	fmt.Fprintf(b, "::error file=%s::%s\n", property(file), message(f, cost, when))
+}
+
+func message(f check.Finding, cost, when string) string {
 	var fields []string
 	for _, p := range f.Change.Paths {
 		fields = append(fields, p.Path.String())
 	}
 
-	msg := fmt.Sprintf("idem: %s renders inconsistently", f.Change.Object.Display())
+	msg := fmt.Sprintf("idem: %s renders inconsistently%s", f.Change.Object.Display(), when)
 	if len(fields) > 0 {
 		msg += " at " + strings.Join(fields, ", ")
 	}

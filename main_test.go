@@ -734,3 +734,49 @@ func TestWithoutAContextTheClusterIsNotAsked(t *testing.T) {
 		t.Errorf("stdout = %q, want no cluster questions without --context", stdout)
 	}
 }
+
+func TestChurnVisibleOnlyAgainstTheClusterIsStillReported(t *testing.T) {
+	requireCluster(t)
+
+	// The chart is byte-identical under `helm template`, so every count and
+	// every section keyed on that condition is zero. Before this was wired,
+	// the whole run reported "renders consistently" and said nothing else.
+	code, stdout, _ := invoke(t, "testdata/inverted", "--context=")
+
+	if !strings.Contains(stdout, "lookup") {
+		t.Errorf("stdout = %q, want the difference reported", stdout)
+	}
+	if !strings.Contains(stdout, "Flux") {
+		t.Errorf("stdout = %q, want the engines that churn named", stdout)
+	}
+	if strings.Contains(stdout, "✓") {
+		t.Errorf("stdout = %q, want no clean tick", stdout)
+	}
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d - findings are informative by default", code, exitOK)
+	}
+}
+
+func TestChurnVisibleOnlyAgainstTheClusterFailsStrict(t *testing.T) {
+	requireCluster(t)
+
+	// --strict is the CI gate. Churn idem observed must trip it whichever
+	// condition observed it, or the gate silently exempts Flux and Helm.
+	code, _, _ := invoke(t, "testdata/inverted", "--context=", "--strict")
+
+	if code != exitFinding {
+		t.Errorf("exit = %d, want %d", code, exitFinding)
+	}
+}
+
+func TestTheClientConditionKeepsItsOwnVerdict(t *testing.T) {
+	requireCluster(t)
+
+	// ArgoCD renders exactly the condition that was identical. Saying it
+	// churns would send the reader after churn it will never have.
+	_, stdout, _ := invoke(t, "testdata/inverted", "--context=")
+
+	if !strings.Contains(stdout, "argocd") || !strings.Contains(stdout, "stable") {
+		t.Errorf("stdout = %q, want argocd reported stable", stdout)
+	}
+}

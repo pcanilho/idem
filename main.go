@@ -219,9 +219,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Err:  result.InspectErr,
 		}
 
+		// The `helm template` condition is measured on every run, and it is
+		// the condition an engine without cluster access reconciles under -
+		// so it answers for ArgoCD in both directions, not just when it
+		// differs. Left unset on a chart that would not render: nothing was
+		// established there, and nil is how idem says so.
+		if result.Err == nil {
+			identical := len(result.Findings) == 0
+			evidence.Client = &identical
+		}
+
 		if result.ServerRendered {
 			stable := len(result.ServerFindings) == 0
 			evidence.Cluster = &stable
+		}
+
+		// A chart identical under `helm template` can still differ with lookup
+		// resolving. Carried separately because it is churn under Flux and
+		// Helm and demonstrably not under ArgoCD; folded into Findings it
+		// would make every ArgoCD-framed count and sentence say the opposite
+		// of what idem measured.
+		var serverOnly delivery.Applied
+		if len(result.Findings) == 0 && len(result.ServerFindings) > 0 {
+			serverOnly = delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.ServerFindings)
 		}
 
 		rewrites := rewritesFor(ctx, opt, result, stderr)
@@ -233,8 +253,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Deps:       resolutions.of(result.Chart.Dir),
 			Changed:    gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
 			Findings:   applied.Churning,
-			Suppressed: applied.Suppressed,
-			Maybe:      applied.Maybe,
+			ServerOnly: serverOnly.Churning,
+			Suppressed: append(applied.Suppressed, serverOnly.Suppressed...),
+			Maybe:      append(applied.Maybe, serverOnly.Maybe...),
 			Verdicts:   verdictsFor(result, evidence),
 			Potential:  analyze.Potential(result.Uses),
 			Rewrites:   rewrites,
@@ -258,7 +279,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "  exit 2 — a chart could not be rendered")
 		}
 		return exitFatal
-	case opt.strict && rep.Churning() > 0:
+	case opt.strict && rep.Churning()+rep.ChurningWithLookup() > 0:
 		if text {
 			fmt.Fprintln(stdout, "  exit 1")
 		}
@@ -636,7 +657,11 @@ func inspector(ref chartref.Ref) scan.Inspect {
 // Only charts that actually churn get verdicts: a verdict answers "what does
 // this finding mean for me", and a clean chart has no finding to explain.
 func verdictsFor(result scan.Result, ev engines.Evidence) []engine.Verdict {
-	if result.Err != nil || len(result.Findings) == 0 {
+	// Verdicts explain an observed difference, so a chart with none needs no
+	// block - but "none" spans both conditions. Gating on the client findings
+	// alone is what made a chart that churns only with lookup resolved report
+	// as silence.
+	if result.Err != nil || (len(result.Findings) == 0 && len(result.ServerFindings) == 0) {
 		return nil
 	}
 

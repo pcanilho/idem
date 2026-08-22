@@ -16,7 +16,7 @@ import (
 // empty file rather than a comment saying everything is fine on every pull
 // request that touches a chart.
 func (r Report) Markdown(w io.Writer) error {
-	if r.Churning() == 0 && r.Unevaluable() == 0 {
+	if r.Churning() == 0 && r.Unevaluable() == 0 && r.ChurningWithLookup() == 0 {
 		return nil
 	}
 
@@ -41,6 +41,8 @@ func (r Report) Markdown(w io.Writer) error {
 		b.WriteString("\n")
 	}
 
+	writeLookupRows(&b, r.inScope())
+
 	if suppressed > 0 {
 		fmt.Fprintf(&b, "%d %s already suppressed by your delivery config.\n\n",
 			suppressed, plural(suppressed, "finding", "findings"))
@@ -60,9 +62,14 @@ func (r Report) Markdown(w io.Writer) error {
 func (r Report) headline() string {
 	total, churning := len(r.inScope()), r.Churning()
 	if churning == 0 {
+		// ArgoCD's condition was identical, so the heading must not name it.
+		// The engines that do a real install saw something else entirely.
+		if lookupOnly := r.ChurningWithLookup(); lookupOnly > 0 {
+			return fmt.Sprintf("%d of %d %s will churn under Flux and Helm", lookupOnly, total, plural(total, "chart", "charts"))
+		}
 		return fmt.Sprintf("%d %s could not be rendered", r.Unevaluable(), plural(r.Unevaluable(), "chart", "charts"))
 	}
-	return fmt.Sprintf("%d of %d %s will churn under ArgoCD", churning, total, plural(total, "chart", "charts"))
+	return fmt.Sprintf("%d of %d %s will churn under ArgoCD%s", churning, total, plural(total, "chart", "charts"), lookupClause(r.ChurningWithLookup()))
 }
 
 func (r Report) unevaluableNote() string {
@@ -76,7 +83,7 @@ func (r Report) unevaluableNote() string {
 // writeRows emits one row per differing field, as the spec shows: a reader
 // scanning the table is looking for a field name, not a count.
 func writeRows(b *strings.Builder, c Chart, f check.Finding) {
-	cost := consequenceOf(f, c.Findings).Text
+	cost := consequenceOf(f, siblingsOf(c)).Text
 
 	if len(f.Change.Paths) == 0 {
 		fmt.Fprintf(b, "| `%s` | `%s` | | %s |\n",
@@ -87,6 +94,28 @@ func writeRows(b *strings.Builder, c Chart, f check.Finding) {
 		fmt.Fprintf(b, "| `%s` | `%s` | `%s` | %s |\n",
 			cell(c.Name), cell(f.Change.Object.Display()), cell(p.Path.String()), cell(cost))
 	}
+}
+
+// writeLookupRows tables what only the API-server condition saw.
+//
+// A second table rather than a column on the first: the two conditions answer
+// for different engines, and a reader scanning rows for their own engine
+// should not have to check a per-row qualifier to know which apply.
+func writeLookupRows(b *strings.Builder, charts []Chart) {
+	var rows strings.Builder
+	for _, c := range charts {
+		for _, f := range c.ServerOnly {
+			writeRows(&rows, c, f)
+		}
+	}
+	if rows.Len() == 0 {
+		return
+	}
+
+	b.WriteString("Identical under `helm template`, different with `lookup` resolved — ArgoCD is unaffected, Flux and Helm will churn.\n\n")
+	b.WriteString("| chart | object | field | consequence |\n|---|---|---|---|\n")
+	b.WriteString(rows.String())
+	b.WriteString("\n")
 }
 
 func writeUnevaluableRows(b *strings.Builder, charts []Chart) {

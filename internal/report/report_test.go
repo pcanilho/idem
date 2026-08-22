@@ -956,3 +956,73 @@ func TestTheRatchetSaysPlainlyWhenNothingChanged(t *testing.T) {
 		t.Errorf("Text() = %q, want it said plainly", got)
 	}
 }
+
+// A chart can render identically under `helm template` and still differ with
+// `lookup` resolving against a real cluster. ArgoCD is fine; Flux and Helm are
+// not. Reporting that as a clean run hides observed churn.
+
+func serverOnly(name string) Chart {
+	return Chart{
+		Name:       name,
+		Dir:        "./" + name,
+		ServerOnly: []check.Finding{finding("home/templates/secret.yaml", "creds", ".data.token")},
+		Verdicts: []engine.Verdict{
+			{Engine: "argocd", Result: engine.Stable, Because: "renders identically without cluster access (observed)", Observed: true},
+			{Engine: "flux", Result: engine.Churns, Because: "on every chart or values change — differs even with lookup resolved (observed)", Observed: true},
+		},
+	}
+}
+
+func TestTextShowsChurnObservedOnlyWithLookupResolved(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true})
+
+	if !strings.Contains(got, "creds") {
+		t.Errorf("Text() = %q, want the differing object named", got)
+	}
+	if !strings.Contains(got, "lookup") {
+		t.Errorf("Text() = %q, want it to say the difference needs lookup resolved", got)
+	}
+}
+
+func TestACleanClientRenderIsNotACleanRunWhenTheClusterConditionDiffers(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true})
+
+	if strings.Contains(got, "✓") {
+		t.Errorf("Text() = %q, want no clean tick - a difference was observed", got)
+	}
+}
+
+func TestChurnUnderLookupIsCountedApartFromArgoCDChurn(t *testing.T) {
+	// The verdict sentence is framed on ArgoCD, and ArgoCD renders exactly the
+	// condition that was identical. Folding this into that count would state a
+	// falsehood about the engine the sentence names.
+	r := Report{Charts: []Chart{clean("lab"), serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true}
+
+	if got := r.Churning(); got != 0 {
+		t.Errorf("Churning() = %d, want 0 - nothing churns under ArgoCD here", got)
+	}
+	if got := r.ChurningWithLookup(); got != 1 {
+		t.Errorf("ChurningWithLookup() = %d, want 1", got)
+	}
+}
+
+func TestTheVerdictSentenceNamesTheEnginesThatWillChurn(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{clean("lab"), serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true})
+
+	if !strings.Contains(got, "Flux") || !strings.Contains(got, "Helm") {
+		t.Errorf("Text() = %q, want the sentence to name Flux and Helm", got)
+	}
+}
+
+func TestTheRatchetHidesChurnUnderLookupToo(t *testing.T) {
+	// Otherwise a pre-existing server-only difference leaks past a ratchet that
+	// promised to report only what changed.
+	r := Report{Charts: []Chart{serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Since: "main", Cluster: true}
+
+	if got := r.ChurningWithLookup(); got != 0 {
+		t.Errorf("ChurningWithLookup() = %d, want 0 - the chart is out of scope", got)
+	}
+	if got := text(t, r); !strings.Contains(got, "1 pre-existing finding not shown") {
+		t.Errorf("Text() = %q, want the hidden finding counted", got)
+	}
+}

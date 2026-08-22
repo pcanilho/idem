@@ -20,9 +20,14 @@ func byName(t *testing.T, name string) Target {
 	return Target{}
 }
 
-var oneUse = Evidence{Uses: []analyze.Use{{File: "charts/common/templates/_secrets.tpl", Line: 103}}}
+// differed is the client observation every pre-cluster verdict is reasoning
+// from: the two `helm template` renders were NOT identical. Stating it is what
+// lets the same type also carry the opposite case.
+var differed = false
 
-var noUse = Evidence{}
+var oneUse = Evidence{Uses: []analyze.Use{{File: "charts/common/templates/_secrets.tpl", Line: 103}}, Client: &differed}
+
+var noUse = Evidence{Client: &differed}
 
 func TestAllListsTheThreeEnginesInReadingOrder(t *testing.T) {
 	var names []string
@@ -176,7 +181,7 @@ func TestAFailedScanIsUnknownRatherThanClean(t *testing.T) {
 	// "no lookup anywhere" would turn a failed scan into a CHURNS verdict
 	// that §5 states as sound - the one place a wrong answer is stated with
 	// full confidence.
-	ev := Evidence{Err: errors.New("scanning charts/common-2.0.0.tgz for lookup: unexpected EOF")}
+	ev := Evidence{Err: errors.New("scanning charts/common-2.0.0.tgz for lookup: unexpected EOF"), Client: &differed}
 
 	for _, name := range []string{"flux", "helm"} {
 		v := byName(t, name).Verdict(ev)
@@ -194,7 +199,9 @@ func TestAFailedScanIsUnknownRatherThanClean(t *testing.T) {
 	}
 }
 
-func observed(stable bool) Evidence { return Evidence{Uses: oneUse.Uses, Cluster: &stable} }
+func observed(stable bool) Evidence {
+	return Evidence{Uses: oneUse.Uses, Client: &differed, Cluster: &stable}
+}
 
 func TestAMeasuredClusterRenderBeatsGuessing(t *testing.T) {
 	// The whole point of --context: `unknown` becomes a fact. helm's server
@@ -240,9 +247,85 @@ func TestAMeasurementOutranksAFailedScan(t *testing.T) {
 	// If idem watched the chart render identically with lookup resolving, not
 	// having been able to read the source no longer matters.
 	stable := true
-	ev := Evidence{Err: errors.New("scanning charts/x.tgz: unexpected EOF"), Cluster: &stable}
+	ev := Evidence{Err: errors.New("scanning charts/x.tgz: unexpected EOF"), Client: &differed, Cluster: &stable}
 
 	if got := byName(t, "flux").Verdict(ev).Result; got != engine.Stable {
 		t.Errorf("Result = %v, want the observation to win", got)
+	}
+}
+
+// The client condition is measured too, and a chart can be clean under it
+// while differing with lookup resolved. Nothing in the estate does this today,
+// but it needs `lookup` returning data that itself changes - which is legal
+// Helm, and reports as silence unless the verdicts distinguish the conditions.
+
+func serverOnly() Evidence {
+	identical, differs := true, false
+	return Evidence{Uses: oneUse.Uses, Client: &identical, Cluster: &differs}
+}
+
+func TestArgoCDIsStableWhenOnlyTheServerConditionDiffers(t *testing.T) {
+	// The repo-server renders exactly the condition idem measured as identical.
+	// Reporting CHURNS here would send the reader after churn ArgoCD will never
+	// have, on the strength of a measurement taken somewhere ArgoCD cannot go.
+	v := byName(t, "argocd").Verdict(serverOnly())
+
+	if v.Result != engine.Stable {
+		t.Errorf("Result = %v, want stable - the condition argocd renders under was identical", v.Result)
+	}
+	if !v.Observed {
+		t.Error("Observed = false, want true - `helm template` IS argocd's condition")
+	}
+}
+
+func TestFluxChurnsWhenOnlyTheServerConditionDiffers(t *testing.T) {
+	// The mirror image: flux does a real install, so the condition that
+	// differed is the one that reconciles it.
+	v := byName(t, "flux").Verdict(serverOnly())
+
+	if v.Result != engine.Churns {
+		t.Errorf("Result = %v, want churns", v.Result)
+	}
+	if !v.Observed {
+		t.Error("Observed = false, want true")
+	}
+}
+
+func TestAnUnmeasuredClientConditionIsNeverGoodNews(t *testing.T) {
+	// The zero Evidence must not read as a clean bill of health. A caller that
+	// forgets to record what it measured gets `unknown`, never `stable`.
+	for _, e := range All() {
+		if got := e.Verdict(Evidence{}).Result; got != engine.Unknown {
+			t.Errorf("%s Result = %v, want unknown for evidence nobody filled in", e.Name(), got)
+		}
+	}
+}
+
+func TestAClientCleanChartWithoutLookupIsStableWhereLookupResolves(t *testing.T) {
+	// Renders matched with lookup returning {}, and the chart calls no lookup
+	// at all - so no cluster state can reach the output. Sound, not measured:
+	// idem never watched it render with a cluster.
+	identical := true
+	v := byName(t, "flux").Verdict(Evidence{Client: &identical})
+
+	if v.Result != engine.Stable {
+		t.Errorf("Result = %v, want stable", v.Result)
+	}
+	if v.Observed {
+		t.Error("Observed = true, want false - this is reasoning, not a measurement")
+	}
+}
+
+func TestAClientCleanChartWithLookupIsUnknownWhereLookupResolves(t *testing.T) {
+	// The lookup could return anything, including something that varies. Being
+	// clean without cluster access says nothing about being clean with it.
+	identical := true
+	v := byName(t, "flux").Verdict(Evidence{Uses: oneUse.Uses, Client: &identical})
+
+	if v.Result != engine.Unknown {
+		t.Errorf("Result = %v, want unknown", v.Result)
+	}
+	if !strings.Contains(v.Because, "_secrets.tpl") {
+		t.Errorf("Because = %q, want the lookup located", v.Because)
 	}
 }

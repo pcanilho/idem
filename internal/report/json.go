@@ -29,8 +29,15 @@ type jsonReport struct {
 }
 
 type jsonSummary struct {
-	Charts      int `json:"charts"`
-	Churning    int `json:"churning"`
+	Charts   int `json:"charts"`
+	Churning int `json:"churning"`
+
+	// ChurningWithLookup counts charts that were identical under `helm
+	// template` and differed with lookup resolved. Its own number because it
+	// answers for different engines: churning is ArgoCD's condition, this is
+	// Flux's and Helm's.
+	ChurningWithLookup int `json:"churningWithLookup"`
+
 	Unevaluable int `json:"unevaluable"`
 }
 
@@ -38,6 +45,12 @@ type jsonFinding struct {
 	Chart  string `json:"chart"`
 	Source string `json:"source,omitempty"`
 	Type   string `json:"type"`
+
+	// Condition is the render condition that saw this difference: "client" for
+	// `helm template`, which is what ArgoCD's repo-server does, or "cluster"
+	// for a server dry run, where lookup resolves. Always emitted - a policy
+	// selecting on churn has to be able to say which engine it means.
+	Condition string `json:"condition"`
 
 	Object jsonObject `json:"object"`
 	Paths  []jsonPath `json:"paths,omitempty"`
@@ -111,9 +124,10 @@ func (r Report) JSON(w io.Writer) error {
 		Engines:  r.Engines,
 		Delivery: r.Delivery,
 		Summary: jsonSummary{
-			Charts:      len(r.Charts),
-			Churning:    r.Churning(),
-			Unevaluable: r.Unevaluable(),
+			Charts:             len(r.Charts),
+			Churning:           r.Churning(),
+			ChurningWithLookup: r.ChurningWithLookup(),
+			Unevaluable:        r.Unevaluable(),
 		},
 		// Never null: a consumer iterating .findings should not have to guard
 		// against the clean case.
@@ -126,11 +140,14 @@ func (r Report) JSON(w io.Writer) error {
 			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
 		}
 		for _, f := range c.Findings {
-			out.Findings = append(out.Findings, jsonFindingOf(c, f))
+			out.Findings = append(out.Findings, jsonFindingOf(c, f, c.Findings, conditionClient))
+		}
+		for _, f := range c.ServerOnly {
+			out.Findings = append(out.Findings, jsonFindingOf(c, f, c.ServerOnly, conditionCluster))
 		}
 		for _, s := range c.Suppressed {
 			out.Suppressed = append(out.Suppressed, jsonSuppressed{
-				Finding: jsonFindingOf(c, s.Finding),
+				Finding: jsonFindingOf(c, s.Finding, c.Findings, conditionClient),
 				By: jsonRule{
 					File: s.By.File, Pointers: s.By.Pointers,
 					SelfHeal: s.By.SelfHeal, Respected: s.By.Respected, Engine: s.By.Engine,
@@ -165,13 +182,21 @@ func (r Report) JSON(w io.Writer) error {
 	return enc.Encode(out)
 }
 
-func jsonFindingOf(c Chart, f check.Finding) jsonFinding {
-	cost := consequenceOf(f, c.Findings)
+// The two render conditions, named once so the contract cannot drift between
+// the formats that report it.
+const (
+	conditionClient  = "client"
+	conditionCluster = "cluster"
+)
+
+func jsonFindingOf(c Chart, f check.Finding, siblings []check.Finding, condition string) jsonFinding {
+	cost := consequenceOf(f, siblings)
 
 	out := jsonFinding{
-		Chart:  c.Name,
-		Source: f.Source,
-		Type:   f.Change.Type.String(),
+		Chart:     c.Name,
+		Source:    f.Source,
+		Type:      f.Change.Type.String(),
+		Condition: condition,
 		Object: jsonObject{
 			APIVersion:   f.Change.Object.APIVersion,
 			Kind:         f.Change.Object.Kind,

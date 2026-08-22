@@ -353,3 +353,65 @@ func TestMarkdownOmitsAnEmptyTable(t *testing.T) {
 		t.Errorf("Markdown() = %q, want the reason the count is not zero", got)
 	}
 }
+
+// Every machine format has to carry churn seen only with `lookup` resolved.
+// A CI gate reading -o json, or a reviewer reading the PR comment, must not be
+// told a chart is clean because ArgoCD's condition happened to be.
+
+func TestJSONMarksWhichConditionAFindingWasObservedUnder(t *testing.T) {
+	got := asJSON(t, Report{Charts: []Chart{serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true})
+
+	findings, ok := got["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("findings = %v, want 1", got["findings"])
+	}
+	if c := findings[0].(map[string]any)["condition"]; c != "cluster" {
+		t.Errorf("condition = %v, want \"cluster\" - this was not seen under `helm template`", c)
+	}
+
+	summary := got["summary"].(map[string]any)
+	if summary["churning"] != float64(0) {
+		t.Errorf("summary.churning = %v, want 0 - nothing churns under ArgoCD", summary["churning"])
+	}
+	if summary["churningWithLookup"] != float64(1) {
+		t.Errorf("summary.churningWithLookup = %v, want 1", summary["churningWithLookup"])
+	}
+}
+
+func TestJSONNamesTheClientConditionExplicitly(t *testing.T) {
+	// "condition" absent would leave a policy unable to tell the two apart
+	// without knowing which array it came from.
+	got := asJSON(t, churningReport())
+
+	for _, f := range got["findings"].([]any) {
+		if c := f.(map[string]any)["condition"]; c != "client" {
+			t.Errorf("condition = %v, want \"client\"", c)
+		}
+	}
+}
+
+func TestMarkdownIsNotEmptyWhenOnlyTheClusterConditionDiffers(t *testing.T) {
+	got := render(t, Report{Charts: []Chart{serverOnly("home")}, Helm: "4.2.4", Rounds: 2, Cluster: true}, Report.Markdown)
+
+	if got == "" {
+		t.Fatal("Markdown() = \"\", want the observed difference reported")
+	}
+	if !strings.Contains(got, "lookup") {
+		t.Errorf("Markdown() = %q, want the condition named", got)
+	}
+}
+
+func TestGitHubAnnotatesADifferenceSeenOnlyWithLookupResolved(t *testing.T) {
+	root := repoWith(t, "charts/home/templates/secret.yaml")
+	c := serverOnly("home")
+	c.RepoDir = "charts/home"
+
+	got := render(t, Report{Root: root, Charts: []Chart{c}, Helm: "4.2.4", Rounds: 2, Cluster: true}, Report.GitHub)
+
+	if !strings.Contains(got, "::error file=charts/home/templates/secret.yaml::") {
+		t.Errorf("GitHub() = %q, want the file annotated", got)
+	}
+	if !strings.Contains(got, "lookup") {
+		t.Errorf("GitHub() = %q, want the message to say which condition saw it", got)
+	}
+}

@@ -337,6 +337,7 @@ you need to filter or gate programmatically, `-o json` is the seam:
 
 ```sh
 idem ./charts -o json | jq '.findings[] | select(.consequence == "rolls")'
+idem ./charts -o json | jq '.findings[] | select(.condition == "cluster")'   # needs --context
 idem ./charts -o json | conftest test -
 ```
 
@@ -502,15 +503,41 @@ establishes the cause.
 **1. `lookup` resolves, so `unknown` becomes measured.** Covered under
 [Three engines](#three-engines-three-different-answers).
 
-**2. Real capabilities.** The cluster's actual `--api-versions` and `--kube-version` are passed
+**2. Churn that only exists with `lookup` resolved.** The inverse of the usual case: a chart can
+be byte-identical under `helm template` — so ArgoCD's repo-server is genuinely stable — and still
+differ on every render once `lookup` returns real data. Without a cluster there is nothing to
+see, and `idem` used to report the run as clean. With one, both conditions are measured and each
+answers for its own engines:
+
+```console
+$ idem ./charts/home --context=
+
+  identical under `helm template`; differs with `lookup` resolved
+
+  home/templates/configmap.yaml
+    ConfigMap/home-stamp   .data.session   silent — no checksum
+
+      argocd   stable   renders identically without cluster access (observed)
+      flux     CHURNS   on every chart or values change — differs even with lookup resolved (observed)
+      helm     CHURNS   on every `helm upgrade` — differs even with lookup resolved (observed)
+
+  1 of 1 chart will churn under Flux and Helm: identical under `helm template`, different with `lookup` resolved.
+```
+
+It is counted apart from ArgoCD churn — `summary.churningWithLookup` in `-o json`, and every
+finding carries `"condition": "client"` or `"condition": "cluster"` so a policy can say which
+engine it means. `--strict` exits 1 for either: it is churn `idem` observed, whichever condition
+observed it.
+
+**3. Real capabilities.** The cluster's actual `--api-versions` and `--kube-version` are passed
 through, matching what ArgoCD does — so charts gated on `.Capabilities.APIVersions.Has` render
 the way they will for you, not against Helm's defaults.
 
-**3. The true effective values.** Reading the live `Application` or `HelmRelease` gets values
+**4. The true effective values.** Reading the live `Application` or `HelmRelease` gets values
 that git cannot supply: Flux `valuesFrom` references and `postBuild` substitutions resolve
 in-cluster. For Flux this is often the difference between a qualified verdict and a real one.
 
-**4. Drift that has nothing to do with your chart.** A chart can be perfectly deterministic and
+**5. Drift that has nothing to do with your chart.** A chart can be perfectly deterministic and
 still never converge, because something else changes the object — either as it is applied
 (webhooks, API-server defaulting) or afterwards (External Secrets, cert-manager, operators).
 Those are different problems: a dry-run reproduces the first and is blind to the second, which

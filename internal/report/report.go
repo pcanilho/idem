@@ -50,6 +50,13 @@ type Chart struct {
 
 	Findings []check.Finding
 
+	// ServerOnly are differences observed only under the API-server condition,
+	// on a chart whose `helm template` renders matched. Kept apart from
+	// Findings because the two conditions answer for different engines: this
+	// is churn under Flux and Helm, and demonstrably not under ArgoCD, whose
+	// repo-server renders the condition that was identical.
+	ServerOnly []check.Finding
+
 	// Verdicts is what each selected engine does with this chart. Empty when
 	// the chart is clean, or when no engine lens was requested.
 	Verdicts []engine.Verdict
@@ -121,7 +128,7 @@ func (r Report) hidden() int {
 		if r.considered(c) {
 			continue
 		}
-		n += len(c.Findings) + len(c.Suppressed)
+		n += len(c.Findings) + len(c.Suppressed) + len(c.ServerOnly)
 		if c.Err != nil {
 			n++
 		}
@@ -158,6 +165,23 @@ func (r Report) inScope() []Chart {
 	return out
 }
 
+// ChurningWithLookup counts charts clean under `helm template` but differing
+// with lookup resolved.
+//
+// Counted apart from Churning because the verdict sentence is framed on
+// ArgoCD, and ArgoCD renders exactly the condition that was identical here.
+// Folding the two together would state a falsehood about the named engine -
+// but leaving it out of the run entirely would hide churn idem observed.
+func (r Report) ChurningWithLookup() int {
+	n := 0
+	for _, c := range r.inScope() {
+		if c.Err == nil && len(c.ServerOnly) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
 // Unevaluable counts charts that could not be rendered.
 //
 // Scoped by the ratchet too: a chart that was already unrenderable before this
@@ -181,7 +205,7 @@ func (r Report) Text(w io.Writer) error {
 
 	detail := false
 	for _, c := range scope {
-		if c.Err != nil || len(c.Findings) == 0 {
+		if c.Err != nil || (len(c.Findings) == 0 && len(c.ServerOnly) == 0) {
 			continue
 		}
 		writeChart(&b, c, r.Engines)
@@ -223,8 +247,25 @@ func (r Report) Text(w io.Writer) error {
 // produced each object - so a chart that regenerates six fields in one
 // template reads as one place to look, not six.
 func writeChart(b *strings.Builder, c Chart, show []string) {
+	writeGroups(b, c, c.Findings)
+
+	// Under its own heading, because the reader has to know these did NOT
+	// happen under `helm template`: the object is real, the churn is real, and
+	// the engine it applies to is not the one the rest of the output names.
+	if len(c.ServerOnly) > 0 {
+		b.WriteString("\n  identical under `helm template`; differs with `lookup` resolved\n")
+		writeGroups(b, c, c.ServerOnly)
+	}
+
+	writeVerdicts(b, c.Verdicts, show)
+}
+
+// writeGroups prints findings grouped by the template that produced each
+// object - so a chart that regenerates six fields in one template reads as one
+// place to look, not six.
+func writeGroups(b *strings.Builder, c Chart, findings []check.Finding) {
 	groups := make(map[string][]check.Finding)
-	for _, f := range c.Findings {
+	for _, f := range findings {
 		key := f.Source
 		if key == "" {
 			key = c.Name + " " + unknownSource
@@ -237,12 +278,10 @@ func writeChart(b *strings.Builder, c Chart, show []string) {
 
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, f := range groups[source] {
-			writeFinding(tw, f, c.Findings)
+			writeFinding(tw, f, findings)
 		}
 		tw.Flush()
 	}
-
-	writeVerdicts(b, c.Verdicts, show)
 }
 
 // writeVerdicts prints what each engine does with this chart.
@@ -464,7 +503,7 @@ func writePotential(b *strings.Builder, charts []Chart) bool {
 		// idem cannot attribute an observed difference to a particular
 		// function, so on a chart that DID churn it must not claim this one
 		// stayed quiet.
-		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && c.Err == nil
+		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && len(c.ServerOnly) == 0 && c.Err == nil
 
 		// Grouped by chart because the paths are chart-relative: on its own,
 		// "templates/job.yaml:351" names a file in some chart the reader then
@@ -626,6 +665,7 @@ func writeRemediation(b *strings.Builder, charts []Chart) {
 func (r Report) verdict() string {
 	scope := r.inScope()
 	total, churning, unevaluable := len(scope), r.Churning(), r.Unevaluable()
+	lookupOnly := r.ChurningWithLookup()
 
 	// Nothing to gate on. "All 0 charts render consistently" is true and
 	// useless; the reader wants to know the gate had nothing to look at.
@@ -636,15 +676,22 @@ func (r Report) verdict() string {
 	// The ratchet's sentence says what it measured against, because "1 of 2"
 	// is a different claim when 14 other charts were left out of the count.
 	if r.Since != "" && churning > 0 {
-		return fmt.Sprintf("%d of the %d %s changed since %s will churn under ArgoCD.",
-			churning, total, plural(total, "chart", "charts"), r.Since)
+		return fmt.Sprintf("%d of the %d %s changed since %s will churn under ArgoCD%s.",
+			churning, total, plural(total, "chart", "charts"), r.Since, lookupClause(lookupOnly))
 	}
 
-	if churning == 0 && unevaluable == 0 {
+	if churning == 0 && unevaluable == 0 && lookupOnly == 0 {
 		if total == 1 {
 			return fmt.Sprintf("✓ %s renders consistently under ArgoCD.", r.Charts[0].Name)
 		}
 		return fmt.Sprintf("✓ All %d charts render consistently under ArgoCD.", total)
+	}
+
+	// ArgoCD is genuinely fine here and the sentence must not say otherwise -
+	// but the engines that do a real install are not, and that is the finding.
+	if churning == 0 && unevaluable == 0 {
+		return fmt.Sprintf("%d of %d %s will churn under Flux and Helm: identical under `helm template`, different with `lookup` resolved.",
+			lookupOnly, total, plural(total, "chart", "charts"))
 	}
 
 	// Nothing rendered at all. "0 charts render consistently" is true but
@@ -663,7 +710,29 @@ func (r Report) verdict() string {
 	if unevaluable > 0 {
 		s += fmt.Sprintf("; %d could not be rendered", unevaluable)
 	}
-	return s + "."
+	return s + lookupClause(lookupOnly) + "."
+}
+
+// lookupClause reports churn only the API-server condition saw, without
+// touching the ArgoCD claim the rest of the sentence makes.
+func lookupClause(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d %s only with `lookup` resolved and will churn under Flux and Helm",
+		n, plural(n, "differs", "differ"))
+}
+
+// siblingsOf is the finding set a consequence is judged against: a checksum
+// annotation only protects the workload whose findings sit beside it.
+//
+// ServerOnly is populated only on a chart with no client findings at all, so
+// one set or the other is empty and there is nothing to disambiguate.
+func siblingsOf(c Chart) []check.Finding {
+	if len(c.Findings) == 0 {
+		return c.ServerOnly
+	}
+	return c.Findings
 }
 
 func plural(n int, one, many string) string {
