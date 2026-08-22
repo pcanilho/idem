@@ -81,7 +81,7 @@ Dependency resolution works as described below, without ever writing to your rep
 
 The `--new-from-rev` / `--new-from-merge-base` ratchet works too.
 
-`--cluster` turns the Flux and Helm `unknown` verdicts into measured facts, and hands the chart
+`--context` turns the Flux and Helm `unknown` verdicts into measured facts, and hands the chart
 the cluster's real capabilities. Not yet built from that section: the apply-side and post-apply
 drift checks, which need to read live objects.
 
@@ -191,7 +191,7 @@ $ idem oci://registry-1.docker.io/bitnamicharts/postgresql --engine all
   helm 4.2.4 · 2 rounds
 ```
 
-Add `--cluster` and those `unknown`s become measured facts — see
+Add `--context` and those `unknown`s become measured facts — see
 [Three engines](#three-engines-three-different-answers).
 
 ### Flags
@@ -206,8 +206,8 @@ That is the whole surface:
                     (default: auto-detected; all three when undetectable)
       --strict      exit non-zero on findings         (default: report only)
       --helm        helm binary to render with   (default: first on PATH)
-      --cluster     resolve lookup and capabilities against the current kube context
-      --kube-context  which context to use              (default: current)
+      --context     kube context to resolve lookup and capabilities against
+                    (pass it empty, --context=, for the current one)
       --jobs        renders to run at once        (default: number of CPUs)
       --dependency-update  resolve missing deps in place, not a temp dir
       --no-deps     never fetch dependencies      (airgapped / reproducible CI)
@@ -401,7 +401,7 @@ Helm stamps the resolved version on every object it renders (`helm.sh/chart: rom
 `idem` can compare what you declared against what you are running — a label read, no rendering:
 
 ```console
-$ idem ./charts/home --cluster
+$ idem ./charts/home --context=
 
   — floating dependencies · not counted, not fatal —
 
@@ -446,7 +446,7 @@ $ idem doctor
   roll far more often than their images change — consistent with a Secret that
   is regenerated on every sync.
 
-  Confirm the cause:   idem <their chart> --cluster
+  Confirm the cause:   idem <their chart> --context=
 ```
 
 It also reads the delivery chain and attributes divergence that the engines report but do not
@@ -477,14 +477,14 @@ is there now, so the answer needs no chart, no rendering and no dry-run.
 
 **This is triage, not proof.** A high revision count also comes from deploying often. What
 makes it a signal is the combination — rolling far above the cluster median *and* carrying a
-`checksum/` annotation derived from a Secret. `doctor` ranks suspects; `idem <chart> --cluster`
+`checksum/` annotation derived from a Secret. `doctor` ranks suspects; `idem <chart> --context=`
 establishes the cause.
 
 ---
 
 ## What a cluster connection adds
 
-`--cluster` is opt-in and read-only. It never applies, creates, updates, or owns anything.
+`--context` is opt-in and read-only. It never applies, creates, updates, or owns anything.
 
 **1. `lookup` resolves, so `unknown` becomes measured.** Covered under
 [Three engines](#three-engines-three-different-answers).
@@ -505,7 +505,7 @@ is only visible by comparing the live object to its own `last-applied` record. `
 both:
 
 ```console
-$ idem ./charts/home --cluster
+$ idem ./charts/home --context=
 
   home/templates/service.yaml
     Service/home-plex   deterministic, but the cluster rewrites it
@@ -581,7 +581,7 @@ what it is looking at, the tool should have looked.
 non-deterministic chart is genuinely not a Flux problem. But engine-side rewrites and cluster
 mutation hit Flux exactly as hard — and Flux has no continuous divergence surface to tell you:
 a `HelmRelease` reports `Ready: True` once the release succeeded, and `driftDetection.mode`
-defaults to `disabled`. **Quieter, not safer** — which is why `--cluster` matters more for Flux
+defaults to `disabled`. **Quieter, not safer** — which is why `--context` matters more for Flux
 users, not less.
 
 **A chart with no `lookup` at all** is a different verdict everywhere — and a different fix:
@@ -603,14 +603,14 @@ Telling that apart from the `lookup` case is the single most useful thing `idem`
 answers the only question you actually have: **do I file an upstream issue, or do I add an
 `ignoreDifferences` block?**
 
-### `--cluster`: turn `unknown` into a fact
+### `--context`: turn `unknown` into a fact
 
 `helm template` defaults to `--dry-run=client` and resolves `lookup` to `{}` — exactly what
 ArgoCD's repo-server does. `--dry-run=server` resolves it for real, which is what Flux and
 `helm upgrade` do. So `idem` can answer by observation instead of argument:
 
 ```console
-$ idem oci://registry-1.docker.io/bitnamicharts/postgresql --cluster
+$ idem oci://registry-1.docker.io/bitnamicharts/postgresql --context=
 
       argocd    CHURNS     every sync — repo-server renders without cluster access
       flux      stable     lookup resolves; value identical across renders (observed)
@@ -652,7 +652,7 @@ is then skipped is the same class of bug this tool exists to catch.
 
 ## What it does not do
 
-- It does not talk to your cluster unless you pass `--cluster`, and even then only to render —
+- It does not talk to your cluster unless you pass `--context`, and even then only to render —
   never to apply, create, update, or own anything.
 - It does not reconstruct your delivery pipeline — no kustomize overlays, no `postBuild`
   substitution, no post-renderers. It renders what you point it at and names what it could not

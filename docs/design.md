@@ -32,15 +32,15 @@ When that happens, `idem` says so instead of guessing:
       flux      unknown    values incomplete
 
       2 of 3 value sources resolved. `valuesFrom` → Secret/pg-values could not be
-      read without --cluster, and it may set auth.existingSecret. Re-run with
-      --cluster for a definitive answer.
+      read without --context=, and it may set auth.existingSecret. Re-run with
+      --context for a definitive answer.
 ```
 
 **`idem` never silently renders defaults.** If a value source cannot be resolved, the verdict
 is qualified and the missing source is named — the same discipline applied to `lookup`: say
 `unknown`, say why, say what would resolve it.
 
-### Why this makes `--cluster` near-mandatory for Flux
+### Why this makes `--context` near-mandatory for Flux
 
 The reverse of what you would expect. An ArgoCD `Application` carries
 `spec.source.helm.{values,valueFiles,parameters}` inline, so a git checkout is usually enough
@@ -48,7 +48,7 @@ to reconstruct the effective values. A Flux `HelmRelease` frequently does not �
 and `postBuild.substituteFrom` exist precisely so per-stage configuration lives outside the
 manifest.
 
-For Flux, `--cluster` is often the only way to get a truthful answer at all.
+For Flux, `--context` is often the only way to get a truthful answer at all.
 
 ### Where `idem` stops
 
@@ -72,7 +72,7 @@ answer is worth less than running the controllers themselves.
 |---|---|---|
 | `argocd: CHURNS` | rendered twice with `helm template`, output differed | **observed fact.** `helm template` resolves `lookup` to `{}` by construction, so this *is* the ArgoCD condition |
 | `flux/helm: CHURNS` | the chart contains no `lookup` at all | **sound.** Nothing exists that could stabilise the value |
-| `flux/helm: stable` | with `--cluster`, rendered twice via `--dry-run=server`, output identical | **observed fact.** No inference — this is how those engines actually render |
+| `flux/helm: stable` | with `--context`, rendered twice via `--dry-run=server`, output identical | **observed fact.** No inference — this is how those engines actually render |
 | `flux/helm: unknown` | the chart contains `lookup`, but not provably guarding *this* value | **honest.** Establishing the link means evaluating the template through `include` into subchart helpers |
 
 `idem` does not evaluate templates. Bitnami's idiom lives in
@@ -100,7 +100,7 @@ Flux would be an overclaim, so the type system does not permit it.
 
 ---
 
-## 3. `--cluster`
+## 3. `--context`
 
 `helm template` defaults to `--dry-run=client` and resolves `lookup` to `{}` by construction —
 exactly what ArgoCD's repo-server does. `--dry-run=server` resolves it for real, which is what
@@ -123,13 +123,13 @@ Three caveats:
   Secret read permission, which is privileged. Use a scoped context, not cluster-admin.
 - **Results become environment-dependent.** The same chart can be `stable` against one cluster
   and `CHURNS` against another, because the answer genuinely depends on what is already there.
-  That is the truth, not a defect — but it is why `--cluster` is opt-in and never inferred from
+  That is the truth, not a defect — but it is why `--context` is opt-in and never inferred from
   a kubeconfig lying around.
 - **Naming the looked-up object is best-effort.** `lookup "v1" "Secret" .Release.Namespace $name`
   has arguments that are themselves template expressions; `idem` names the object when they are
   literals and says so generically when they are not.
 
-With `--cluster`, `idem` also passes the cluster's real `--api-versions` and `--kube-version`,
+With `--context`, `idem` also passes the cluster's real `--api-versions` and `--kube-version`,
 which is what ArgoCD does — so charts gated on `.Capabilities.APIVersions.Has` render the way
 they will in your cluster rather than against Helm's defaults.
 
@@ -385,7 +385,7 @@ Other engine-side transformations in the same family:
   equally introduce or mask a difference.
 
 This class is detectable without a cluster *if* `idem` can read the engine's configuration; with
-`--cluster` it reads `argocd-cm` directly and can state the collision as fact rather than as a
+`--context` it reads `argocd-cm` directly and can state the collision as fact rather than as a
 warning about defaults.
 
 ### 3. Apply-side — what the cluster does to what was applied
@@ -460,7 +460,7 @@ cross-referenced with `checksum/*` annotations on the pod template.
 
 It is explicitly a heuristic. Revision count also rises from deploying often, so the signal is
 the *combination*: far above the cluster's median rollout rate, and carrying a checksum
-annotation derived from a Secret. `doctor` ranks suspects; `idem <chart> --cluster` establishes
+annotation derived from a Secret. `doctor` ranks suspects; `idem <chart> --context=` establishes
 cause. Measured on the author's cluster, the top five by rate were the two charts already known
 to be non-deterministic plus one that was not.
 

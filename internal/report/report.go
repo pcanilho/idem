@@ -85,6 +85,12 @@ type Report struct {
 	// ratchet, and every chart is reported.
 	Since string
 
+	// Cluster records that idem rendered against a cluster, and Context which
+	// one. Which cluster it asked is exactly the kind of fact the provenance
+	// line exists for.
+	Cluster bool
+	Context string
+
 	// Engines are the engine names whose verdicts to display. Empty shows all.
 	//
 	// A chart's verdicts are always computed for every engine even when only
@@ -199,7 +205,7 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s\n", r.Helm, r.Rounds, r.depsNote(), r.deliveryNote())
+	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s\n", r.Helm, r.Rounds, r.contextNote(), r.depsNote(), r.deliveryNote())
 	writeRemediation(&b, scope)
 
 	_, err := io.WriteString(w, b.String())
@@ -331,6 +337,20 @@ func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding) {
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
 		fmt.Fprintf(tw, "    \t… and %d more %s\t\n", elided, plural(elided, "field", "fields"))
 	}
+}
+
+// contextNote names the cluster idem asked, when it asked one.
+//
+// A pass that does not say what it checked is a pass you cannot trust, and
+// "which cluster" changes the answer as much as which helm does.
+func (r Report) contextNote() string {
+	switch {
+	case !r.Cluster:
+		return ""
+	case r.Context == "":
+		return " · current kube context"
+	}
+	return " · context " + r.Context
 }
 
 // depsNote says what idem had to do to render at all.

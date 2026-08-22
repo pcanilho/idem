@@ -640,16 +640,31 @@ func requireCluster(t *testing.T) {
 	}
 }
 
-func TestAKubeContextWithNothingToUseItForIsRejected(t *testing.T) {
-	// A flag the user believes did something, silently ignored, is worse than
-	// an error.
-	code, _, stderr := invoke(t, "testdata/clean", "--kube-context", "prod")
+func TestAnEmptyContextStillAsksTheCluster(t *testing.T) {
+	requireCluster(t)
 
-	if code != exitFatal {
-		t.Errorf("exit = %d, want %d", code, exitFatal)
+	// --context= names no context but still opts in, which is a different
+	// thing from not passing the flag at all. Presence is what decides.
+	_, stdout, _ := invoke(t, "testdata/guarded", "--context=")
+
+	if !strings.Contains(stdout, "observed") {
+		t.Errorf("stdout = %q, want the cluster consulted", stdout)
 	}
-	if !strings.Contains(stderr, "--cluster") {
-		t.Errorf("stderr = %q, want it to say what is missing", stderr)
+	if !strings.Contains(stdout, "current kube context") {
+		t.Errorf("stdout = %q, want the provenance to say which cluster", stdout)
+	}
+}
+
+func TestWithoutTheFlagNoClusterIsTouched(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/guarded")
+
+	if strings.Contains(stdout, "kube context") || strings.Contains(stdout, "context ") {
+		t.Errorf("stdout = %q, want no cluster mentioned", stdout)
+	}
+	if !strings.Contains(stdout, "unknown") {
+		t.Errorf("stdout = %q, want the verdict left unknown", stdout)
 	}
 }
 
@@ -664,12 +679,15 @@ func TestClusterTurnsAnUnknownVerdictIntoAMeasurement(t *testing.T) {
 		t.Fatalf("stdout = %q, want unknown without a cluster", without)
 	}
 
-	_, with, stderr := invoke(t, "testdata/guarded", "--cluster")
+	_, with, stderr := invoke(t, "testdata/guarded", "--context", "")
 	if strings.Contains(with, "unknown") {
 		t.Errorf("stdout = %q, want no unknown once measured (stderr: %s)", with, stderr)
 	}
 	if !strings.Contains(with, "observed") {
 		t.Errorf("stdout = %q, want the verdict marked as observed", with)
+	}
+	if !strings.Contains(with, "context") {
+		t.Errorf("stdout = %q, want the provenance to name the cluster", with)
 	}
 }
 
@@ -679,7 +697,7 @@ func TestAnUnreachableClusterDoesNotFailTheRun(t *testing.T) {
 	// The chart renders perfectly well without a cluster, and the client-side
 	// answer does not depend on one, so a context that does not exist leaves
 	// the Flux and Helm verdicts unknown rather than failing everything.
-	code, stdout, _ := invoke(t, "testdata/guarded", "--cluster", "--kube-context", "no-such-context-xyz")
+	code, stdout, _ := invoke(t, "testdata/guarded", "--context", "no-such-context-xyz")
 
 	if code == exitFatal {
 		t.Errorf("exit = %d, want the run to survive an unreachable cluster", code)

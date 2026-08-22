@@ -76,8 +76,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.noDeps, "no-deps", false, "never fetch dependencies")
 	fs.StringVar(&opt.newFromRev, "new-from-rev", "", "report only findings in charts changed since REV")
 	fs.StringVar(&opt.newFromMergeBase, "new-from-merge-base", "", "same, against the merge base with REF")
-	fs.BoolVar(&opt.cluster, "cluster", false, "resolve lookup and capabilities against the current kube context")
-	fs.StringVar(&opt.kubeContext, "kube-context", "", "which context to use")
+	// One flag, not two. kubectl already has BOTH --cluster and --context, and
+	// they mean different things - a kubeconfig cluster entry versus the
+	// cluster+user+namespace triple - so a boolean --cluster collides with an
+	// established meaning. Passing --context at all is what opts in; an empty
+	// value means whichever context is current.
+	fs.StringVar(&opt.kubeContext, "context", "", "kube context to resolve lookup and capabilities against")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -90,6 +94,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
 	}
+
+	// Presence, not value: --context= names no context but still asks idem to
+	// use the current one, which is a different thing from not asking at all.
+	opt.cluster = wasSet(fs, "context")
 
 	if opt.showVersion {
 		fmt.Fprintf(stdout, "idem %s\n", cliVersion())
@@ -112,13 +120,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mode, err := dependencyMode(opt)
 	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
-		return exitFatal
-	}
-
-	// A context with nothing to use it for is a flag the user believes did
-	// something. Say so rather than ignoring it.
-	if opt.kubeContext != "" && !opt.cluster {
-		fmt.Fprintf(stderr, "idem: --kube-context selects a cluster, but nothing here reads one; add --cluster\n")
 		return exitFatal
 	}
 
@@ -197,6 +198,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep := report.Report{
 		Helm: helmVersion, Rounds: opt.rounds,
 		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since,
+		Cluster: opt.cluster, Context: opt.kubeContext,
 	}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref), prepare) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
@@ -429,6 +431,17 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
+// wasSet reports whether a flag was given at all, however it was valued.
+func wasSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
 // ratchet resolves which charts this run is allowed to fail on.
 //
 // Everything is still rendered and compared: the flag governs what fails the
