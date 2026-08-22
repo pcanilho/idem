@@ -16,7 +16,9 @@ import (
 	"slices"
 	"strings"
 
+	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/manifest"
@@ -128,6 +130,46 @@ func (h Helm) run(ctx context.Context, args ...string) (*bytes.Buffer, error) {
 }
 
 // templateArgs builds the argument list for one render.
+// Pull fetches a chart into dir and returns the directory it unpacked into.
+//
+// The point is the chart SOURCE: a chart rendered from a registry never lands
+// on disk, so `lookup` cannot be scanned for and the Flux and Helm verdicts
+// degrade to unknown on exactly the charts idem exists for. Nothing is written
+// outside dir, which the caller owns and removes.
+func (h Helm) Pull(ctx context.Context, spec engine.Spec, dir string) (string, error) {
+	if _, err := h.run(ctx, pullArgs(spec, dir)...); err != nil {
+		return "", err
+	}
+
+	// helm unpacks into <dir>/<chart name>, which is the chart's OWN name and
+	// need not match the reference it was pulled by - an OCI path segment, an
+	// alias, a repo entry. Read it back rather than reconstructing it.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return filepath.Join(dir, e.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("helm pull wrote no chart directory into %s", dir)
+}
+
+// pullArgs builds the fetch. Deliberately none of the render-only flags: a
+// pull takes no values and knows nothing about a cluster, and passing them
+// would either be ignored or rejected.
+func pullArgs(spec engine.Spec, dir string) []string {
+	args := []string{"pull", spec.ChartRef, "--untar", "--untardir", dir}
+	if spec.Repo != "" {
+		args = append(args, "--repo", spec.Repo)
+	}
+	if spec.Version != "" {
+		args = append(args, "--version", spec.Version)
+	}
+	return args
+}
+
 func templateArgs(spec engine.Spec) []string {
 	args := []string{"template", spec.Release, spec.ChartRef}
 

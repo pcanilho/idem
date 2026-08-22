@@ -88,12 +88,14 @@ cluster's real capabilities, and reports what the API server would rewrite on ad
 
 `idem doctor` works: it ranks workloads by how often they roll, names the Application or
 HelmRelease that owns each, and resolves that to the chart path so the closing line is a command
-you can run. `idem doctor --namespace <ns>` finds what is being written *after* apply and names the
-controller doing it. Engine
-auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
-chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
-`unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of
-what follows is still the intended interface — a specification, not a demo.
+you can run. `idem doctor --namespace <ns>` finds what is being written *after* apply and names
+the controller doing it.
+
+A chart rendered from a registry is fetched to a temp directory and scanned for `lookup` like any
+other, so a remote chart gets a real verdict rather than an `unknown`.
+
+Engine auto-detection is not built, so `--engine` shows all three unless you narrow it, and
+`action.yml` downloads a release that does not exist yet.
 
 Three-engine verdicts (ArgoCD, Flux, Helm) are v1 scope, not a later addition. They are the
 reason the tool exists.

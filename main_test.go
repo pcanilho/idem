@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/chartref"
+	"github.com/pcanilho/idem/internal/engine"
+	"github.com/pcanilho/idem/internal/scan"
 )
 
 func requireHelm(t *testing.T) {
@@ -1074,5 +1079,86 @@ spec:
 		if !strings.Contains(stdout, want) {
 			t.Errorf("stdout = %q, want %s — one release per matched file", stdout, want)
 		}
+	}
+}
+
+// A chart rendered from a registry has no source on disk, so `lookup` cannot
+// be scanned for and both Flux and Helm degrade to unknown — on exactly the
+// charts idem exists for, since the consumer of a third-party chart is the
+// user who cannot patch it.
+
+// fakePuller stands in for helm, so the wiring is testable without a network.
+type fakePuller struct {
+	dir  string
+	err  error
+	from string
+	into string
+}
+
+func (p *fakePuller) Pull(_ context.Context, spec engine.Spec, into string) (string, error) {
+	p.from, p.into = spec.ChartRef, into
+	if p.err != nil {
+		return "", p.err
+	}
+	return p.dir, nil
+}
+
+func TestARemoteChartIsFetchedSoItsSourceCanBeScanned(t *testing.T) {
+	// The chart the analyzer should end up reading.
+	chart := tree(t, map[string]string{
+		"pulled/Chart.yaml":            "apiVersion: v2\nname: pulled\nversion: 0.1.0\n",
+		"pulled/templates/secret.yaml": "x: {{ lookup \"v1\" \"Secret\" \"\" \"creds\" }}\n",
+	})
+
+	p := &fakePuller{dir: filepath.Join(chart, "pulled")}
+	inspect := remoteInspector(chartref.Ref{Kind: chartref.RepoURL, Repo: "https://example.com"}, p)
+
+	uses, err := inspect(scan.Chart{Name: "pulled", Dir: "pulled", Spec: engine.Spec{ChartRef: "pulled"}})
+	if err != nil {
+		t.Fatalf("inspect() error = %v", err)
+	}
+	if len(analyze.Of(uses, analyze.Lookup)) == 0 {
+		t.Errorf("uses = %v, want the lookup found in the fetched source", uses)
+	}
+	if p.from != "pulled" {
+		t.Errorf("pulled %q, want the chart reference idem rendered", p.from)
+	}
+}
+
+func TestAChartThatCannotBeFetchedStaysAnHonestUnknown(t *testing.T) {
+	// A private registry, no network, a bad credential: none of those are
+	// evidence that the chart has no lookup, and reporting them as such would
+	// turn a failed fetch into a sound CHURNS verdict.
+	p := &fakePuller{err: errors.New("unauthorized")}
+	inspect := remoteInspector(chartref.Ref{Kind: chartref.OCI}, p)
+
+	_, err := inspect(scan.Chart{Name: "private", Spec: engine.Spec{ChartRef: "oci://example.com/private"}})
+
+	if err == nil {
+		t.Fatal("inspect() error = nil, want the fetch failure reported")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("error = %v, want it to say why it could not look", err)
+	}
+}
+
+func TestTheFetchedCopyIsNotLeftBehind(t *testing.T) {
+	// idem downloads a chart to read it, not to keep it. A tool run over an
+	// estate would otherwise leave one unpacked chart per remote reference.
+	chart := tree(t, map[string]string{
+		"pulled/Chart.yaml": "apiVersion: v2\nname: pulled\nversion: 0.1.0\n",
+	})
+
+	p := &fakePuller{dir: filepath.Join(chart, "pulled")}
+	inspect := remoteInspector(chartref.Ref{Kind: chartref.OCI}, p)
+
+	if _, err := inspect(scan.Chart{Name: "pulled", Spec: engine.Spec{ChartRef: "oci://example.com/pulled"}}); err != nil {
+		t.Fatalf("inspect() error = %v", err)
+	}
+	if p.into == "" {
+		t.Fatal("the puller was never given a directory")
+	}
+	if _, err := os.Stat(p.into); !os.IsNotExist(err) {
+		t.Errorf("%s still exists, want the fetched copy removed", p.into)
 	}
 }

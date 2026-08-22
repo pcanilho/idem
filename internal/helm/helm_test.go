@@ -364,3 +364,56 @@ func TestCapabilitiesAreNotOverriddenWhenAskingTheServer(t *testing.T) {
 		}
 	}
 }
+
+// A chart rendered straight from a registry never lands on disk, so idem
+// cannot read it for `lookup` and both Flux and Helm degrade to `unknown` -
+// on exactly the charts idem exists for, since a consumer of a third-party
+// chart is the user who cannot simply patch it. Fetching a copy is the same
+// temp-dir work dependency resolution already does.
+
+func TestPullArgsFetchAndUnpackIntoTheGivenDirectory(t *testing.T) {
+	args := pullArgs(engine.Spec{ChartRef: "podinfo", Repo: "https://example.com/charts"}, "/tmp/scan")
+
+	if got := strings.Join(args, " "); !strings.Contains(got, "pull podinfo") {
+		t.Errorf("pullArgs() = %v, want the chart pulled", args)
+	}
+	if !slices.Contains(args, "--untar") {
+		t.Errorf("pullArgs() = %v, want it unpacked - a .tgz is not a source tree", args)
+	}
+	i := indexOf(args, "--untardir")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "/tmp/scan" {
+		t.Errorf("pullArgs() = %v, want it unpacked into the directory idem chose", args)
+	}
+}
+
+func TestPullArgsCarryTheRepoAndVersion(t *testing.T) {
+	// Pulling a different version than was rendered would scan a chart that is
+	// not the one the verdict is about.
+	args := pullArgs(engine.Spec{ChartRef: "podinfo", Repo: "https://example.com/charts", Version: "6.5.0"}, "/tmp/scan")
+
+	if i := indexOf(args, "--repo"); i < 0 || args[i+1] != "https://example.com/charts" {
+		t.Errorf("pullArgs() = %v, want the repo", args)
+	}
+	if i := indexOf(args, "--version"); i < 0 || args[i+1] != "6.5.0" {
+		t.Errorf("pullArgs() = %v, want the version", args)
+	}
+}
+
+func TestPullArgsCarryNoRenderOnlyFlags(t *testing.T) {
+	// A pull is a fetch, not a render: values, namespace and the cluster
+	// condition mean nothing to it, and helm rejects most of them.
+	args := pullArgs(engine.Spec{
+		ChartRef: "oci://example.com/charts/podinfo", Release: "podinfo",
+		ValuesFiles: []string{"values.yaml"}, SetValues: []string{"a=1"},
+		Namespace: "lab", Cluster: true, KubeContext: "prod",
+	}, "/tmp/scan")
+
+	for _, unwanted := range []string{"-f", "--set", "--namespace", "--dry-run=server", "--kube-context"} {
+		if slices.Contains(args, unwanted) {
+			t.Errorf("pullArgs() = %v, want no %s", args, unwanted)
+		}
+	}
+	if !slices.Contains(args, "oci://example.com/charts/podinfo") {
+		t.Errorf("pullArgs() = %v, want the OCI reference pulled as it stands", args)
+	}
+}

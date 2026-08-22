@@ -235,7 +235,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since,
 		Cluster: opt.cluster, Context: opt.kubeContext,
 	}
-	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, scan.Hooks{Inspect: inspector(ref), Prepare: prepare, Admission: admission(ctx, opt)}) {
+	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, scan.Hooks{Inspect: inspector(ctx, ref, h), Prepare: prepare, Admission: admission(ctx, opt)}) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
 		evidence := engines.Evidence{
@@ -832,17 +832,53 @@ func preparer(ctx context.Context, mode deps.Mode, h helm.Helm) (scan.Prepare, *
 // pin that silently stops applying is the failure idem exists for. It runs in
 // the render pool rather than in a pass afterwards, so it overlaps rendering
 // instead of adding its own serial tail.
-func inspector(ref chartref.Ref) scan.Inspect {
+func inspector(ctx context.Context, ref chartref.Ref, h helm.Helm) scan.Inspect {
+	if ref.Kind != chartref.Local {
+		return remoteInspector(ref, fetcher{ctx: ctx, helm: h})
+	}
+	return func(c scan.Chart) ([]analyze.Use, error) { return analyze.Find(c.Dir) }
+}
+
+// puller fetches a chart's source. An interface so the wiring is testable
+// without a registry, and so idem's own tests do not depend on a network.
+type puller interface {
+	Pull(ctx context.Context, spec engine.Spec, into string) (string, error)
+}
+
+// fetcher is the real one.
+type fetcher struct {
+	ctx  context.Context
+	helm helm.Helm
+}
+
+func (f fetcher) Pull(_ context.Context, spec engine.Spec, into string) (string, error) {
+	return f.helm.Pull(f.ctx, spec, into)
+}
+
+// remoteInspector fetches a chart rendered from a registry so its source can
+// be scanned for `lookup`.
+//
+// Without it both Flux and Helm degrade to `unknown` on every remote chart -
+// which is most of what idem's users check, since a consumer of a third-party
+// chart is precisely the person who cannot patch it. A fetch that fails stays
+// an honest unknown carrying its reason: "could not fetch" is not evidence
+// that the chart has no lookup, and treating it as such would turn a failed
+// download into a CHURNS verdict §5 states as sound.
+func remoteInspector(ref chartref.Ref, p puller) scan.Inspect {
 	return func(c scan.Chart) ([]analyze.Use, error) {
-		if ref.Kind != chartref.Local {
-			// Rendered straight from a registry and never landed on disk, so
-			// there is no source to scan. Reported as unknown rather than as
-			// "no lookup", which would be a sound CHURNS verdict off no
-			// evidence at all. Resolving this needs the same temp-dir fetch
-			// that dependency handling will build.
-			return nil, fmt.Errorf("chart was rendered from %s, so idem has no chart source to scan", ref.Kind)
+		dir, err := os.MkdirTemp("", "idem-chart-")
+		if err != nil {
+			return nil, fmt.Errorf("fetching %s to scan it: %w", c.Name, err)
 		}
-		return analyze.Find(c.Dir)
+		defer os.RemoveAll(dir)
+
+		// The spec idem actually rendered, so the copy scanned is the version
+		// the verdict is about rather than whatever is newest.
+		source, err := p.Pull(context.Background(), c.Spec, dir)
+		if err != nil {
+			return nil, fmt.Errorf("fetching %s from %s to scan it: %w", c.Name, ref.Kind, err)
+		}
+		return analyze.Find(source)
 	}
 }
 
