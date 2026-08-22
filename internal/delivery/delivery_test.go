@@ -1039,3 +1039,102 @@ func TestASubstitutionThatStaysTemplatedIsNotAccepted(t *testing.T) {
 		t.Error("Templated is empty, want idem to record what it could not resolve rather than drop it")
 	}
 }
+
+// ArgoCD globs generator paths with doublestar.FilepathGlob — verified in
+// reposerver/repository/repository.go, whose own comment says it is
+// "consistent with AppSet generators". `**` matches zero or more path
+// segments, which filepath.Glob does not implement at all; refusing the whole
+// ApplicationSet over it means an estate on the pattern ArgoCD's own docs use
+// gets no expansion whatsoever.
+
+func doublestarSet(pattern string) string {
+	return strings.Replace(filesGenerator, "config/tenants/*.yaml", pattern, 1)
+}
+
+func TestADoublestarMatchesFilesAtAnyDepth(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", doublestarSet("config/**/tenant.yaml"))
+	write(t, dir, "config/eu/west/tenant.yaml", "tenant: eu-west\n")
+	write(t, dir, "config/us/tenant.yaml", "tenant: us\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 2 {
+		t.Fatalf("ReleasesFor() returned %d, want both depths: %+v", len(got), got)
+	}
+}
+
+func TestADoublestarAlsoMatchesNoSegmentsAtAll(t *testing.T) {
+	// `a/**/b` matches `a/b`. Requiring at least one segment is the classic
+	// way to get this subtly wrong and silently drop a release.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", doublestarSet("config/**/tenant.yaml"))
+	write(t, dir, "config/tenant.yaml", "tenant: flat\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want the un-nested file matched", got)
+	}
+}
+
+func TestADoublestarDoesNotDescendIntoGit(t *testing.T) {
+	// `.git` holds YAML that is not configuration, and a repository is full of
+	// it. Walking in would manufacture releases from the object store.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", doublestarSet("**/tenant.yaml"))
+	write(t, dir, ".git/tenant.yaml", "tenant: notreal\n")
+	write(t, dir, "config/tenant.yaml", "tenant: real\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name != "real" {
+		t.Errorf("ReleasesFor() = %+v, want only the file outside .git", got)
+	}
+}
+
+func TestADirectoriesGeneratorMatchesDirectoriesOnly(t *testing.T) {
+	// A file that happens to match the pattern is not a directory, and turning
+	// one into a release invents a deployment nobody declared.
+	dir := t.TempDir()
+	write(t, dir, "apps/addons.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: addons}
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://example.com/repo.git
+        directories:
+          - path: "addons/*"
+  template:
+    spec:
+      source:
+        path: charts/app
+        helm:
+          releaseName: '{{ .path.basename }}'
+`)
+	write(t, dir, "addons/ingress/values.yaml", "x: 1\n")
+	write(t, dir, "addons/README.md", "not a directory\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name != "ingress" {
+		t.Errorf("ReleasesFor() = %+v, want only the directory", got)
+	}
+}
+
+func TestAMalformedPatternLeavesTheSetUnexpanded(t *testing.T) {
+	// Refusing is the conservative answer: expanding to a subset would report
+	// some of the releases as though they were all of them.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", doublestarSet("config/[.yaml"))
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name != "" {
+		t.Errorf("ReleasesFor() = %+v, want the template reported unresolved", got)
+	}
+}

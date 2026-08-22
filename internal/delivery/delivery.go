@@ -528,7 +528,7 @@ func repoElements(root string, doc document) ([]element, bool) {
 		}
 
 		for _, f := range gen.Git.Files {
-			matched, ok := matches(root, f.Path)
+			matched, ok := matches(root, f.Path, false)
 			if !ok {
 				return nil, false
 			}
@@ -537,7 +537,7 @@ func repoElements(root string, doc document) ([]element, bool) {
 			}
 		}
 		for _, d := range gen.Git.Directories {
-			matched, ok := matches(root, d.Path)
+			matched, ok := matches(root, d.Path, true)
 			if !ok {
 				return nil, false
 			}
@@ -556,31 +556,86 @@ func repoElements(root string, doc document) ([]element, bool) {
 	return out, true
 }
 
-// matches globs a generator path against the repository.
+// matches globs a generator path against the repository, returning
+// repository-relative paths in lexical order.
 //
-// `**` is refused rather than approximated: filepath.Glob does not implement
-// it, and a pattern that quietly matches less than ArgoCD's would drop
-// releases without saying so.
-func matches(root, pattern string) ([]string, bool) {
-	if strings.Contains(pattern, "**") {
-		return nil, false
+// wantDir selects what a match may be: the files generator matches files and
+// the directories generator matches directories, and a file that happens to
+// match a directory pattern is not a release nobody declared.
+//
+// ArgoCD globs these with doublestar.FilepathGlob - verified in
+// reposerver/repository/repository.go, whose comment says it is "consistent
+// with AppSet generators" - so `**` matches zero or more path segments.
+// filepath.Glob does not implement that at all, so a `**` pattern is walked
+// instead: matching less than ArgoCD does would drop releases silently.
+func matches(root, pattern string, wantDir bool) ([]string, bool) {
+	segments := strings.Split(pattern, "/")
+	for _, seg := range segments {
+		if _, err := path.Match(seg, ""); err != nil && seg != "**" {
+			// A pattern idem cannot even parse. Refused rather than expanded
+			// to whatever it happens to match.
+			return nil, false
+		}
 	}
 
-	found, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return fs.SkipDir
+		}
+		if d.IsDir() != wantDir {
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, p)
+		if err != nil || rel == "." {
+			return nil
+		}
+		if matchPath(segments, strings.Split(filepath.ToSlash(rel), "/")) {
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, false
 	}
 
-	var out []string
-	for _, abs := range found {
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			return nil, false
-		}
-		out = append(out, filepath.ToSlash(rel))
-	}
 	slices.Sort(out)
 	return out, true
+}
+
+// matchPath reports whether a path matches a pattern, segment by segment.
+//
+// `**` consumes zero or more segments - `a/**/b` matches `a/b` as well as
+// `a/x/y/b`. Requiring at least one is the classic way to get this subtly
+// wrong and drop a release without saying so.
+func matchPath(pattern, name []string) bool {
+	if len(pattern) == 0 {
+		return len(name) == 0
+	}
+
+	if pattern[0] == "**" {
+		for i := 0; i <= len(name); i++ {
+			if matchPath(pattern[1:], name[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if len(name) == 0 {
+		return false
+	}
+	// path.Match never matches across a separator, which is what makes this
+	// segment-by-segment walk equivalent to globbing the whole path.
+	ok, err := path.Match(pattern[0], name[0])
+	if err != nil || !ok {
+		return false
+	}
+	return matchPath(pattern[1:], name[1:])
 }
 
 // fileElement is one matched file: its parsed contents, plus the path metadata
