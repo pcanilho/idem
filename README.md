@@ -89,7 +89,8 @@ drift checks, which need to read live objects.
 
 `idem doctor` works: it ranks workloads by how often they roll, names the Application or
 HelmRelease that owns each, and resolves that to the chart path so the closing line is a command
-you can run. Not yet built from that section: the `--namespace` OutOfSync attribution. Engine
+you can run. `idem doctor --namespace <ns>` finds what is being written *after* apply and names the
+controller doing it. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

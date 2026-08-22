@@ -174,3 +174,82 @@ func TestAMissingKubectlIsNamed(t *testing.T) {
 		t.Errorf("error = %q, want it to name the binary idem tried", err)
 	}
 }
+
+// --- normalisation, all three cases found by running against a real namespace ---
+
+func stripped(t *testing.T, body string) map[string]any {
+	t.Helper()
+	got, err := parseLive([]byte(`{"items":[` + body + `]}`))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("parseLive() = %v, %v", got, err)
+	}
+	return got[0].Live.Body
+}
+
+func TestStringDataIsFoldedIntoDataTheWayTheAPIServerDoes(t *testing.T) {
+	// stringData is write-only: Kubernetes merges it into data on write and
+	// never returns it. Comparing raw reports every Secret written that way
+	// as rewritten when nothing touched it.
+	body := stripped(t, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"s"},"stringData":{"TOKEN":"x"}}`)
+
+	if _, present := body["stringData"]; present {
+		t.Error("stringData survived, want it folded away")
+	}
+	data, ok := body["data"].(map[string]any)
+	if !ok || data["TOKEN"] != "eA==" {
+		t.Errorf("data = %v, want TOKEN base64-encoded", body["data"])
+	}
+}
+
+func TestAnExistingDataKeyIsKeptWhenStringDataIsFolded(t *testing.T) {
+	body := stripped(t, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"s"},"data":{"A":"eA=="},"stringData":{"B":"y"}}`)
+
+	data := body["data"].(map[string]any)
+	if data["A"] != "eA==" || data["B"] != "eQ==" {
+		t.Errorf("data = %v, want both keys", data)
+	}
+}
+
+func TestACustomResourceCalledSecretIsLeftAlone(t *testing.T) {
+	// Only core/v1 Secret has this rule.
+	body := stripped(t, `{"apiVersion":"example.com/v1","kind":"Secret","metadata":{"name":"s"},"stringData":{"A":"x"}}`)
+
+	if _, present := body["stringData"]; !present {
+		t.Error("stringData was folded on a non-core kind")
+	}
+}
+
+func TestAnEmptyMapIsTreatedAsAbsent(t *testing.T) {
+	// An object applied with `data: {}` comes back with no data key at all.
+	body := stripped(t, `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"c"},"data":{}}`)
+
+	if _, present := body["data"]; present {
+		t.Error("empty data survived, want it treated as absent")
+	}
+}
+
+func TestANullIsTreatedAsAbsent(t *testing.T) {
+	// A chart emitting `data:` with nothing under it produces null rather than
+	// an empty map, and the API server drops it just the same. Found in a real
+	// namespace, where it read as the whole field having been deleted.
+	body := stripped(t, `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"c"},"data":null}`)
+
+	if _, present := body["data"]; present {
+		t.Error("null data survived, want it treated as absent")
+	}
+}
+
+func TestServerOwnedFieldsAreRemoved(t *testing.T) {
+	// Comparing these would report the cluster being a cluster.
+	body := stripped(t, `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"c","resourceVersion":"9","uid":"u"},"data":{"k":"v"},"status":{"x":1}}`)
+
+	if _, present := body["status"]; present {
+		t.Error("status survived")
+	}
+	meta := body["metadata"].(map[string]any)
+	for _, field := range []string{"resourceVersion", "uid"} {
+		if _, present := meta[field]; present {
+			t.Errorf("metadata.%s survived", field)
+		}
+	}
+}

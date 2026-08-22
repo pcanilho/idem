@@ -85,6 +85,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// established meaning. Passing --context at all is what opts in; an empty
 	// value means whichever context is current.
 	fs.StringVar(&opt.kubeContext, "context", "", "kube context to resolve lookup and capabilities against")
+	fs.StringVar(&opt.namespace, "namespace", "", "for doctor: look for post-apply drift in this namespace")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -313,6 +314,7 @@ type options struct {
 
 	cluster     bool
 	kubeContext string
+	namespace   string
 }
 
 // specFor builds the render request for one chart.
@@ -447,6 +449,23 @@ func names(targets []engines.Target) []string {
 // context is current.
 func runDoctor(ctx context.Context, opt options, stdout, stderr io.Writer) int {
 	client := cluster.New("", opt.kubeContext)
+
+	// --namespace asks a different question: not "what has been rolling" but
+	// "what is being written after it was applied". A dry run cannot see that
+	// - the write happens later - so the only evidence is the live object
+	// against its own record of what was applied.
+	if opt.namespace != "" {
+		objects, err := client.Objects(ctx, opt.namespace, "secrets,configmaps")
+		if err != nil {
+			fmt.Fprintf(stderr, "idem: cannot read the cluster: %v\n", err)
+			return exitFatal
+		}
+		if err := report.Drift(stdout, doctor.PostApply(objects), opt.namespace); err != nil {
+			fmt.Fprintf(stderr, "idem: %v\n", err)
+			return exitFatal
+		}
+		return exitOK
+	}
 
 	workloads, err := client.Workloads(ctx)
 	if err != nil {
