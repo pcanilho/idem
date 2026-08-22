@@ -1371,3 +1371,81 @@ func TestAReleaseThatRenderedDespiteMissingValuesSaysSo(t *testing.T) {
 		t.Errorf("Text() = %q, want the values idem could not supply named", got)
 	}
 }
+
+// Since idem started reporting churn only Flux and Helm see, it has been
+// naming a problem and offering the fix for a different engine. Flux suppresses
+// drift with driftDetection.ignore, not ignoreDifferences.
+
+func churnsUnderFlux(name string, findings ...check.Finding) Chart {
+	return Chart{
+		Name:     name,
+		Findings: findings,
+		Verdicts: []engine.Verdict{
+			{Engine: "argocd", Result: engine.Churns, Because: "every sync", Observed: true},
+			{Engine: "flux", Result: engine.Churns, Because: "on every chart or values change"},
+		},
+	}
+}
+
+func TestAChartThatChurnsUnderFluxGetsTheFluxBlockToo(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "driftDetection") {
+		t.Errorf("Text() = %q, want the Flux fix as well", got)
+	}
+	if !strings.Contains(got, "ignoreDifferences") {
+		t.Errorf("Text() = %q, want the ArgoCD fix still there", got)
+	}
+}
+
+func TestAChartFluxHandlesGetsNoFluxBlock(t *testing.T) {
+	// A lookup stabilises the value under Flux, so there is no Flux drift to
+	// suppress and a block would tell the reader to configure away a problem
+	// they do not have.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:     "home",
+			Findings: []check.Finding{secretFinding("creds", ".data.password")},
+			Verdicts: []engine.Verdict{
+				{Engine: "argocd", Result: engine.Churns, Because: "every sync", Observed: true},
+				{Engine: "flux", Result: engine.Stable, Because: "lookup resolves", Observed: true},
+			},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "driftDetection") {
+		t.Errorf("Text() = %q, want no Flux block - Flux is stable here", got)
+	}
+}
+
+func TestChurnOnlyFluxSeesGetsTheFluxBlock(t *testing.T) {
+	// The case that started this: ArgoCD is fine, Flux churns, and until now
+	// idem emitted nothing at all to fix it.
+	got := text(t, Report{
+		Charts: []Chart{serverOnly("home")},
+		Helm:   "4.2.4", Rounds: 2, Cluster: true,
+	})
+
+	if !strings.Contains(got, "driftDetection") {
+		t.Errorf("Text() = %q, want the Flux fix", got)
+	}
+	if strings.Contains(got, "ignoreDifferences") {
+		t.Errorf("Text() = %q, want no ArgoCD block - ArgoCD does not churn here", got)
+	}
+}
+
+func TestTheFluxBlockIsNotShownWhenOnlyArgoCDWasAskedFor(t *testing.T) {
+	got := text(t, Report{
+		Charts:  []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Engines: []string{"argocd"},
+		Helm:    "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "driftDetection") {
+		t.Errorf("Text() = %q, want only the engine that was asked for", got)
+	}
+}

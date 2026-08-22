@@ -313,7 +313,7 @@ func (r Report) Text(w io.Writer) error {
 	}
 	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s%s%s\n",
 		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())
-	writeRemediation(&b, scope)
+	writeRemediation(&b, scope, r.Engines)
 
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -788,12 +788,72 @@ func errorLines(err error) []string {
 // than once per chart. It is emitted from the full finding - not from what the
 // display showed - because the display caps fields per object and a block
 // missing those fields would not actually stop the churn.
-func writeRemediation(b *strings.Builder, charts []Chart) {
+func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 	var findings []check.Finding
 	for _, c := range charts {
 		if c.Err == nil {
 			findings = append(findings, c.Findings...)
 		}
+	}
+
+	writeArgoRemediation(b, findings, show)
+	writeFluxRemediation(b, charts, show)
+}
+
+// writeFluxRemediation emits driftDetection.ignore for the churn Flux will
+// actually have.
+//
+// Scoped by verdict rather than emitted for everything: a chart whose value a
+// `lookup` stabilises does not drift under Flux, and handing the reader config
+// to suppress a problem they do not have is how a fix block stops being
+// trusted. Findings the ArgoCD condition saw count only when the Flux verdict
+// says Flux churns too; findings only the cluster condition saw always do,
+// because that verdict is an observation of exactly this engine.
+func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string) {
+	if !shows(show, "flux") {
+		return
+	}
+
+	var findings []check.Finding
+	for _, c := range charts {
+		if c.Err != nil {
+			continue
+		}
+		findings = append(findings, c.ServerOnly...)
+		if churnsUnder(c.Verdicts, "flux") {
+			findings = append(findings, c.Findings...)
+		}
+	}
+
+	entries := remediate.FluxEntries(findings)
+	if len(entries) == 0 {
+		return
+	}
+
+	b.WriteString("\n  Add to your HelmRelease to stop the churn under Flux:\n\n")
+	for line := range strings.SplitSeq(strings.TrimRight(remediate.FluxYAML(entries), "\n"), "\n") {
+		b.WriteString("    " + line + "\n")
+	}
+	// The paths are useless without it, and a reader pasting this into a
+	// HelmRelease that never had drift detection on would get silence rather
+	// than a fix.
+	b.WriteString("\n  driftDetection.ignore only applies while drift detection is on; `mode: warn`\n")
+	b.WriteString("  reports without correcting.\n\n")
+}
+
+// churnsUnder reports whether this engine's verdict says the chart churns.
+func churnsUnder(verdicts []engine.Verdict, name string) bool {
+	for _, v := range verdicts {
+		if v.Engine == name {
+			return v.Result == engine.Churns
+		}
+	}
+	return false
+}
+
+func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []string) {
+	if !shows(show, "argocd") {
+		return
 	}
 
 	entries := remediate.Entries(findings)

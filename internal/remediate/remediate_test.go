@@ -397,3 +397,148 @@ func TestAGroupedObjectCarriesItsRealGroup(t *testing.T) {
 		t.Errorf("YAML() = %q, want the real group", out)
 	}
 }
+
+// Flux suppresses drift with spec.driftDetection.ignore, not
+// ignoreDifferences, so a chart that churns under Flux and Helm gets told what
+// will churn and nothing about what to write. Verified against fluxcd/pkg
+// ssa/jsondiff: the paths are RFC 6901 pointers applied as JSON Patch REMOVE
+// operations, with AllowMissingPathOnRemove:true — so a pointer that addresses
+// nothing is silently inert exactly as it is under ArgoCD, and the shape they
+// must describe is the one AFTER a server-side apply dry run.
+
+// fluxParsed is the shape a HelmRelease's driftDetection block has.
+type fluxParsed struct {
+	Spec struct {
+		DriftDetection struct {
+			Mode   string `yaml:"mode"`
+			Ignore []struct {
+				Paths  []string `yaml:"paths"`
+				Target struct {
+					Group     string `yaml:"group"`
+					Version   string `yaml:"version"`
+					Kind      string `yaml:"kind"`
+					Name      string `yaml:"name"`
+					Namespace string `yaml:"namespace"`
+				} `yaml:"target"`
+			} `yaml:"ignore"`
+		} `yaml:"driftDetection"`
+	} `yaml:"spec"`
+}
+
+func renderFlux(t *testing.T, findings ...check.Finding) fluxParsed {
+	t.Helper()
+	out := FluxYAML(FluxEntries(findings))
+
+	var got fluxParsed
+	if err := yaml.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("emitted YAML does not parse: %v\n%s", err, out)
+	}
+	return got
+}
+
+func TestTheFluxBlockTargetsTheObjectAndListsItsPaths(t *testing.T) {
+	got := renderFlux(t, finding(
+		diff.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "home", Name: "api"},
+		path(".spec.template.metadata.annotations.checksum/secrets"),
+	))
+
+	if len(got.Spec.DriftDetection.Ignore) != 1 {
+		t.Fatalf("Ignore = %+v, want one entry", got.Spec.DriftDetection.Ignore)
+	}
+	entry := got.Spec.DriftDetection.Ignore[0]
+	if entry.Target.Kind != "Deployment" || entry.Target.Name != "api" || entry.Target.Namespace != "home" {
+		t.Errorf("Target = %+v, want the object identified", entry.Target)
+	}
+	if entry.Target.Group != "apps" {
+		t.Errorf("Target.Group = %q, want apps", entry.Target.Group)
+	}
+	if !slices.Contains(entry.Paths, "/spec/template/metadata/annotations/checksum~1secrets") {
+		t.Errorf("Paths = %v, want the escaped pointer", entry.Paths)
+	}
+}
+
+func TestASecretIsIgnoredAtDataNotStringData(t *testing.T) {
+	// Flux dry-run applies the desired object BEFORE diffing, so stringData is
+	// already folded into data by the time the paths are applied. Unlike
+	// ArgoCD, there is no second code path that sees the raw manifest, so
+	// emitting /stringData as well would be pure noise.
+	got := renderFlux(t, finding(secretRef("creds"), path(".stringData.password")))
+
+	entry := got.Spec.DriftDetection.Ignore[0]
+	if !slices.Contains(entry.Paths, "/data/password") {
+		t.Errorf("Paths = %v, want /data/password", entry.Paths)
+	}
+	if slices.Contains(entry.Paths, "/stringData/password") {
+		t.Errorf("Paths = %v, want no /stringData - Flux never evaluates it", entry.Paths)
+	}
+}
+
+func TestTheFluxBlockSaysWhichModeItAppliesTo(t *testing.T) {
+	// driftDetection.ignore does nothing at all unless drift detection is on,
+	// so a block that omits the mode is one a reader can paste into a
+	// HelmRelease where it silently never runs.
+	got := renderFlux(t, finding(secretRef("creds"), path(".data.password")))
+
+	if got.Spec.DriftDetection.Mode != "enabled" {
+		t.Errorf("Mode = %q, want it stated", got.Spec.DriftDetection.Mode)
+	}
+}
+
+func TestANameWithRegexPunctuationIsEscaped(t *testing.T) {
+	// Flux anchors the pattern as ^(?:name)$ but it is still a REGEX, so an
+	// unescaped dot matches any character and the rule would suppress drift on
+	// an object the user never named.
+	got := renderFlux(t, finding(secretRef("my.creds"), path(".data.password")))
+
+	if name := got.Spec.DriftDetection.Ignore[0].Target.Name; name != `my\.creds` {
+		t.Errorf("Target.Name = %q, want the dot escaped", name)
+	}
+}
+
+func TestAnOrdinaryNameIsNotEscaped(t *testing.T) {
+	// Escaping what needs no escaping makes every block harder to read.
+	got := renderFlux(t, finding(secretRef("creds"), path(".data.password")))
+
+	if name := got.Spec.DriftDetection.Ignore[0].Target.Name; name != "creds" {
+		t.Errorf("Target.Name = %q, want it left alone", name)
+	}
+}
+
+func TestACoreObjectEmitsNoGroup(t *testing.T) {
+	// An empty selector field matches everything in Flux, and "" is exactly
+	// what a core object's group is - so omitting it is correct rather than
+	// lossy.
+	out := FluxYAML(FluxEntries([]check.Finding{finding(secretRef("creds"), path(".data.password"))}))
+
+	if strings.Contains(out, "group:") {
+		t.Errorf("YAML = %q, want no group line for a core object", out)
+	}
+}
+
+func TestNoFluxBlockWhenThereIsNothingToIgnore(t *testing.T) {
+	if got := FluxYAML(FluxEntries(nil)); got != "" {
+		t.Errorf("FluxYAML() = %q, want empty", got)
+	}
+}
+
+func TestTheFluxBlockStillParsesWithSeveralPathsAndAwkwardKeys(t *testing.T) {
+	// The block form has its own indentation under `- paths:`, and a key
+	// holding a comma or a bracket would split into paths that address nothing
+	// if it were emitted into a flow sequence.
+	got := renderFlux(t, finding(secretRef("creds"),
+		path(".data.first"),
+		path(".data.a,b"),
+		path(".data.plain"),
+	))
+
+	if len(got.Spec.DriftDetection.Ignore) != 1 {
+		t.Fatalf("Ignore = %+v, want one entry", got.Spec.DriftDetection.Ignore)
+	}
+	paths := got.Spec.DriftDetection.Ignore[0].Paths
+	if len(paths) != 3 {
+		t.Fatalf("Paths = %v, want three", paths)
+	}
+	if !slices.Contains(paths, "/data/a,b") {
+		t.Errorf("Paths = %v, want the comma-bearing key intact", paths)
+	}
+}

@@ -401,6 +401,40 @@ In order of precedence:
 A Flux `HelmRelease` names no chart path, so nothing joins its `targetNamespace` to a directory;
 those charts fall through to rule 3.
 
+### The fix block, per engine
+
+The two engines suppress the same churn with different config, and the difference is not
+cosmetic — the paths are evaluated against a **different shape**, so a pointer that works in one
+is inert in the other. `idem` emits whichever applies, and only where that engine actually churns:
+
+```yaml
+spec:
+  driftDetection:
+    mode: enabled
+    ignore:
+      - paths: [/data/password]
+        target:
+          version: v1
+          kind: Secret
+          name: churn-secret
+```
+
+Verified against `fluxcd/pkg` `ssa/jsondiff`: Flux **server-side apply dry-runs the desired
+object before diffing**, so a Secret's write-only `stringData` has already been folded into
+`data` — the path is `/data/KEY`, and emitting `/stringData/KEY` as well (which ArgoCD needs,
+for a second code path Flux does not have) would be pure noise. The paths are then applied as
+JSON Patch **remove** operations with `AllowMissingPathOnRemove: true`, so a path addressing
+nothing fails **silently**, exactly the way a wrong ArgoCD pointer does.
+
+`target` fields are anchored regular expressions (`^(?:value)$`), so a name containing a dot is
+escaped — unescaped, it would match any character there and suppress drift on an object you
+never named. And the block carries `mode`, because `driftDetection.ignore` does nothing at all
+while drift detection is off.
+
+A chart whose value a `lookup` stabilises gets **no** Flux block: there is no Flux drift to
+suppress, and handing you config for a problem you do not have is how a fix block stops being
+trusted.
+
 **There is no rules file and no exceptions file, deliberately.** Suppression is something you
 need *after* you have run a tool and disagreed with it — nobody has exceptions on day one. If
 you need to filter or gate programmatically, `-o json` is the seam:
