@@ -56,7 +56,9 @@ Two different values. Five renders give five passwords.
 
 ## Status
 
-**Early, and not yet released.** The comparison engine, manifest parsing, path addressing and
+**Early, and not yet released** — but the release itself is now wired: `goreleaser` builds
+linux and darwin on amd64 and arm64, publishes a Homebrew cask to `pcanilho/tap`, and produces
+exactly the archive names `action.yml` downloads. The comparison engine, manifest parsing, path addressing and
 chart-reference handling are built and tested — and so is a working CLI: `idem <path>` discovers
 charts, renders each of them more than once, compares the results and prints the verdict, with
 the exit codes below.
@@ -98,15 +100,21 @@ reason the tool exists.
 
 ## Install
 
-Once released, either of:
+Once released:
 
 ```sh
-brew install pcanilho/taps/idem
-go install github.com/pcanilho/idem@latest
+brew install pcanilho/tap/idem
+```
+
+That pulls in `helm`, which `idem` cannot render without. Or, if you would rather build it:
+
+```sh
+go install github.com/pcanilho/idem/cmd/idem@latest
 ```
 
 `idem` shells out to whichever `helm` is on your `PATH`, and prints which one it used —
-results can depend on it.
+results can depend on it. `idem doctor` and `--context` additionally need `kubectl`; everything
+else works with no cluster at all.
 
 ---
 

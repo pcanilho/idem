@@ -1,0 +1,45 @@
+# Cuts a release when a version tag is pushed.
+#
+# The tests run first and on the same runner: idem's own test suite skips
+# anything needing helm when helm is absent, so releasing without installing it
+# would ship a binary whose most important tests never ran.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser builds the changelog from history, and a shallow clone
+          # has none.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+
+      - name: Test
+        run: go test ./... -race
+
+      - name: Release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Needs write access to pcanilho/homebrew-tap, which the default
+          # token does not have.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
