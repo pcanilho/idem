@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -63,10 +64,11 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("idem", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		fmt.Fprintf(stderr, "usage: idem [chart] [flags]\n\n")
-		fs.PrintDefaults()
-	}
+	// Suppressed, because the flag package calls this for BOTH a help request
+	// and a usage error, and those are opposite outcomes: one is a question
+	// answered on stdout, the other a mistake reported on stderr. Handled
+	// below instead, where the two can be told apart.
+	fs.Usage = func() {}
 
 	var opt options
 	fs.Var(&opt.valuesFiles, "f", "values file, repeatable")
@@ -98,8 +100,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.showVersion, "version", false, "print idem's version and exit")
 
 	target, err := parseArgs(fs, args)
-	if err != nil {
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		// Asking for help is not an error. It goes to stdout so a pipe can
+		// read it, and exits 0 so `idem --help` can be scripted as a check
+		// that the binary is sane - which is what people do with it.
+		writeHelp(stdout, fs)
+		return exitOK
+	case err != nil:
 		fmt.Fprintf(stderr, "idem: %v\n", err)
+		fmt.Fprintf(stderr, "\nRun `idem --help` to see what idem takes.\n")
 		return exitFatal
 	}
 
@@ -162,11 +172,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// their engine to ignore changes what is worth reporting. Finding none is
 	// the normal case - plenty of estates keep charts and config in separate
 	// repositories - so a failure here is a note, never a stop.
-	root := delivery.Root(target)
-	deliveryCfg, err := delivery.Load(root)
-	if err != nil {
-		fmt.Fprintf(stderr, "idem: could not read delivery config under %s: %v\n", root, err)
-		deliveryCfg = delivery.Config{}
+	//
+	// Only for a reference that IS a path. A registry reference names no
+	// repository on this machine, so there is nothing to walk up from and
+	// nothing to read; attempting it lstats `oci://...` and prints a failure
+	// as the first line of the run a stranger is most likely to make - "should
+	// I adopt someone else's chart".
+	var root string
+	var deliveryCfg delivery.Config
+	if ref.Kind == chartref.Local {
+		root = delivery.Root(target)
+		var err error
+		if deliveryCfg, err = delivery.Load(root); err != nil {
+			fmt.Fprintf(stderr, "idem: could not read delivery config under %s: %v\n", root, err)
+			deliveryCfg = delivery.Config{}
+		}
 	}
 
 	shown, err := selectEngines(opt.engine, deliveryCfg.Engines)
@@ -326,6 +346,40 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFinding
 	}
 	return exitOK
+}
+
+// writeHelp prints what idem is and what to type, then the flags.
+//
+// Verbs and examples first: a flag list says what exists, not what to run, and
+// the first thing a stranger needs is one line they can paste. `doctor` in
+// particular is the easiest thing here to try - it needs no chart, only a
+// cluster you already run - and it was previously findable only by reading the
+// README.
+func writeHelp(w io.Writer, fs *flag.FlagSet) {
+	fmt.Fprint(w, `idem — check your Helm charts against the GitOps engine you actually run.
+
+It renders a chart more than once, compares the results, and tells you which
+objects will never settle — under ArgoCD, under Flux, under plain Helm — along
+with the config that stops it.
+
+usage:
+  idem [chart] [flags]   check a chart, or every chart under a directory
+  idem doctor [flags]    ask a cluster you already run what keeps rolling
+
+examples:
+  idem ./charts                      check every chart in a directory
+  idem ./charts --strict             fail CI when something will churn
+  idem myapp --repo https://…        check a chart before you adopt it
+  idem doctor                        find churn that has already happened
+
+flags:
+`)
+
+	// PrintDefaults writes to the set's own output, which is stderr for the
+	// error path. Pointed at the caller's writer just for this.
+	fs.SetOutput(w)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
 }
 
 // parseArgs parses flags that may appear before or after the chart reference.

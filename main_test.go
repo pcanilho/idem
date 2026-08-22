@@ -1165,3 +1165,103 @@ func TestTheFetchedCopyIsNotLeftBehind(t *testing.T) {
 		t.Errorf("%s still exists, want the fetched copy removed", p.into)
 	}
 }
+
+// `--help` is the first thing anyone runs against an unfamiliar binary, and
+// people script it to check a binary is sane. Exiting 2 with the text on
+// stderr says "you used me wrong" about a request that was correct.
+
+func TestHelpSucceedsAndGoesToStdout(t *testing.T) {
+	code, stdout, stderr := invoke(t, "--help")
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d — asking for help is not an error", code, exitOK)
+	}
+	if stdout == "" {
+		t.Error("stdout is empty, want the help text where a pipe can read it")
+	}
+	if strings.Contains(stderr, "help requested") {
+		t.Errorf("stderr = %q, want no error about a request that succeeded", stderr)
+	}
+}
+
+func TestHelpNamesTheDoctorVerb(t *testing.T) {
+	// doctor is a top-level verb and the easiest thing in the tool to try —
+	// it needs no chart, only a cluster you already run. Mentioned nowhere in
+	// the help, it is discoverable only by reading 838 lines of README.
+	_, stdout, _ := invoke(t, "--help")
+
+	if !strings.Contains(stdout, "idem doctor") {
+		t.Errorf("stdout = %q, want the doctor verb shown as a verb", stdout)
+	}
+}
+
+func TestHelpShowsWhatToActuallyType(t *testing.T) {
+	// A flag list tells you what exists, not what to run. The first thing a
+	// stranger needs is one line they can paste.
+	_, stdout, _ := invoke(t, "--help")
+
+	if !strings.Contains(stdout, "idem ./charts") {
+		t.Errorf("stdout = %q, want a runnable example", stdout)
+	}
+}
+
+func TestAGenuineFlagErrorStillFails(t *testing.T) {
+	// The other half of the contract: a real mistake must still be an error,
+	// on stderr, with a non-zero exit.
+	code, _, stderr := invoke(t, "testdata/clean", "--nonesuch")
+
+	if code == exitOK {
+		t.Error("exit = 0, want a real flag error to fail")
+	}
+	if !strings.Contains(stderr, "nonesuch") {
+		t.Errorf("stderr = %q, want the offending flag named", stderr)
+	}
+}
+
+func TestARemoteChartDoesNotOpenWithADeliveryConfigError(t *testing.T) {
+	requireHelm(t)
+
+	// A registry reference is not a path, so there is no repository under it
+	// to read a delivery config from — and lstat'ing it fails, loudly, as the
+	// first line a stranger sees on the single highest-value first run:
+	// deciding whether to adopt someone else's chart.
+	//
+	// Run from outside any repository, because that is what exposes it: with a
+	// .git above the working directory, delivery.Root finds that repo and
+	// reads it instead, so the bug hides whenever the tests' own cwd is used.
+	t.Chdir(t.TempDir())
+
+	_, _, stderr := invoke(t, "nothing", "--repo", "https://example.invalid/charts")
+
+	if strings.Contains(stderr, "delivery config") {
+		t.Errorf("stderr = %q, want no delivery-config complaint about a reference that is not a path", stderr)
+	}
+}
+
+func TestALocalChartStillReadsItsDeliveryConfig(t *testing.T) {
+	requireHelm(t)
+
+	// The other half: the skip must be about the reference being remote, not
+	// about giving up on reading delivery config.
+	dir := tree(t, map[string]string{
+		"apps/needs.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: needs}
+spec:
+  source:
+    path: charts/needs
+    helm:
+      valuesObject: {cluster: prod-a}
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"))
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want the Application's values still read\n%s%s", code, stdout, stderr)
+	}
+}
