@@ -82,7 +82,8 @@ idem myapp --repo https://charts.example.com
 idem oci://registry.example.com/charts/myapp
 ```
 
-Here is a chart that churns, and everything `idem` says about it:
+Here is a chart that churns, and what `idem` says about it — trimmed to the ArgoCD half, because
+the real run prints the matching Flux block too:
 
 ```console
 $ idem ./examples/churning-chart
@@ -101,7 +102,7 @@ $ idem ./examples/churning-chart
   — potential · not counted, not fatal —
 
     churning-chart
-      randAlphaNum   random   templates/main.yaml:7
+      randAlphaNum   random   examples/churning-chart/templates/main.yaml:7
 
       This chart already churns, and idem cannot say which function did it —
       a rendered value cannot be traced back to the call that produced it.

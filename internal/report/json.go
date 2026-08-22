@@ -149,12 +149,24 @@ type jsonVerdict struct {
 	Observed bool   `json:"observed"`
 }
 
+// jsonEntry is one remediation entry, for whichever engine Engine names.
+//
+// One array rather than one per engine, because a consumer asking "what do I
+// have to change" wants the answer in one place - but every entry says which
+// engine it is for, and carries that engine's own field name. `jsonPointers`
+// and `paths` are not two spellings of one thing: ArgoCD evaluates its pointers
+// against the rendered config and Flux evaluates its paths against the stored
+// object, so a pointer that works in one is silently inert in the other. A
+// shared field name would invite exactly the swap that fails without an error.
 type jsonEntry struct {
+	Engine       string   `json:"engine"`
 	Group        string   `json:"group,omitempty"`
+	Version      string   `json:"version,omitempty"`
 	Kind         string   `json:"kind"`
 	Name         string   `json:"name,omitempty"`
 	Namespace    string   `json:"namespace,omitempty"`
-	JSONPointers []string `json:"jsonPointers"`
+	JSONPointers []string `json:"jsonPointers,omitempty"`
+	Paths        []string `json:"paths,omitempty"`
 }
 
 // JSON writes the machine-readable form.
@@ -214,7 +226,11 @@ func (r Report) JSON(w io.Writer) error {
 		}
 		for _, u := range c.Potential {
 			out.Potential = append(out.Potential, jsonPotential{
-				Chart: c.Name, Function: u.Function, Why: whyOf(u.Function), File: u.File, Line: u.Line,
+				Chart: c.Name, Function: u.Function, Why: whyOf(u.Function),
+				// Resolved, so `file` means the same thing here as it does in
+				// findings[].source and in a -o github annotation. One document
+				// carrying two path conventions makes both unusable.
+				File: r.usePath(c, u.File), Line: u.Line,
 			})
 		}
 		for _, v := range c.Verdicts {
@@ -229,10 +245,27 @@ func (r Report) JSON(w io.Writer) error {
 		all = append(all, c.Findings...)
 	}
 
-	for _, e := range remediate.Entries(all) {
-		out.Remediation = append(out.Remediation, jsonEntry{
-			Group: e.Group, Kind: e.Kind, Name: e.Name, Namespace: e.Namespace, JSONPointers: e.Pointers,
-		})
+	// Both engines, each scoped exactly as the text form scopes it - the same
+	// selection, from the same helper. `-o json` is the seam idem tells people
+	// to gate on, so a fix it cannot see is a fix their policy engine cannot
+	// enforce.
+	if shows(r.Engines, "argocd") {
+		for _, e := range remediate.Entries(all) {
+			out.Remediation = append(out.Remediation, jsonEntry{
+				Engine: "argocd",
+				Group:  e.Group, Kind: e.Kind, Name: e.Name, Namespace: e.Namespace,
+				JSONPointers: e.Pointers,
+			})
+		}
+	}
+	if shows(r.Engines, "flux") {
+		for _, e := range remediate.FluxEntries(fluxFindings(r.inScope())) {
+			out.Remediation = append(out.Remediation, jsonEntry{
+				Engine: "flux",
+				Group:  e.Group, Version: e.Version, Kind: e.Kind, Name: e.Name, Namespace: e.Namespace,
+				Paths: e.Paths,
+			})
+		}
 	}
 
 	enc := json.NewEncoder(w)

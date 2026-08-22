@@ -443,19 +443,48 @@ func TestRemediationBlockIsIndentedWithTheRestOfTheOutput(t *testing.T) {
 	}
 }
 
-func TestRemediationSaysWhichDiffModeItsPointersAssume(t *testing.T) {
-	// Under ServerSideDiff=true the ignore normalizer never touches the
-	// rendered config at all - pointers must describe the API server's dry-run
-	// output, which two `helm template` runs cannot see. The same block can be
-	// correct in one ArgoCD install and inert in another, so idem says which
-	// one it computed for rather than implying it works everywhere.
+// The caveat used to print on every ArgoCD block, saying pointers "must
+// describe the API server's dry-run output, which idem cannot see" - which read
+// as "this block may not work" on a block that works fine.
+//
+// Checked against gitops-engine `pkg/diff/diff.go` rather than recalled: under
+// server-side diff the ignore normalizer IS applied, to both the SSA dry-run
+// result and the live object; only the pre-processing pass is skipped, via
+// WithSkipFullNormalize(true). So a pointer at a field the chart renders still
+// addresses it. Nothing to warn about, and a caveat on every block is a caveat
+// nobody reads by the third one.
+func TestNoDiffModeCaveatWhereTheModeChangesNothing(t *testing.T) {
 	got := text(t, Report{
 		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".data.key")}}},
 		Helm:   "4.2.4", Rounds: 2,
 	})
 
+	if !strings.Contains(got, "ignoreDifferences") {
+		t.Fatalf("Text() = %q, want the ArgoCD block", got)
+	}
+	if strings.Contains(got, "ServerSideDiff") {
+		t.Errorf("Text() = %q, want no caveat on a block server-side diff does not change", got)
+	}
+}
+
+// `/stringData/KEY` is the one pointer that genuinely differs by diff mode.
+//
+// It exists to stop selfHeal overwriting the value on the RespectIgnoreDifferences
+// sync path, which applies pointers to the raw target - the only place
+// stringData still exists. The API server never stores it, so under server-side
+// diff the predicted live object has only `data` and this pointer addresses
+// nothing. Silently: `AllowMissingPathOnRemove` is ArgoCD's behaviour too.
+func TestTheDiffModeCaveatAppearsOnTheOnePointerItChanges(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".stringData.key")}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "/stringData/key") {
+		t.Fatalf("Text() = %q, want the stringData pointer in the block", got)
+	}
 	if !strings.Contains(got, "ServerSideDiff") {
-		t.Errorf("Text() = %q, want the diff-mode caveat", got)
+		t.Errorf("Text() = %q, want the caveat where the mode changes the answer", got)
 	}
 }
 
@@ -711,6 +740,49 @@ func TestTextListsPotentialFindingsInTheirOwnSection(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("Text() = %q, want %q", got, want)
 		}
+	}
+}
+
+// `-o github` resolved this path correctly while `-o text` and `-o json` printed
+// a chart-relative one, so the same finding named two different files depending
+// on how you asked for it. Grouping the rows under a chart heading told the
+// reader WHICH chart, which is not the same as handing them a path they can
+// open - and Phase 1 already decided that printing an openable path wins.
+func TestAPotentialFindingPrintsAPathTheReaderCanOpen(t *testing.T) {
+	root := repoWith(t, "charts/home/templates/_helpers.tpl")
+
+	got := text(t, Report{
+		Root: root,
+		Charts: []Chart{{
+			Name: "home", RepoDir: "charts/home",
+			Potential: []analyze.Use{potentialUse("templates/_helpers.tpl", 12, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "charts/home/templates/_helpers.tpl:12") {
+		t.Errorf("Text() = %q, want the path resolved against the repository", got)
+	}
+}
+
+// A subchart vendored as a .tgz produces a path that resolves to somewhere
+// nobody can open. Observed findings print what helm gave rather than dropping
+// it, and this section has to make the same choice: a path idem cannot place is
+// still the only name the reader has for that file.
+func TestAPotentialFindingThatCannotBePlacedPrintsWhatHelmGave(t *testing.T) {
+	root := repoWith(t, "charts/home/Chart.yaml")
+
+	got := text(t, Report{
+		Root: root,
+		Charts: []Chart{{
+			Name: "home", RepoDir: "charts/home",
+			Potential: []analyze.Use{potentialUse("charts/ollama/templates/common.yaml", 7, "randAlphaNum")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "charts/ollama/templates/common.yaml:7") {
+		t.Errorf("Text() = %q, want the unresolvable path printed as helm gave it", got)
 	}
 }
 

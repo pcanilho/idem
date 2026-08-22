@@ -12,6 +12,7 @@ import (
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
+	"github.com/pcanilho/idem/internal/engine"
 )
 
 func render(t *testing.T, r Report, f func(Report, io.Writer) error) string {
@@ -311,6 +312,108 @@ func TestGitHubDoesNotClaimAFunctionStayedQuietOnAChurningChart(t *testing.T) {
 	if strings.Contains(got, "did not fire") {
 		t.Errorf("GitHub() = %q, want no claim about which function fired", got)
 	}
+}
+
+// `-o json` is the machine-readable contract, and a consumer that cannot open
+// the file it names has to guess which chart directory to prefix. `findings[].source`
+// is already resolved against the repository; `potential[].file` was not, so one
+// document carried two different path conventions with nothing saying which.
+func TestJSONPlacesAPotentialFindingInTheRepository(t *testing.T) {
+	root := repoWith(t, "charts/home/templates/_helpers.tpl")
+
+	got := render(t, Report{
+		Root: root,
+		Charts: []Chart{{
+			Name: "home", RepoDir: "charts/home",
+			Potential: []analyze.Use{{Function: "randAlphaNum", File: "templates/_helpers.tpl", Line: 12, Call: true}},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}, Report.JSON)
+
+	if !strings.Contains(got, `"file": "charts/home/templates/_helpers.tpl"`) {
+		t.Errorf("JSON() = %q, want the path resolved against the repository", got)
+	}
+}
+
+// `-o json` is the seam idem tells people to gate on, so a fix `-o text` prints
+// and `-o json` omits is a fix their policy engine cannot see. The Flux block
+// was text-only, and the ArgoCD entries carried no engine field - so a consumer
+// could not tell which engine the config it was reading was even for.
+//
+// Decoded rather than substring-matched: `"engine": "flux"` appears in the
+// verdicts array on any run that reports a Flux verdict at all, so a Contains
+// check here passes without a Flux fix ever being emitted. It did, first time.
+func TestJSONCarriesBothEnginesFixesAndSaysWhichIsWhich(t *testing.T) {
+	got := asJSON(t, Report{
+		Charts: []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	byEngine := remediationByEngine(t, got)
+	argo, ok := byEngine["argocd"]
+	if !ok {
+		t.Fatalf("remediation = %v, want an argocd entry", got["remediation"])
+	}
+	if _, ok := argo["jsonPointers"]; !ok {
+		t.Errorf("argocd entry = %v, want jsonPointers", argo)
+	}
+
+	flux, ok := byEngine["flux"]
+	if !ok {
+		t.Fatalf("remediation = %v, want a flux entry", got["remediation"])
+	}
+	// Flux's own spelling, because the two are evaluated against different
+	// shapes and one field name would imply they are interchangeable.
+	if _, ok := flux["paths"]; !ok {
+		t.Errorf("flux entry = %v, want paths", flux)
+	}
+}
+
+// The same scoping the text form applies: a chart a lookup stabilises has no
+// Flux drift, so offering config to suppress it would be config for a problem
+// the reader does not have - in the output a machine acts on without a human
+// reading it first.
+func TestJSONOmitsTheFluxFixWhereFluxDoesNotChurn(t *testing.T) {
+	got := asJSON(t, Report{
+		Charts: []Chart{{
+			Name:     "home",
+			Findings: []check.Finding{secretFinding("creds", ".data.password")},
+			Verdicts: []engine.Verdict{
+				{Engine: "argocd", Result: engine.Churns},
+				{Engine: "flux", Result: engine.Stable},
+			},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	byEngine := remediationByEngine(t, got)
+	if _, ok := byEngine["flux"]; ok {
+		t.Errorf("remediation = %v, want no flux entry where flux is stable", got["remediation"])
+	}
+	if _, ok := byEngine["argocd"]; !ok {
+		t.Errorf("remediation = %v, want the argocd entry still there", got["remediation"])
+	}
+}
+
+// remediationByEngine indexes the remediation array by its engine field, and
+// fails if any entry does not name one - an unlabelled fix block is the defect
+// these tests exist for.
+func remediationByEngine(t *testing.T, got map[string]any) map[string]map[string]any {
+	t.Helper()
+	out := map[string]map[string]any{}
+	entries, _ := got["remediation"].([]any)
+	for _, e := range entries {
+		entry, ok := e.(map[string]any)
+		if !ok {
+			t.Fatalf("remediation entry = %v, want an object", e)
+		}
+		name, ok := entry["engine"].(string)
+		if !ok {
+			t.Fatalf("remediation entry = %v, want an engine field", entry)
+		}
+		out[name] = entry
+	}
+	return out
 }
 
 func TestGitHubMessageReadsAsOneSentence(t *testing.T) {

@@ -307,7 +307,7 @@ func (r Report) Text(w io.Writer) error {
 	if writeSuppressed(&b, scope) {
 		detail = true
 	}
-	if writePotential(&b, scope, r.fields()) {
+	if r.writePotential(&b, scope, r.fields()) {
 		detail = true
 	}
 	if writeRewrites(&b, scope, r.fields()) {
@@ -440,6 +440,37 @@ func (r Report) sourcePath(c Chart, source string) string {
 		return path
 	}
 	return source
+}
+
+// stringDataPointer reports whether a block carries a pointer whose evaluation
+// depends on which diff mode ArgoCD is in.
+//
+// Only stringData does. idem cannot see which mode an install is in - the
+// global switch is `controller.diff.server.side` in argocd-cmd-params-cm, which
+// is not in any manifest idem reads - so the caveat has to be earned by what
+// the block CONTAINS rather than by guessing at the cluster's configuration.
+func stringDataPointer(entries []remediate.Entry) bool {
+	for _, e := range entries {
+		for _, p := range e.Pointers {
+			if strings.HasPrefix(p, "/stringData/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usePath is sourcePath for a non-deterministic call site.
+//
+// No trimChartPrefix, and that is the whole difference: helm's `# Source:`
+// leads with the chart name, while analyze walks the chart directory and
+// reports paths already relative to it. Trimming here would eat `templates/`
+// off every path and place none of them.
+func (r Report) usePath(c Chart, file string) string {
+	if path, ok := r.locate(c, file); ok {
+		return path
+	}
+	return file
 }
 
 // shows reports whether this engine's verdict is displayed. Empty shows all.
@@ -789,7 +820,7 @@ func writeByManifest(b *strings.Builder, suppressed []delivery.Suppressed) {
 // case teaches you to distrust it about the observed one. But the failure that
 // motivated idem was a pin that silently stopped applying, so hiding these
 // would hide the thing most worth knowing.
-func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
+func (r Report) writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 	var any bool
 	for _, c := range charts {
 		if len(c.Potential) == 0 {
@@ -805,9 +836,9 @@ func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 		// stayed quiet.
 		settled := len(c.Findings) == 0 && len(c.Suppressed) == 0 && len(c.ServerOnly) == 0 && c.Err == nil
 
-		// Grouped by chart because the paths are chart-relative: on its own,
-		// "templates/job.yaml:351" names a file in some chart the reader then
-		// has to go and find.
+		// Grouped by chart because these are a property of the chart rather
+		// than of any one object, and the closing sentence below is one per
+		// chart: whether anything churned decides which of the two it is.
 		fmt.Fprintf(b, "\n    %s\n", heading(c, charts))
 
 		shown := min(len(c.Potential), limit)
@@ -819,7 +850,7 @@ func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 			// file:line last, and deliberately: alignment pads every row to
 			// the widest cell, and a deeply vendored subchart path would drag
 			// all of them out past a readable width.
-			fmt.Fprintf(tw, "      %s\t%s\t%s:%d\n", u.Function, note, u.File, u.Line)
+			fmt.Fprintf(tw, "      %s\t%s\t%s:%d\n", u.Function, note, r.usePath(c, u.File), u.Line)
 		}
 		tw.Flush()
 
@@ -962,11 +993,13 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 // trusted. Findings the ArgoCD condition saw count only when the Flux verdict
 // says Flux churns too; findings only the cluster condition saw always do,
 // because that verdict is an observation of exactly this engine.
-func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string, afterArgo bool) {
-	if !shows(show, "flux") {
-		return
-	}
-
+// fluxFindings selects the findings a Flux block should cover, so the text form
+// and `-o json` cannot drift into offering different fixes for the same run.
+//
+// Findings the ArgoCD condition saw count only when the Flux verdict says Flux
+// churns too; findings only the cluster condition saw always do, because that
+// verdict is an observation of exactly this engine.
+func fluxFindings(charts []Chart) []check.Finding {
 	var findings []check.Finding
 	for _, c := range charts {
 		if c.Err != nil {
@@ -977,8 +1010,15 @@ func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string, aft
 			findings = append(findings, c.Findings...)
 		}
 	}
+	return findings
+}
 
-	entries := remediate.FluxEntries(findings)
+func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string, afterArgo bool) {
+	if !shows(show, "flux") {
+		return
+	}
+
+	entries := remediate.FluxEntries(fluxFindings(charts))
 	if len(entries) == 0 {
 		return
 	}
@@ -1021,14 +1061,25 @@ func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []s
 	for line := range strings.SplitSeq(strings.TrimRight(remediate.YAML(entries), "\n"), "\n") {
 		b.WriteString("    " + line + "\n")
 	}
-	// These pointers are computed for ArgoCD's default diff. Under
-	// ServerSideDiff=true the ignore normalizer never sees the rendered config
-	// at all - pointers must describe the API server's dry-run output, which
-	// two `helm template` runs cannot observe. Saying so beats implying the
-	// block works everywhere. (ServerSideApply=true is a different option on a
-	// different code path and does not affect these pointers.)
-	b.WriteString("\n  Computed for ArgoCD's default diff. With ServerSideDiff=true, pointers must\n")
-	b.WriteString("  describe the API server's dry-run output, which idem cannot see.\n")
+	// Only where the diff mode changes the answer, which is `/stringData`
+	// alone.
+	//
+	// Verified in gitops-engine `pkg/diff/diff.go` rather than recalled: under
+	// server-side diff the ignore normalizer IS applied - to the SSA dry-run
+	// result and to the live object - and only the pre-processing pass is
+	// skipped, via WithSkipFullNormalize(true). A pointer at a field the chart
+	// renders therefore still addresses it, and this used to print on every
+	// block as though it might not. stringData is the exception because the
+	// API server never stores it: it survives only on the raw target, which is
+	// what the RespectIgnoreDifferences sync path applies pointers to.
+	//
+	// (ServerSideApply=true is a different option on a different code path and
+	// does not affect these pointers. The two are routinely conflated.)
+	if stringDataPointer(entries) {
+		b.WriteString("\n  The `/stringData` pointer works on ArgoCD's default diff. Under\n")
+		b.WriteString("  ServerSideDiff=true only `/data` is evaluated, so keep both: whichever\n")
+		b.WriteString("  path this install is on, the other pointer is a silent no-op.\n")
+	}
 
 	// Blank line so an exit-code line printed after the report does not read
 	// as part of the YAML the user is about to paste.

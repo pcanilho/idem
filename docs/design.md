@@ -685,10 +685,31 @@ inline annotations. Each of those has a reader who cannot use any of the others.
 would be a format with no reader — and SARIF in particular implies a line number `idem`
 deliberately refuses to guess (§9).
 
-### Why the `ignoreDifferences` block carries a caveat
+### Why the `ignoreDifferences` block carries a caveat — and only sometimes
 
-The pointers are computed for ArgoCD's default diff. Under `ServerSideDiff=true` the ignore
-normalizer never sees the rendered config at all: pointers must then describe the API server's
-dry-run output, which two `helm template` runs cannot observe. Saying so beats implying the block
-works everywhere. (`ServerSideApply=true` is a different option on a different code path and does
-not affect these pointers — the two are routinely conflated.)
+This one was written wrong first, and the correction is worth keeping.
+
+The original claim was that under `ServerSideDiff=true` the ignore normalizer "never sees the
+rendered config at all", so every emitted block might be inert. **Checked against
+`gitops-engine/pkg/diff/diff.go`, that is not what happens.** Server-side diff runs a Server-Side
+Apply dry-run and compares the result with live — and the normalizer *is* applied, to both that
+predicted-live object and the live one. Only the pre-processing pass is skipped, via
+`WithSkipFullNormalize(true)`. A pointer at a field the chart renders still addresses it.
+
+So the caveat was casting doubt on blocks that work, on every run, which is how a caveat stops
+being read.
+
+**One pointer genuinely does depend on the mode: `/stringData/KEY`.** It exists to stop `selfHeal`
+overwriting the value on the `RespectIgnoreDifferences` sync path, which applies pointers to the
+raw target — the only place `stringData` still exists, because the API server never stores it.
+Under server-side diff the predicted-live object has only `data`, so `/stringData` addresses
+nothing, and silently, exactly as a wrong ArgoCD pointer does. The block emits both pointers and
+says so, only when it contains one.
+
+idem cannot detect the mode and does not try: the global switch is `controller.diff.server.side`
+in `argocd-cmd-params-cm`, which is not in any manifest idem reads, and the per-application
+`argocd.argoproj.io/compare-options` annotation being absent does not mean the mode is off. The
+caveat is earned by what the block *contains*, not by a guess about the cluster — §9's rule.
+
+(`ServerSideApply=true` is a different option on a different code path and does not affect these
+pointers — the two are routinely conflated.)
