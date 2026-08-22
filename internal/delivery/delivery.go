@@ -15,7 +15,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -411,7 +413,7 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 				break
 			}
 			for _, el := range elements {
-				spec, resolved := resolveSpec(doc.Spec.Template.Spec, el)
+				spec, resolved := resolveSpec(doc.Spec.Template.Spec, el, doc.Spec.GoTemplate)
 				dests = append(dests, argoDestinations(spec, file)...)
 				for _, v := range argoValues(spec, file) {
 					v.Instance = el.name
@@ -495,7 +497,14 @@ func argoValues(spec appSpec, file string) []Values {
 // a name for the thing itself.
 type element struct {
 	name string
+
+	// data is what a goTemplate ApplicationSet's templates see: nested, with
+	// `path` as a map. flat is what a legacy one sees: dotted keys, string
+	// values only. They are different shapes because ArgoCD renders them with
+	// different engines, and collapsing them would make idem substitute where
+	// ArgoCD would not.
 	data map[string]any
+	flat map[string]string
 }
 
 // repoElements expands the generators whose input is the repository.
@@ -505,7 +514,7 @@ type element struct {
 // substitution - which is different from expanding it to nothing. The caller
 // reports the template unresolved rather than treating it as zero releases.
 func repoElements(root string, doc document) ([]element, bool) {
-	if !doc.Spec.GoTemplate || len(doc.Spec.Generators) == 0 {
+	if len(doc.Spec.Generators) == 0 {
 		return nil, false
 	}
 
@@ -536,7 +545,11 @@ func repoElements(root string, doc document) ([]element, bool) {
 				if d.Exclude {
 					continue
 				}
-				out = append(out, element{name: rel, data: pathData(rel, "")})
+				out = append(out, element{
+					name: rel,
+					data: pathData(rel, ""),
+					flat: flatPathData(rel, ""),
+				})
 			}
 		}
 	}
@@ -583,18 +596,101 @@ func fileElement(root, rel string) element {
 	}
 
 	maps.Copy(data, pathData(path.Dir(rel), path.Base(rel)))
-	return element{name: rel, data: data}
+
+	// The legacy view is the same file flattened, with the path keys written
+	// over it last - ArgoCD's own order, so a `path` key in the file cannot
+	// shadow the generator's.
+	flat := flatten(data)
+	delete(flat, "path")
+	maps.Copy(flat, flatPathData(path.Dir(rel), path.Base(rel)))
+
+	return element{name: rel, data: data, flat: flat}
+}
+
+// flatten renders a parsed file the way flatten.DotStyle does, keeping only
+// the string leaves.
+//
+// Not a simplification: ArgoCD's legacy pass asserts replaceMap[tag].(string)
+// and writes the tag back verbatim when that fails, so a number or a bool is
+// never substituted there either.
+func flatten(in map[string]any) map[string]string {
+	out := map[string]string{}
+
+	var walk func(prefix string, value any)
+	walk = func(prefix string, value any) {
+		switch v := value.(type) {
+		case map[string]any:
+			for key, val := range v {
+				walk(join(prefix, key), val)
+			}
+		case []any:
+			for i, val := range v {
+				walk(join(prefix, strconv.Itoa(i)), val)
+			}
+		case string:
+			out[prefix] = v
+		}
+	}
+	walk("", in)
+
+	return out
+}
+
+func join(prefix, key string) string {
+	if prefix == "" {
+		return key
+	}
+	return prefix + "." + key
+}
+
+// flatPathData is the generator's path metadata as legacy dotted keys.
+//
+// The directories generator sets no filename - there is no file - and idem
+// does not invent one, so a template using it stays unresolved exactly as it
+// would under ArgoCD.
+func flatPathData(dir, filename string) map[string]string {
+	out := map[string]string{
+		"path":                    dir,
+		"path.basename":           path.Base(dir),
+		"path.basenameNormalized": sanitiseName(path.Base(dir)),
+	}
+	if filename != "" {
+		out["path.filename"] = filename
+		out["path.filenameNormalized"] = sanitiseName(filename)
+	}
+	for i, segment := range strings.Split(dir, "/") {
+		out["path["+strconv.Itoa(i)+"]"] = segment
+	}
+	return out
+}
+
+// invalidDNSNameChars and maxDNSNameLength mirror argo-cd's utils.SanitizeName.
+var invalidDNSNameChars = regexp.MustCompile("[^-a-z0-9.]")
+
+const maxDNSNameLength = 253
+
+// sanitiseName is argo-cd's SanitizeName, which is what feeds the
+// `basenameNormalized` and `filenameNormalized` parameters.
+func sanitiseName(name string) string {
+	name = strings.ToLower(name)
+	name = invalidDNSNameChars.ReplaceAllString(name, "-")
+	if len(name) > maxDNSNameLength {
+		name = name[:maxDNSNameLength]
+	}
+	return strings.Trim(name, "-.")
 }
 
 // pathData is the generator's own metadata for a matched path.
 func pathData(dir, filename string) map[string]any {
 	meta := map[string]any{
-		"path":     dir,
-		"basename": path.Base(dir),
-		"segments": strings.Split(dir, "/"),
+		"path":               dir,
+		"basename":           path.Base(dir),
+		"basenameNormalized": sanitiseName(path.Base(dir)),
+		"segments":           strings.Split(dir, "/"),
 	}
 	if filename != "" {
 		meta["filename"] = filename
+		meta["filenameNormalized"] = sanitiseName(filename)
 	}
 	return map[string]any{"path": meta}
 }
@@ -604,10 +700,10 @@ func pathData(dir, filename string) map[string]any {
 //
 // Only these fields: idem is not reimplementing ArgoCD's controller, it is
 // working out what one release renders with.
-func resolveSpec(spec appSpec, el element) (appSpec, []string) {
+func resolveSpec(spec appSpec, el element, goTemplate bool) (appSpec, []string) {
 	var unresolved []string
 	sub := func(in string) string {
-		out, ok := substitute(in, el.data)
+		out, ok := substitute(in, el, goTemplate)
 		if !ok {
 			unresolved = append(unresolved, in)
 			return in
@@ -674,9 +770,12 @@ func resolveSource(src *source, sub func(string) string) *source {
 // missingkey=error, so a key the element does not carry fails loudly here
 // rather than rendering as "<no value>" and being handed to helm as if the
 // repository had said it.
-func substitute(in string, data map[string]any) (string, bool) {
+func substitute(in string, el element, goTemplate bool) (string, bool) {
 	if !templated(in) {
 		return in, true
+	}
+	if !goTemplate {
+		return substituteLegacy(in, el.flat)
 	}
 
 	tmpl, err := template.New("").Option("missingkey=error").Parse(in)
@@ -685,9 +784,47 @@ func substitute(in string, data map[string]any) (string, bool) {
 	}
 
 	var out strings.Builder
-	if err := tmpl.Execute(&out, data); err != nil {
+	if err := tmpl.Execute(&out, el.data); err != nil {
 		return in, false
 	}
+	if templated(out.String()) {
+		return in, false
+	}
+	return out.String(), true
+}
+
+// substituteLegacy is ArgoCD's fasttemplate pass: `{{` and `}}`, the tag
+// trimmed, and the tag written back verbatim when it names nothing.
+//
+// Written back rather than emptied, which is what argo-cd does - and it is
+// what lets idem notice: a result still carrying `{{` is one idem refuses,
+// rather than a value it invented from an absent key.
+func substituteLegacy(in string, flat map[string]string) (string, bool) {
+	var out strings.Builder
+	rest := in
+
+	for {
+		open := strings.Index(rest, "{{")
+		if open < 0 {
+			break
+		}
+		close := strings.Index(rest[open:], "}}")
+		if close < 0 {
+			break
+		}
+		close += open
+
+		tag := strings.TrimSpace(rest[open+2 : close])
+		out.WriteString(rest[:open])
+		if value, ok := flat[tag]; ok && tag != "" {
+			out.WriteString(value)
+		} else {
+			out.WriteString(rest[open : close+2])
+		}
+		rest = rest[close+2:]
+	}
+	out.WriteString(rest)
+
 	if templated(out.String()) {
 		return in, false
 	}

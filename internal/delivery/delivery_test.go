@@ -881,18 +881,141 @@ func TestAGeneratorThatMatchesNothingProducesNoRelease(t *testing.T) {
 	}
 }
 
-func TestLegacySubstitutionIsNotExpanded(t *testing.T) {
-	// Without goTemplate, ArgoCD uses its own fasttemplate substitution with
-	// different semantics. Guessing that it matches Go templates would make
-	// idem analyse a release ArgoCD never generates.
+// Without goTemplate, ArgoCD substitutes with fasttemplate over a FLAT map of
+// dotted keys, not Go templates. Verified against argo-cd master:
+// applicationset/utils/utils.go builds the template with "{{" and "}}", trims
+// the tag, and writes `{{tag}}` back VERBATIM when the key is absent or its
+// value is not a string; applicationset/generators/git.go flattens the matched
+// file with flatten.DotStyle and adds the path keys below.
+//
+// goTemplate: false is still the schema default, so this is the common shape.
+
+const legacyGenerator = `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: tenants}
+spec:
+  generators:
+    - git:
+        repoURL: https://example.com/repo.git
+        files:
+          - path: "config/tenants/*.yaml"
+  template:
+    spec:
+      destination:
+        namespace: '{{tenant}}-system'
+      source:
+        path: charts/app
+        helm:
+          releaseName: '{{tenant}}'
+          valueFiles:
+            - '/{{path}}/{{path.filename}}'
+`
+
+func TestALegacyGeneratorExpandsWithFlatDottedKeys(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "apps/tenants.yaml", strings.Replace(filesGenerator, "goTemplate: true", "goTemplate: false", 1))
+	write(t, dir, "apps/tenants.yaml", legacyGenerator)
 	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
 
 	got := load(t, dir).ReleasesFor("charts/app")
 
-	if len(got) != 1 || got[0].Name == "alpha" {
-		t.Errorf("ReleasesFor() = %+v, want no expansion without goTemplate", got)
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+	if got[0].Name != "alpha" {
+		t.Errorf("Name = %q, want alpha", got[0].Name)
+	}
+	if got[0].Namespace != "alpha-system" {
+		t.Errorf("Namespace = %q, want alpha-system", got[0].Namespace)
+	}
+	if !slices.Contains(got[0].ValueFiles, "config/tenants/alpha.yaml") {
+		t.Errorf("ValueFiles = %v, want the matched file", got[0].ValueFiles)
+	}
+}
+
+func TestALegacyNestedKeyIsFlattenedWithDots(t *testing.T) {
+	// flatten.DotStyle: {cluster: {name: x}} is reachable as {{cluster.name}}
+	// and NOT as {{ .cluster.name }} - the legacy pass has no Go template.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", strings.Replace(legacyGenerator, "{{tenant}}'", "{{cluster.name}}'", 2))
+	write(t, dir, "config/tenants/alpha.yaml", "cluster:\n  name: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name != "alpha" {
+		t.Errorf("ReleasesFor() = %+v, want the nested key flattened", got)
+	}
+}
+
+func TestALegacyNonStringValueIsNotSubstituted(t *testing.T) {
+	// argo-cd asserts replaceMap[tag].(string) and writes the tag back when it
+	// fails, so a number never substitutes. idem then sees a value still
+	// carrying {{ }} and refuses it rather than inventing one.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", strings.Replace(legacyGenerator, "releaseName: '{{tenant}}'", "releaseName: '{{replicas}}'", 1))
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\nreplicas: 3\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+	if got[0].Name != "" {
+		t.Errorf("Name = %q, want it unresolved - argo-cd would not substitute a number either", got[0].Name)
+	}
+}
+
+func TestALegacyMissingKeyIsLeftUnresolved(t *testing.T) {
+	// The tag is written back verbatim rather than emptied, and the difference
+	// only shows inside a larger string: emptied, `{{tenant}}-system` becomes
+	// the namespace `-system`, which idem would then render into and report as
+	// though the repository had said it.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", legacyGenerator)
+	write(t, dir, "config/tenants/alpha.yaml", "somethingElse: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+	if got[0].Name != "" {
+		t.Errorf("Name = %q, want the absent key left unresolved", got[0].Name)
+	}
+	if got[0].Namespace != "" {
+		t.Errorf("Namespace = %q, want nothing rather than a namespace built around a hole", got[0].Namespace)
+	}
+}
+
+func TestTheNormalizedPathKeysAreSanitisedTheWayArgoCDSanitisesThem(t *testing.T) {
+	// utils.SanitizeName: lowercase, every character outside [-a-z0-9.] becomes
+	// a hyphen, truncate at 253, then trim leading and trailing "-." .
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", strings.Replace(legacyGenerator,
+		"releaseName: '{{tenant}}'", "releaseName: '{{path.basenameNormalized}}'", 1))
+	write(t, dir, "config/Team_Alpha/one.yaml", "tenant: alpha\n")
+	write(t, dir, "apps/other.yaml", strings.Replace(
+		strings.Replace(legacyGenerator, "config/tenants/*.yaml", "config/Team_Alpha/*.yaml", 1),
+		"releaseName: '{{tenant}}'", "releaseName: '{{path.basenameNormalized}}'", 1))
+
+	for _, r := range load(t, dir).ReleasesFor("charts/app") {
+		if r.Instance == "config/Team_Alpha/one.yaml" && r.Name != "team-alpha" {
+			t.Errorf("Name = %q, want team-alpha", r.Name)
+		}
+	}
+}
+
+func TestALegacyPathSegmentIsIndexed(t *testing.T) {
+	// argo-cd writes params["path[0]"], params["path[1]"] ... for the segments.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", strings.Replace(legacyGenerator,
+		"releaseName: '{{tenant}}'", "releaseName: '{{path[1]}}'", 1))
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name != "tenants" {
+		t.Errorf("ReleasesFor() = %+v, want the second path segment", got)
 	}
 }
 

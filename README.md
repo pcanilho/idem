@@ -369,9 +369,17 @@ findings are reported with a note that this is not the release you deploy; if th
 
 It is counted (`summary.unconstructed` in `-o json`) so the gap cannot pass unnoticed, and it
 never fails the run: `idem` could not construct the release, which is a limit of `idem` rather
-than a defect in your chart. Legacy (non-`goTemplate`) ApplicationSets are not expanded either —
-ArgoCD substitutes those with different semantics, and guessing they agree would mean analysing a
-release ArgoCD never generates.
+than a defect in your chart.
+
+**Both substitution modes are supported**, because they are genuinely different engines and
+`goTemplate: false` is still the schema default. With `goTemplate: true` the element is a nested
+structure and templates are Go templates (`{{ .tenant }}`, `{{ .path.filename }}`). Without it,
+ArgoCD flattens the matched file into dotted keys and substitutes with `fasttemplate`
+(`{{tenant}}`, `{{cluster.name}}`, `{{path.basenameNormalized}}`, `{{path[1]}}`) — and writes the
+tag back **verbatim** when it names nothing, or when the value is not a string. `idem` reproduces
+that, including `SanitizeName` for the `Normalized` keys, and treats anything still carrying
+`{{ }}` as a value it could not resolve rather than one to invent. A namespace of `{{tenant}}-system`
+with no `tenant` key is reported unresolved, never rendered into `-system`.
 
 ### Which namespace a chart renders into
 
