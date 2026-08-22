@@ -19,12 +19,15 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/chartref"
+	"github.com/pcanilho/idem/internal/cluster"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/deps"
 	"github.com/pcanilho/idem/internal/discover"
+	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
 	"github.com/pcanilho/idem/internal/gitrev"
@@ -126,6 +129,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if opt.rounds < 2 {
 		fmt.Fprintf(stderr, "idem: --rounds is %d: at least 2 renders are needed, because a single render cannot be compared to anything\n", opt.rounds)
 		return exitFatal
+	}
+
+	// The one verb idem has. Disambiguated by disk, the same way a chart
+	// reference is: a directory actually named "doctor" is a chart.
+	if target == "doctor" && !exists("doctor") {
+		return runDoctor(context.Background(), opt, stdout, stderr)
 	}
 
 	ref := chartref.ClassifyWithRepo(target, opt.repo, exists)
@@ -431,6 +440,34 @@ func names(targets []engines.Target) []string {
 // anywhere, so this is a chart defect" conclusion is only reachable from an
 // engine that resolves lookup, and it is worth having even when the reader
 // only asked about ArgoCD.
+// runDoctor asks the cluster what has already been happening.
+//
+// No chart, no git, no rendering. A cluster is the entire point here, so
+// unlike the check path this needs one: without --context it uses whichever
+// context is current.
+func runDoctor(ctx context.Context, opt options, stdout, stderr io.Writer) int {
+	client := cluster.New("", opt.kubeContext)
+
+	workloads, err := client.Workloads(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "idem: cannot read the cluster: %v\n", err)
+		return exitFatal
+	}
+
+	// Best-effort: a cluster with no ArgoCD simply has no Applications to map,
+	// and doctor still has everything the workloads themselves told it.
+	sources := client.Sources(ctx)
+
+	diagnosis := doctor.Diagnose(workloads, time.Now())
+	if err := report.Doctor(stdout, diagnosis, opt.kubeContext, sources); err != nil {
+		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
+	// Ranking suspects is triage, not a verdict. Nothing here fails a build.
+	return exitOK
+}
+
 // wasSet reports whether a flag was given at all, however it was valued.
 func wasSet(fs *flag.FlagSet, name string) bool {
 	seen := false
