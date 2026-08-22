@@ -197,7 +197,7 @@ func TestAFailedScanIsUnknownRatherThanClean(t *testing.T) {
 func observed(stable bool) Evidence { return Evidence{Uses: oneUse.Uses, Cluster: &stable} }
 
 func TestAMeasuredClusterRenderBeatsGuessing(t *testing.T) {
-	// The whole point of --cluster: `unknown` becomes a fact. helm's server
+	// The whole point of --context: `unknown` becomes a fact. helm's server
 	// dry run resolves lookup and uses the cluster's real capabilities, which
 	// is what an engine doing a real install sees.
 	for _, name := range []string{"flux", "helm"} {
@@ -213,7 +213,7 @@ func TestAMeasuredClusterRenderBeatsGuessing(t *testing.T) {
 }
 
 func TestAChartThatChurnsEvenWithLookupResolvedIsAFact(t *testing.T) {
-	// The lookup is present but does not guard this value. Without --cluster
+	// The lookup is present but does not guard this value. Without --context
 	// idem could only say unknown; with it, this is settled.
 	v := byName(t, "flux").Verdict(observed(false))
 

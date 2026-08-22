@@ -242,7 +242,7 @@ func writeChart(b *strings.Builder, c Chart, show []string) {
 //
 // One block per chart rather than per finding: today the answer turns on
 // whether the chart calls lookup at all, which is a property of the chart. It
-// becomes per-finding only with --cluster, where each value can be observed
+// becomes per-finding only with --context, where each value can be observed
 // separately.
 func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string) {
 	if len(verdicts) == 0 {

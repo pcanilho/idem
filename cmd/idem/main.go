@@ -3,8 +3,8 @@
 // Classify the reference, render it more than once with `helm template`,
 // compare the results structurally, and say what that means under each GitOps
 // engine - discounting whatever the delivery config already suppresses. The
-// output formats beyond text, dependency resolution, --new-from-rev, --cluster
-// and doctor are not here yet.
+// Not here yet: the apply-side and post-apply drift checks, which need to read
+// live objects, and doctor.
 package main
 
 import (
