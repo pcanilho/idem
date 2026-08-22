@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/pcanilho/idem/internal/manifest"
@@ -57,6 +58,47 @@ func (c Client) Objects(ctx context.Context, namespace, kinds string) ([]LiveObj
 		return nil, err
 	}
 	return parseLive(out)
+}
+
+// DryRunApply asks the API server what it would store, without storing it.
+//
+// This is the only way to see cause 3: a mutating webhook rewrites an object
+// as it is admitted, and no amount of rendering reveals that. Nothing is
+// persisted - a server dry run is a question, not an apply.
+func (c Client) DryRunApply(ctx context.Context, namespace string, manifests []byte) ([]manifest.Object, error) {
+	args := []string{"apply", "--dry-run=server", "-f", "-", "-o", "json"}
+	if namespace != "" {
+		args = append(args, "-n", namespace)
+	}
+
+	out, err := c.runWithInput(ctx, manifests, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	// kubectl emits a List when given several objects and a bare object when
+	// given one.
+	var probe struct {
+		Kind  string            `json:"kind"`
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return nil, fmt.Errorf("reading kubectl output: %w", err)
+	}
+
+	if probe.Kind != "List" {
+		return manifest.Parse(strings.NewReader(string(out)))
+	}
+
+	var objects []manifest.Object
+	for _, raw := range probe.Items {
+		parsed, err := manifest.Parse(strings.NewReader(string(raw)))
+		if err != nil {
+			continue
+		}
+		objects = append(objects, parsed...)
+	}
+	return objects, nil
 }
 
 func parseLive(body []byte) ([]LiveObject, error) {
@@ -120,6 +162,12 @@ func one(raw json.RawMessage) (LiveObject, error) {
 	}
 	return out, nil
 }
+
+// Normalise makes an object comparable with the other side of a diff, by
+// removing what the API server owns and applying the rewrites it performs on
+// write. Exported because both sides of an apply-side comparison need it: what
+// was sent has to be measured on the same terms as what came back.
+func Normalise(o manifest.Object) manifest.Object { return strip(o) }
 
 // strip makes an object comparable with the other side, by removing what the
 // API server owns and normalising what it rewrites on write.

@@ -2,6 +2,7 @@
 package manifest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -133,6 +134,23 @@ func Parse(r io.Reader) ([]Object, error) {
 	}
 
 	return out, nil
+}
+
+// Encode writes objects back out as a YAML stream.
+//
+// Needed to hand a render to something that reads manifests - `kubectl apply
+// --dry-run=server`, which answers what the API server would actually store.
+func Encode(objects []Object) ([]byte, error) {
+	var out bytes.Buffer
+	for _, o := range objects {
+		body, err := yaml.Marshal(o.Body)
+		if err != nil {
+			return nil, fmt.Errorf("encoding %s: %w", o.Display(), err)
+		}
+		out.WriteString("---\n")
+		out.Write(body)
+	}
+	return out.Bytes(), nil
 }
 
 // sourceOf extracts helm's "# Source:" comment.

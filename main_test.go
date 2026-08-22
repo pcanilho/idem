@@ -706,3 +706,31 @@ func TestAnUnreachableClusterDoesNotFailTheRun(t *testing.T) {
 		t.Errorf("stdout = %q, want the verdict left unknown", stdout)
 	}
 }
+
+func TestTheClusterRewritesAreReported(t *testing.T) {
+	requireCluster(t)
+
+	// Admission is synchronous: the rewrite happens between sending an object
+	// and it being stored, so only a dry run can show it.
+	_, stdout, stderr := invoke(t, "testdata/defaulted", "--context=")
+
+	if !strings.Contains(stdout, "rewrites these on admission") {
+		t.Fatalf("stdout = %q, want the admission section (stderr: %s)", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "cluster assigns") {
+		t.Errorf("stdout = %q, want an assigned value distinguished from a default", stdout)
+	}
+	if !strings.Contains(stdout, "not compared") {
+		t.Errorf("stdout = %q, want the uncomparable fields counted rather than hidden", stdout)
+	}
+}
+
+func TestWithoutAContextTheClusterIsNotAsked(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, _ := invoke(t, "testdata/defaulted")
+
+	if strings.Contains(stdout, "rewrites these on admission") {
+		t.Errorf("stdout = %q, want no cluster questions without --context", stdout)
+	}
+}

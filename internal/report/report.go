@@ -16,6 +16,7 @@ import (
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
+	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/remediate"
 )
@@ -61,6 +62,9 @@ type Chart struct {
 	// Potential are non-deterministic functions the chart calls but which did
 	// not produce a difference this render. A warning, never a fact.
 	Potential []analyze.Use
+
+	// Rewrites are fields the API server said it would change on admission.
+	Rewrites []doctor.Rewrite
 
 	// Err is set when the chart could not be rendered at all. That is exit 2
 	// and always fatal - a chart silently skipped is the bug idem exists for.
@@ -187,6 +191,9 @@ func (r Report) Text(w io.Writer) error {
 		detail = true
 	}
 	if writePotential(&b, scope) {
+		detail = true
+	}
+	if writeRewrites(&b, scope) {
 		detail = true
 	}
 	if writeUnevaluable(&b, scope) {
@@ -484,6 +491,56 @@ func writePotential(b *strings.Builder, charts []Chart) bool {
 	}
 
 	return any
+}
+
+// writeRewrites lists what the cluster would change as it admits an object.
+//
+// Kept apart from the findings, and hedged, because most of it is ordinary
+// API-server defaulting that the engine already normalises away. The part that
+// matters is a mutating webhook touching an object the engine manages, and the
+// reader is better placed than idem to tell which is which.
+func writeRewrites(b *strings.Builder, charts []Chart) bool {
+	var any bool
+	for _, c := range charts {
+		for _, r := range c.Rewrites {
+			if !any {
+				b.WriteString("\n  the cluster rewrites these on admission\n")
+				any = true
+			}
+
+			fmt.Fprintf(b, "\n    %s\n", r.Object.Display())
+
+			tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+			shown := min(len(r.Changes), maxFields)
+			for _, change := range r.Changes[:shown] {
+				fmt.Fprintf(tw, "      %s\t%s\t%v\n", change.Path, kindOf(change), change.Value)
+			}
+			tw.Flush()
+
+			if elided := len(r.Changes) - shown; elided > 0 {
+				fmt.Fprintf(b, "      … and %d more %s\n", elided, plural(elided, "field", "fields"))
+			}
+			if r.Suppressed > 0 {
+				// Never silently short: §9 explains why these cannot be
+				// compared, and hiding the count would read as "that was all".
+				fmt.Fprintf(b, "      %d %s not compared — quantities and ports are canonicalised on write\n",
+					r.Suppressed, plural(r.Suppressed, "field", "fields"))
+			}
+		}
+	}
+
+	if any {
+		b.WriteString("\n      Most of this is API-server defaulting, which your engine normalises\n")
+		b.WriteString("      away. A mutating webhook touching an object it manages is not.\n")
+	}
+	return any
+}
+
+func kindOf(c doctor.Change) string {
+	if c.Assigned {
+		return "cluster assigns"
+	}
+	return "cluster defaults"
 }
 
 // writeUnevaluable lists charts that never rendered, and reports whether there

@@ -83,9 +83,8 @@ Dependency resolution works as described below, without ever writing to your rep
 
 The `--new-from-rev` / `--new-from-merge-base` ratchet works too.
 
-`--context` turns the Flux and Helm `unknown` verdicts into measured facts, and hands the chart
-the cluster's real capabilities. Not yet built from that section: the apply-side and post-apply
-drift checks, which need to read live objects.
+`--context` turns the Flux and Helm `unknown` verdicts into measured facts, hands the chart the
+cluster's real capabilities, and reports what the API server would rewrite on admission.
 
 `idem doctor` works: it ranks workloads by how often they roll, names the Application or
 HelmRelease that owns each, and resolves that to the chart path so the closing line is a command

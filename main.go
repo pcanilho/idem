@@ -32,6 +32,7 @@ import (
 	"github.com/pcanilho/idem/internal/engines"
 	"github.com/pcanilho/idem/internal/gitrev"
 	"github.com/pcanilho/idem/internal/helm"
+	"github.com/pcanilho/idem/internal/manifest"
 	"github.com/pcanilho/idem/internal/report"
 	"github.com/pcanilho/idem/internal/scan"
 )
@@ -223,6 +224,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			evidence.Cluster = &stable
 		}
 
+		rewrites := rewritesFor(ctx, opt, result, stderr)
+
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:       result.Chart.Name,
 			Dir:        result.Chart.Dir,
@@ -234,6 +237,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Maybe:      applied.Maybe,
 			Verdicts:   verdictsFor(result, evidence),
 			Potential:  analyze.Potential(result.Uses),
+			Rewrites:   rewrites,
 			Err:        result.Err,
 		})
 	}
@@ -362,6 +366,35 @@ func resolve(ref chartref.Ref) ([]target, error) {
 // rounds would manufacture the very churn idem is looking for.
 func releaseName(raw string) string {
 	return path.Base(strings.TrimSuffix(raw, "/"))
+}
+
+// rewritesFor asks the API server what it would change about this render.
+//
+// Only with --context, and never fatal: a namespace that does not exist, a
+// missing CRD or RBAC that forbids the dry run all mean idem cannot answer
+// this particular question, not that the chart is broken. Everything measured
+// without a cluster still stands.
+func rewritesFor(ctx context.Context, opt options, result scan.Result, stderr io.Writer) []doctor.Rewrite {
+	if !opt.cluster || result.Err != nil || len(result.Rendered) == 0 {
+		return nil
+	}
+
+	manifests, err := manifest.Encode(result.Rendered)
+	if err == nil {
+		var returned []manifest.Object
+		returned, err = cluster.New("", opt.kubeContext).DryRunApply(ctx, opt.namespace, manifests)
+		if err == nil {
+			var rewrites []doctor.Rewrite
+			if rewrites, err = doctor.Rewrites(result.Rendered, returned); err == nil {
+				return rewrites
+			}
+		}
+	}
+
+	// Said, not swallowed. idem is a tool about knowing what was and was not
+	// checked, so a question it could not ask has to be visible.
+	fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n", result.Chart.Name, err)
+	return nil
 }
 
 // chartPath expresses a chart directory the way an Application names it:

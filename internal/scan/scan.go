@@ -73,6 +73,10 @@ type Result struct {
 	ServerRendered bool
 	ServerFindings []check.Finding
 	ServerErr      error
+
+	// Rendered is the first round's output, kept so the caller can ask the
+	// API server what it would do with it without rendering again.
+	Rendered []manifest.Object
 }
 
 // Charts checks every chart, running at most jobs renders at once.
@@ -188,7 +192,7 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 		}
 	}
 
-	out := Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr}
+	out := Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr, Rendered: renders[0]}
 	if c.Server != nil {
 		out.ServerFindings, out.ServerRendered, out.ServerErr = compareServer(c, serverRenders, serverErrs)
 	}

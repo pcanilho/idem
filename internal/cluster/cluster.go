@@ -175,6 +175,10 @@ func (c Client) Sources(ctx context.Context) map[string]string {
 }
 
 func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
+	return c.runWithInput(ctx, nil, args...)
+}
+
+func (c Client) runWithInput(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
 	if c.Context != "" {
 		args = append(args, "--context", c.Context)
 	}
@@ -183,6 +187,9 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, c.bin(), args...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 
 	if err := cmd.Run(); err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
