@@ -271,7 +271,7 @@ them all.
 
 | | Cause | Where it happens | How to detect |
 |---|---|---|---|
-| **0. Source-side** | what "the chart" resolves to is not pinned | `Chart.yaml` dependencies | compare the constraint against what is deployed |
+| **0. Source-side** | what "the chart" resolves to is not pinned | `Chart.yaml` dependencies | compare the constraint against what is deployed — **analysed, not built** |
 | **1. Render-side** | the chart renders differently each time | `helm template` | render twice, compare — offline |
 | **2. Engine-side** | the GitOps engine adds, strips or rewrites fields after rendering | ArgoCD / Flux | compare against the engine's config — offline |
 | **3. Admission-side** | a webhook or the API server mutates the object as it is applied | admission chain | `--dry-run=server`, compare to what was sent |
@@ -302,7 +302,14 @@ The deployed version is recoverable, because Helm stamps it on every object it r
   helm.sh/chart: flaresolverr-17.8.0
 ```
 
-So the check is a metadata comparison — no rendering, no cluster mutation, one label read.
+So the check would be a metadata comparison — no rendering, no cluster mutation, one label read.
+
+**It is not built.** `idem` reads `helm.sh/chart` only to work out which release owns a workload
+in `doctor`; nothing anywhere compares a declared constraint against a running version. This
+section is analysis, and the numbers below were measured by hand rather than produced by the
+tool. Said plainly because a design document listing five causes reads as a claim to cover five,
+and four is the true number.
+
 Measured on the author's `charts/home`, all 19 resolvable dependencies were running above their
 declared floor:
 

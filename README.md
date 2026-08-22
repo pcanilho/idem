@@ -56,6 +56,9 @@ helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep post
 
 Two different values. Five renders give five passwords.
 
+That is the failure `idem` is built around. It is not the only way a release drifts, and the
+others are covered further down in [what makes a release drift](#what-makes-a-release-drift).
+
 ---
 
 ## Install
@@ -159,6 +162,38 @@ idem ./charts --context=prod          # a named one
 `--context` is opt-in and read-only. It renders through the API server (`--dry-run=server`), so
 `lookup` resolves and your real cluster capabilities are used. It never applies anything.
 
+It also reports **what the cluster would rewrite as it admits each object** — under
+`the cluster rewrites these on admission`, marking each field as one the cluster *defaults* or
+one it *assigns*. Most of that is ordinary API-server defaulting your engine normalises away.
+A mutating webhook writing into a field your chart also sets is not, and that is a drift loop
+you cannot see from `helm template` alone.
+
+---
+
+## What makes a release drift
+
+Something ends up in your cluster that git does not describe. That happens at one of five
+stages, and each needs different evidence — so no single check finds them all:
+
+| Stage | What happens | Does `idem` check it? |
+|---|---|---|
+| **Source** | a `Chart.yaml` version range resolves to a new subchart, with no git change | **No.** Analysed in [`docs/design.md`](docs/design.md), not built |
+| **Render** | the chart renders differently every time | **Yes** — `idem ./charts`, offline |
+| **Engine** | ArgoCD or Flux adds, strips or rewrites fields after rendering | **Yes** — every pointer is checked against what that engine actually evaluates |
+| **Admission** | the API server or a webhook mutates the object as it is applied | **Yes** — `idem ./charts --context=` |
+| **Post-apply** | another controller writes into the object *seconds later* | **Yes** — `idem doctor --namespace <ns>` |
+
+Two things worth being straight about.
+
+**Render-side churn is a minority of real `OutOfSync` reports.** Admission and defaulting cause
+far more of them. What makes the render-side case worth a tool of its own is that it is the only
+one on this list you can catch **offline and before merge** — the others need a running cluster,
+and the last needs the drift to have already happened. `idem` checks those too when you give it
+a cluster; it just cannot check them in a pull request.
+
+**Source-side is not built.** The analysis is written up in the design notes and the check would
+be a single label comparison, but nothing implements it, so the table says no.
+
 ---
 
 ## In CI
@@ -223,8 +258,15 @@ idem doctor                      # what keeps rolling, and who owns it
 idem doctor --namespace lab      # what is being written after apply
 ```
 
-It ranks workloads by how often they roll, names the Application or HelmRelease that owns each,
-and resolves that to a chart path — so the last line is a command you can run.
+It ranks workloads by how often they roll against the cluster's own median, names the Application
+or HelmRelease that owns each, and resolves that to a chart path — so the last line is a command
+you can run. It calls that triage rather than proof, because deploying often looks the same from
+here.
+
+`--namespace` answers the other question: which fields were **written after the apply**, and by
+what. It separates *applied absent, live set* from *applied and live differ*, and names the
+controller when the object carries evidence of one — cert-manager, External Secrets, an operator.
+Where it cannot tell, it says so instead of guessing a name you would then go and chase.
 
 ---
 

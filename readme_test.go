@@ -4,6 +4,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/doctor"
+	"github.com/pcanilho/idem/internal/objpath"
+	"github.com/pcanilho/idem/internal/report"
 )
 
 // The README's console blocks are the tool's shop window, and three of them had
@@ -192,4 +197,63 @@ func documentedFlags(readme string) map[string]bool {
 		}
 	}
 	return out
+}
+
+// The README quotes output from the two paths that need a live cluster, so no
+// console block can be generated from them and the drift check above cannot see
+// them at all. They are the easiest lines in the documentation to leave behind.
+//
+// Rendered from the report package directly rather than by invoking the binary:
+// what these say is a property of the formatter, and requiring a cluster to
+// check the documentation would mean never checking it.
+func TestTheREADMEQuotesTheClusterPathsCorrectly(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("reading README: %v", err)
+	}
+
+	ref := diff.ObjectRef{APIVersion: "v1", Kind: "Pod", Namespace: "lab", Name: "api"}
+
+	var admission strings.Builder
+	r := report.Report{
+		Charts: []report.Chart{{
+			Name: "home",
+			Rewrites: []doctor.Rewrite{{
+				Object:  ref,
+				Changes: []doctor.Change{{Path: objpath.Path{}.Append(objpath.Key("spec")).Append(objpath.Key("dnsPolicy")), Value: "ClusterFirst"}},
+			}},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}
+	if err := r.Text(&admission); err != nil {
+		t.Fatalf("Text() error = %v", err)
+	}
+
+	var drift strings.Builder
+	if err := report.Drift(&drift, []doctor.Drift{{
+		Object: ref,
+		Changes: []diff.PathDiff{
+			// One of each shape, because the README distinguishes them and the
+			// distinction is the point: a field the controller ADDED is a
+			// different problem from one it overwrote.
+			{Path: objpath.Path{}.Append(objpath.Key("data")).Append(objpath.Key("token")), HasRight: true},
+			{Path: objpath.Path{}.Append(objpath.Key("data")).Append(objpath.Key("ca")), HasLeft: true, HasRight: true},
+		},
+	}}, "lab"); err != nil {
+		t.Fatalf("Drift() error = %v", err)
+	}
+
+	for _, tc := range []struct{ quoted, in string }{
+		{"the cluster rewrites these on admission", admission.String()},
+		{"applied absent, live set", drift.String()},
+		{"applied and live differ", drift.String()},
+	} {
+		if !strings.Contains(string(readme), tc.quoted) {
+			t.Errorf("README no longer quotes %q", tc.quoted)
+			continue
+		}
+		if !strings.Contains(tc.in, tc.quoted) {
+			t.Errorf("README quotes %q, which idem does not print:\n%s", tc.quoted, tc.in)
+		}
+	}
 }
