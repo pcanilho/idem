@@ -24,12 +24,21 @@ func (r Report) Markdown(w io.Writer) error {
 	fmt.Fprintf(&b, "### idem — %s\n\n", r.headline())
 
 	var rows strings.Builder
-	var suppressed int
+	var covered, undoneBySelfHeal int
 	for _, c := range r.inScope() {
 		for _, f := range c.Findings {
 			writeRows(&rows, c, f)
 		}
-		suppressed += len(c.Suppressed)
+		for _, sup := range c.Suppressed {
+			// Counted apart, and said apart. "Already suppressed" over a rule
+			// selfHeal will undo is the most reassuring sentence idem could
+			// print about the one case that is not handled at all.
+			if sup.By.SelfHeal && !sup.By.Respected {
+				undoneBySelfHeal++
+				continue
+			}
+			covered++
+		}
 	}
 
 	// A chart still counts as churning while its findings are all suppressed,
@@ -43,12 +52,17 @@ func (r Report) Markdown(w io.Writer) error {
 
 	writeLookupRows(&b, r.inScope())
 
-	if suppressed > 0 {
+	if covered > 0 {
 		fmt.Fprintf(&b, "%d %s already suppressed by your delivery config.\n\n",
-			suppressed, plural(suppressed, "finding", "findings"))
+			covered, plural(covered, "finding", "findings"))
 	}
 
-	writeUnevaluableRows(&b, r.inScope())
+	if undoneBySelfHeal > 0 {
+		fmt.Fprintf(&b, "%d %s suppressed by a rule `selfHeal` will re-apply anyway — add `RespectIgnoreDifferences=true` to that Application's `syncOptions`.\n\n",
+			undoneBySelfHeal, plural(undoneBySelfHeal, "finding", "findings"))
+	}
+
+	writeUnevaluableRows(&b, r.Charts)
 	writeFixBlock(&b, r.inScope())
 
 	fmt.Fprintf(&b, "<sub>helm %s · %d rounds%s</sub>\n", r.Helm, r.Rounds, r.unevaluableNote())

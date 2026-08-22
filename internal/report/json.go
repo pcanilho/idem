@@ -47,6 +47,12 @@ type jsonSummary struct {
 	Charts   int `json:"charts"`
 	Churning int `json:"churning"`
 
+	// Suppressed counts findings the delivery config covers. They are not in
+	// Churning and cannot affect the exit code, so a consumer that wants them
+	// back has to ask - the same shape as ESLint's suppressedMessages and
+	// Trivy's --show-suppressed.
+	Suppressed int `json:"suppressed"`
+
 	// ChurningWithLookup counts charts that were identical under `helm
 	// template` and differed with lookup resolved. Its own number because it
 	// answers for different engines: churning is ArgoCD's condition, this is
@@ -141,6 +147,7 @@ func (r Report) JSON(w io.Writer) error {
 		Summary: jsonSummary{
 			Charts:             len(r.Charts),
 			Churning:           r.Churning(),
+			Suppressed:         suppressedCount(r),
 			ChurningWithLookup: r.ChurningWithLookup(),
 			Unevaluable:        r.Unevaluable(),
 		},
@@ -149,15 +156,20 @@ func (r Report) JSON(w io.Writer) error {
 		Findings: []jsonFinding{},
 	}
 
+	// A chart that would not render is reported whatever the ratchet says, so
+	// these come from every chart rather than from those in scope.
+	for _, c := range r.Charts {
+		if c.Err != nil {
+			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
+		}
+	}
+
 	var all []check.Finding
 	for _, c := range r.inScope() {
 		if c.Namespace != "" {
 			out.Namespaces = append(out.Namespaces, jsonNamespace{
 				Chart: c.Name, Namespace: c.Namespace, From: c.NamespaceFrom,
 			})
-		}
-		if c.Err != nil {
-			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
 		}
 		for _, f := range c.Findings {
 			out.Findings = append(out.Findings, jsonFindingOf(c, f, c.Findings, conditionClient))
@@ -200,6 +212,17 @@ func (r Report) JSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// suppressedCount is every covered finding in scope, including ones selfHeal
+// will undo - the JSON carries the rule's SelfHeal and Respected flags, so a
+// consumer can tell them apart without idem deciding for it.
+func suppressedCount(r Report) int {
+	n := 0
+	for _, c := range r.inScope() {
+		n += len(c.Suppressed)
+	}
+	return n
 }
 
 // The two render conditions, named once so the contract cannot drift between

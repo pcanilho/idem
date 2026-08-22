@@ -23,6 +23,7 @@ import (
 
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/chartref"
+	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/cluster"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/deps"
@@ -243,9 +244,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		// Helm and demonstrably not under ArgoCD; folded into Findings it
 		// would make every ArgoCD-framed count and sentence say the opposite
 		// of what idem measured.
-		var serverOnly delivery.Applied
-		if len(result.Findings) == 0 && len(result.ServerFindings) > 0 {
-			serverOnly = delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.ServerFindings)
+		//
+		// Deliberately not run through the delivery config. An ArgoCD
+		// ignoreDifferences cannot suppress churn ArgoCD does not have, and
+		// the rule that could - Flux driftDetection.ignore - names no chart
+		// path to join on, so it can never be matched to this chart anyway.
+		// Applying Argo rules here would report "already suppressed" about a
+		// suppression that does nothing for the engines that will churn.
+		var serverOnly []check.Finding
+		if len(result.Findings) == 0 {
+			serverOnly = result.ServerFindings
 		}
 
 		// Said, not swallowed. idem is a tool about knowing what was and was
@@ -264,9 +272,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Deps:          resolutions.of(result.Chart.Dir),
 			Changed:       gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
 			Findings:      applied.Churning,
-			ServerOnly:    serverOnly.Churning,
-			Suppressed:    append(applied.Suppressed, serverOnly.Suppressed...),
-			Maybe:         append(applied.Maybe, serverOnly.Maybe...),
+			ServerOnly:    serverOnly,
+			Suppressed:    applied.Suppressed,
+			Maybe:         applied.Maybe,
 			Verdicts:      verdictsFor(result, evidence),
 			Potential:     analyze.Potential(result.Uses),
 			Rewrites:      result.Rewrites,

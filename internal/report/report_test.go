@@ -550,11 +550,13 @@ func TestASuppressionWithoutSelfHealIsNotFlagged(t *testing.T) {
 	}
 }
 
-func TestASuppressedFindingStillCountsForNow(t *testing.T) {
-	// Whether a matched suppression should leave the churn count, and so
-	// change --strict's exit code, is deliberately still open. Until then it
-	// is shown but counted, because silently dropping it would decide the
-	// question by accident.
+func TestAWorkingSuppressionLeavesTheChurnCount(t *testing.T) {
+	// Settled 2026-08-22 against six comparable tools: not one of golangci-lint,
+	// ESLint, Trivy, Semgrep, Checkov or Snyk lets a suppressed finding reach
+	// the exit code. The finding is still printed - idem follows Checkov in
+	// keeping it visible on its own ladder - but a chart whose churn the user
+	// has genuinely handled must be able to turn a gate green, or the gate is
+	// the kind nobody keeps.
 	r := Report{
 		Charts: []Chart{{
 			Name:       "home",
@@ -563,8 +565,48 @@ func TestASuppressedFindingStillCountsForNow(t *testing.T) {
 		Helm: "4.2.4", Rounds: 2,
 	}
 
+	if got := r.Churning(); got != 0 {
+		t.Errorf("Churning() = %d, want 0 - the delivery config covers it", got)
+	}
+	if got := text(t, r); !strings.Contains(got, "already suppressed") {
+		t.Errorf("Text() = %q, want the finding still shown", got)
+	}
+}
+
+func TestASuppressionSelfHealWillUndoStillCounts(t *testing.T) {
+	// The one case where suppression is not suppression: the diff is hidden
+	// and the object is re-applied anyway. Dropping this from the count would
+	// hide churn the user is most confident is handled.
+	r := Report{
+		Charts: []Chart{{
+			Name:       "lab",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/lab.yaml", true, false)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}
+
 	if got := r.Churning(); got != 1 {
-		t.Errorf("Churning() = %d, want 1", got)
+		t.Errorf("Churning() = %d, want 1 - selfHeal re-applies it", got)
+	}
+}
+
+func TestTheVerdictSentenceCreditsTheDeliveryConfigRatherThanClaimingCleanliness(t *testing.T) {
+	// The chart DOES render inconsistently. Saying it "renders consistently"
+	// because a rule covers it would be false, and would make the suppressed
+	// section above read as decoration.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "deployment/apps/home.yaml", true, true)},
+		}, clean("lab")},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "render consistently") {
+		t.Errorf("Text() = %q, want no claim that the charts render consistently", got)
+	}
+	if !strings.Contains(got, "delivery config") {
+		t.Errorf("Text() = %q, want the config credited for the quiet", got)
 	}
 }
 
@@ -900,17 +942,65 @@ func TestTheRatchetGatesOnlyOnWhatChanged(t *testing.T) {
 	}
 }
 
-func TestAPreExistingUnrenderableChartDoesNotFailTheRatchet(t *testing.T) {
-	// Otherwise an estate with one broken chart can never adopt the flag, and
-	// that is the situation the ratchet exists for.
+func TestAPreExistingUnrenderableChartStillFailsTheRatchet(t *testing.T) {
+	// Settled 2026-08-22. golangci-lint special-cases exactly this in its own
+	// diff processor - "Never hide typechecking errors" - and ESLint, mypy and
+	// ruff all make an analysis failure unsuppressable by construction. The
+	// ratchet promises that nothing you changed introduced a problem; a chart
+	// it never checked makes that promise false rather than incomplete.
 	r := Report{
 		Since:  "main",
 		Charts: []Chart{changed("home"), {Name: "lab", Err: errors.New("boom")}},
 		Helm:   "4.2.4", Rounds: 2,
 	}
 
-	if got := r.Unevaluable(); got != 0 {
-		t.Errorf("Unevaluable() = %d, want 0 - that chart was already broken", got)
+	if got := r.Unevaluable(); got != 1 {
+		t.Errorf("Unevaluable() = %d, want 1 - the ratchet filters findings, not coverage gaps", got)
+	}
+}
+
+func TestTheRatchetShowsAChartItCouldNotRenderEvenWhenUnchanged(t *testing.T) {
+	// Counting it without printing it would leave a non-zero exit with no
+	// visible cause.
+	got := text(t, Report{
+		Since:  "main",
+		Charts: []Chart{changed("home"), {Name: "lab", Err: errors.New("no repository definition")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "lab") || !strings.Contains(got, "no repository definition") {
+		t.Errorf("Text() = %q, want the unrenderable chart named with its reason", got)
+	}
+}
+
+func TestAnUnrenderableChartIsNotAlsoCountedAsHeldBack(t *testing.T) {
+	// It is shown, so reporting it as one of the "pre-existing findings not
+	// shown" would count the same chart twice and in opposite directions.
+	got := text(t, Report{
+		Since:  "main",
+		Charts: []Chart{changed("home"), {Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "1 pre-existing finding not shown") {
+		t.Errorf("Text() = %q, want the unrenderable chart not counted as hidden", got)
+	}
+}
+
+func TestARatchetedRunThatChangedNothingStillReportsWhatWouldNotRender(t *testing.T) {
+	// "No charts changed since main." with exit 2 and no other output is the
+	// worst possible pairing: a failing gate whose reason is invisible.
+	r := Report{
+		Since:  "main",
+		Charts: []Chart{untouched("home", secretFinding("creds", ".data.p")), {Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Unevaluable(); got != 1 {
+		t.Errorf("Unevaluable() = %d, want 1", got)
+	}
+	if got := text(t, r); !strings.Contains(got, "could not be rendered") {
+		t.Errorf("Text() = %q, want the sentence to say why the run is not clean", got)
 	}
 }
 
@@ -1084,5 +1174,114 @@ func TestAnExplicitNamespaceFlagSaysItWasTheFlag(t *testing.T) {
 
 	if !strings.Contains(got, "namespace lab (--namespace)") {
 		t.Errorf("Text() = %q, want the flag credited", got)
+	}
+}
+
+func TestTheDeliveryConfigIsCreditedEvenWhenSomethingElseFailed(t *testing.T) {
+	// The estate shape: nothing churns, four findings are covered, and six
+	// charts would not render. "10 charts render consistently" is false about
+	// the covered one, and dropping the clause because of an unrelated failure
+	// would make the suppressed section unexplained.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "home", Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "apps/home.yaml", true, true)}},
+			clean("lab"),
+			{Name: "broken", Err: errors.New("no repository definition")},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "delivery config") {
+		t.Errorf("Text() = %q, want the covered finding accounted for", got)
+	}
+	if strings.Contains(got, "2 charts render consistently") {
+		t.Errorf("Text() = %q, want the covered chart not counted as consistent", got)
+	}
+}
+
+func TestTheCoveredClauseAgreesWithTheFindingsNotTheCharts(t *testing.T) {
+	// "4 findings in 1 chart is covered" is what keying the verb on the wrong
+	// noun produces, and the two counts differ often.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name: "home",
+			Suppressed: []delivery.Suppressed{
+				suppressed("creds", "/data/a", "apps/home.yaml", true, true),
+				suppressed("creds", "/data/b", "apps/home.yaml", true, true),
+			},
+		}, {Name: "broken", Err: errors.New("no repository definition")}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "2 findings in 1 chart are covered") {
+		t.Errorf("Text() = %q, want the verb to agree with the findings", got)
+	}
+}
+
+func TestASuppressionSelfHealWillUndoIsNeverCreditedAsCovered(t *testing.T) {
+	// It counts as churn AND would read as handled - the sentence would say
+	// both "1 of 1 chart will churn" and "1 finding is covered by your
+	// delivery config" about the same finding, which is the exact reassurance
+	// the trap exists to deny.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:       "lab",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "apps/lab.yaml", true, false)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "covered by your delivery config") {
+		t.Errorf("Text() = %q, want no claim that this is covered", got)
+	}
+}
+
+func TestTheSentenceCountsOnlyChartsItActuallyReportsOn(t *testing.T) {
+	// The counts come from two different populations now: charts in ratchet
+	// scope, and every chart for the ones that would not render. Subtracting
+	// one from the other produces a negative count.
+	got := text(t, Report{
+		Since: "main",
+		Charts: []Chart{
+			changed("home"),
+			{Name: "a", Err: errors.New("boom")},
+			{Name: "b", Err: errors.New("boom")},
+			{Name: "c", Err: errors.New("boom")},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "-2 charts") {
+		t.Errorf("Text() = %q, want no negative count", got)
+	}
+	if !strings.Contains(got, "1 chart renders consistently") {
+		t.Errorf("Text() = %q, want the one in-scope chart counted", got)
+	}
+}
+
+func TestTheSentenceSaysTheRatchetDoesNotHideRenderFailures(t *testing.T) {
+	// Under a ratchet the two counts come from different populations: charts
+	// in scope, and every chart for the ones that would not render. Without
+	// saying so, "0 charts render consistently; 6 could not be rendered" reads
+	// as six of the charts this branch touched.
+	got := text(t, Report{
+		Since:  "main",
+		Charts: []Chart{changed("home"), {Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "which the ratchet does not hide") {
+		t.Errorf("Text() = %q, want the two populations distinguished", got)
+	}
+}
+
+func TestWithoutARatchetTheRenderFailureClauseStaysPlain(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{clean("home"), {Name: "lab", Err: errors.New("boom")}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "ratchet") {
+		t.Errorf("Text() = %q, want no ratchet wording when no revision was given", got)
 	}
 }

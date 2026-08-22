@@ -138,27 +138,45 @@ func (r Report) hidden() int {
 		if r.considered(c) {
 			continue
 		}
+		// A chart that would not render is NOT held back: it is reported and
+		// it is fatal whatever the revision says. Counting it here as well
+		// would report the same chart twice, in opposite directions.
 		n += len(c.Findings) + len(c.Suppressed) + len(c.ServerOnly)
-		if c.Err != nil {
+	}
+	return n
+}
+
+// Churning counts charts that will churn.
+//
+// A finding the delivery config genuinely covers is NOT one of them: settled
+// 2026-08-22 against golangci-lint, ESLint, Trivy, Semgrep, Checkov and Snyk,
+// none of which let a suppressed finding reach the exit code. It is still
+// printed, in its own section - Checkov's model, and idem's already - because
+// visibility and the gate are different questions. The exception is a
+// suppression selfHeal will undo, which is not suppression at all.
+func (r Report) Churning() int {
+	n := 0
+	for _, c := range r.inScope() {
+		if c.Err == nil && (len(c.Findings) > 0 || undone(c.Suppressed)) {
 			n++
 		}
 	}
 	return n
 }
 
-// Churning counts charts with at least one finding.
-func (r Report) Churning() int {
-	n := 0
-	for _, c := range r.inScope() {
-		// A suppressed finding still counts, for now. Whether a matched
-		// suppression should leave the count - and so change --strict's exit
-		// code - is still an open decision, and silently dropping it here
-		// would settle that question by accident.
-		if c.Err == nil && (len(c.Findings) > 0 || len(c.Suppressed) > 0) {
-			n++
+// undone reports whether any of these suppressions will not actually suppress.
+//
+// ignoreDifferences hides the diff, but without RespectIgnoreDifferences
+// selfHeal re-applies the whole object anyway - so the field is rewritten on
+// every sync while the Application reports Synced. That is churn, and it is
+// the churn a user is most confident is handled.
+func undone(suppressed []delivery.Suppressed) bool {
+	for _, s := range suppressed {
+		if s.By.SelfHeal && !s.By.Respected {
+			return true
 		}
 	}
-	return n
+	return false
 }
 
 // inScope is the charts this run reports on.
@@ -199,7 +217,13 @@ func (r Report) ChurningWithLookup() int {
 // otherwise never adopt the flag at all.
 func (r Report) Unevaluable() int {
 	n := 0
-	for _, c := range r.inScope() {
+	// Every chart, in scope or not. The ratchet filters findings - claims idem
+	// makes about a chart it analysed - and a chart it could not render is not
+	// a finding, it is a gap in what was checked. Settled 2026-08-22 against
+	// golangci-lint, which special-cases exactly this in its own diff
+	// processor, and ESLint, mypy and ruff, which each make an analysis
+	// failure unsuppressable by construction.
+	for _, c := range r.Charts {
 		if c.Err != nil {
 			n++
 		}
@@ -230,7 +254,7 @@ func (r Report) Text(w io.Writer) error {
 	if writeRewrites(&b, scope) {
 		detail = true
 	}
-	if writeUnevaluable(&b, scope) {
+	if writeUnevaluable(&b, r.Charts) {
 		detail = true
 	}
 
@@ -723,6 +747,16 @@ func (r Report) verdict() string {
 	}
 
 	if churning == 0 && unevaluable == 0 && lookupOnly == 0 {
+		// Saying these charts "render consistently" would be false: they do
+		// not, and idem measured that. What is true is that nothing will
+		// churn, and the reason is the user's own config rather than the
+		// chart - so the config gets the credit and the section above it
+		// stops reading as decoration.
+		if found, charts := r.covered(); found > 0 {
+			return fmt.Sprintf("✓ Nothing will churn under ArgoCD — %d %s in %d of %d %s %s covered by your delivery config.",
+				found, plural(found, "finding", "findings"), charts, total, plural(total, "chart", "charts"),
+				plural(found, "is", "are"))
+		}
 		if total == 1 {
 			return fmt.Sprintf("✓ %s renders consistently under ArgoCD.", r.Charts[0].Name)
 		}
@@ -736,23 +770,92 @@ func (r Report) verdict() string {
 			lookupOnly, total, plural(total, "chart", "charts"))
 	}
 
-	// Nothing rendered at all. "0 charts render consistently" is true but
-	// reads as a verdict about charts that were never actually checked.
-	if churning == 0 && total == unevaluable {
+	// Nothing in scope rendered at all. "0 charts render consistently" is true
+	// but reads as a verdict about charts that were never actually checked.
+	//
+	// Compared against the charts in scope, not against Unevaluable(), which
+	// spans every chart: under a ratchet the two are different populations,
+	// and comparing them makes one unrenderable chart elsewhere read as a
+	// verdict about a chart this branch touched and idem rendered fine.
+	if churning == 0 && total > 0 && total == r.failedInScope() {
 		return fmt.Sprintf("%d %s could not be rendered.", unevaluable, plural(unevaluable, "chart", "charts"))
 	}
+
+	found, coveredCharts := r.covered()
 
 	var s string
 	if churning > 0 {
 		s = fmt.Sprintf("%d of %d %s will churn under ArgoCD", churning, total, plural(total, "chart", "charts"))
 	} else {
-		clean := total - unevaluable
-		s = fmt.Sprintf("%d %s render consistently under ArgoCD", clean, plural(clean, "chart", "charts"))
+		// Counted, not subtracted. `total` is the charts in ratchet scope while
+		// `unevaluable` spans every chart the run touched - the ratchet does
+		// not hide a chart that would not render - so taking one from the
+		// other mixes two populations and goes negative.
+		clean := r.consistent()
+		s = fmt.Sprintf("%d %s consistently under ArgoCD", clean, plural(clean, "chart renders", "charts render"))
+	}
+	if coveredCharts > 0 {
+		// The verb agrees with the findings, not the charts: "4 findings in 1
+		// chart is covered" is what keying it on the wrong noun produces.
+		s += fmt.Sprintf("; %d %s in %d %s %s covered by your delivery config",
+			found, plural(found, "finding", "findings"),
+			coveredCharts, plural(coveredCharts, "chart", "charts"),
+			plural(found, "is", "are"))
 	}
 	if unevaluable > 0 {
 		s += fmt.Sprintf("; %d could not be rendered", unevaluable)
+		// The counts either side of that semicolon come from different
+		// populations under a ratchet - charts in scope, and every chart -
+		// so without saying so it reads as N of the ones this branch touched.
+		if r.Since != "" {
+			s += ", which the ratchet does not hide"
+		}
 	}
 	return s + lookupClause(lookupOnly) + "."
+}
+
+// covered counts findings the delivery config genuinely handles, and the
+// charts they are in. Suppressions selfHeal will undo are not among them.
+func (r Report) covered() (findings, charts int) {
+	for _, c := range r.inScope() {
+		n := 0
+		for _, s := range c.Suppressed {
+			if !s.By.SelfHeal || s.By.Respected {
+				n++
+			}
+		}
+		if n > 0 {
+			findings += n
+			charts++
+		}
+	}
+	return findings, charts
+}
+
+// consistent counts charts in scope that idem rendered, compared, and found
+// nothing to say about. A chart whose findings are all covered by the delivery
+// config is not one of them: it did not render consistently, it is handled,
+// and it gets its own clause.
+func (r Report) consistent() int {
+	n := 0
+	for _, c := range r.inScope() {
+		if c.Err != nil || len(c.Findings) > 0 || len(c.Suppressed) > 0 || len(c.ServerOnly) > 0 {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// failedInScope counts charts the ratchet reports on that would not render.
+func (r Report) failedInScope() int {
+	n := 0
+	for _, c := range r.inScope() {
+		if c.Err != nil {
+			n++
+		}
+	}
+	return n
 }
 
 // lookupClause reports churn only the API-server condition saw, without

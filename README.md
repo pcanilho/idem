@@ -703,8 +703,18 @@ cluster-resident `valuesFrom` refs. See
 | `1` | Findings, **and** `--strict` was passed. |
 | `2` | A chart could not be rendered, or `idem` itself failed. **Always fatal.** |
 
-Exit `2` is not negotiable even without `--strict`. A chart that silently fails to render and
-is then skipped is the same class of bug this tool exists to catch.
+Exit `2` is not negotiable even without `--strict`, and **the ratchet does not filter it**. A
+chart that would not render is not a finding about that chart — it is a gap in what `idem`
+checked, and a ratchet that hides coverage gaps is claiming a guarantee it never computed.
+golangci-lint special-cases exactly this inside its own diff processor (*"Never hide typechecking
+errors"*), and ESLint, mypy and ruff each make an analysis failure unsuppressable by
+construction. `idem` follows them: `--new-from-rev` filters findings, never render failures.
+
+A finding your delivery config already suppresses is the mirror image — it **does not count and
+cannot fail the build**, because a suppression that works means the churn does not happen. It is
+still printed, in its own section, and still present in `-o json` under `suppressed`. The one
+exception is a suppression `selfHeal` will undo, which is not a suppression at all: it counts, it
+is fatal under `--strict`, and it is never credited as covered.
 
 ```yaml
 - run: idem ./charts --strict

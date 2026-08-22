@@ -334,10 +334,10 @@ func TestGitHubMessageReadsAsOneSentence(t *testing.T) {
 	}
 }
 
-func TestMarkdownOmitsAnEmptyTable(t *testing.T) {
-	// A chart still counts as churning while its findings are all suppressed,
-	// so the count can be non-zero with no rows to show. A header over nothing
-	// reads as a rendering bug.
+func TestMarkdownSaysNothingWhenTheDeliveryConfigCoversEverything(t *testing.T) {
+	// Operationally this run is clean, and the documented CI snippet guards on
+	// the file being non-empty. A comment saying "4 findings, all handled" on
+	// every pull request is exactly the noise that guard exists to prevent.
 	got := render(t, Report{
 		Charts: []Chart{{
 			Name:       "home",
@@ -346,10 +346,27 @@ func TestMarkdownOmitsAnEmptyTable(t *testing.T) {
 		Helm: "4.2.4", Rounds: 2,
 	}, Report.Markdown)
 
+	if got != "" {
+		t.Errorf("Markdown() = %q, want empty", got)
+	}
+}
+
+func TestMarkdownOmitsAnEmptyTable(t *testing.T) {
+	// A suppression selfHeal will undo counts as churn and has no rows to
+	// show, so the count can be non-zero with nothing to tabulate. A header
+	// over nothing reads as a rendering bug.
+	got := render(t, Report{
+		Charts: []Chart{{
+			Name:       "home",
+			Suppressed: []delivery.Suppressed{suppressed("creds", "/data/key", "apps/home.yaml", true, false)},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	}, Report.Markdown)
+
 	if strings.Contains(got, "| chart | object |") {
 		t.Errorf("Markdown() = %q, want no table when there are no rows", got)
 	}
-	if !strings.Contains(got, "already suppressed") {
+	if !strings.Contains(got, "selfHeal") {
 		t.Errorf("Markdown() = %q, want the reason the count is not zero", got)
 	}
 }
@@ -413,5 +430,25 @@ func TestGitHubAnnotatesADifferenceSeenOnlyWithLookupResolved(t *testing.T) {
 	}
 	if !strings.Contains(got, "lookup") {
 		t.Errorf("GitHub() = %q, want the message to say which condition saw it", got)
+	}
+}
+
+func TestEveryFormatReportsAnUnrenderableChartOutsideRatchetScope(t *testing.T) {
+	// Exit 2 with a machine format that shows nothing is a failing gate whose
+	// cause is invisible to the thing consuming it.
+	r := Report{
+		Since:  "main",
+		Charts: []Chart{{Name: "home", Changed: true}, {Name: "lab", Err: errors.New("no repository definition")}},
+		Helm:   "4.2.4", Rounds: 2,
+	}
+
+	if got := asJSON(t, r)["unevaluable"]; got == nil {
+		t.Errorf("unevaluable = %v, want the chart reported", got)
+	}
+	if got := render(t, r, Report.Markdown); !strings.Contains(got, "lab") {
+		t.Errorf("Markdown() = %q, want the chart reported", got)
+	}
+	if got := render(t, r, Report.GitHub); !strings.Contains(got, "lab could not be rendered") {
+		t.Errorf("GitHub() = %q, want the chart reported", got)
 	}
 }

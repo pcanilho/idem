@@ -64,7 +64,10 @@ func (r Report) GitHub(w io.Writer) error {
 		}
 	}
 
-	for _, c := range r.inScope() {
+	// Every chart, not just the ones in ratchet scope: a chart idem could not
+	// render is a gap in what was checked, and the ratchet only ever filters
+	// findings about charts it did check.
+	for _, c := range r.Charts {
 		if c.Err != nil {
 			fmt.Fprintf(&b, "::error::idem: %s could not be rendered: %s\n", c.Name, data(c.Err.Error()))
 		}
