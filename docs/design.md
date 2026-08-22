@@ -703,10 +703,18 @@ verb, for the same reason.
 
 ### No HTML, CSV or SARIF output
 
-`text` for people, `json` for machines, `markdown` for a pull-request comment, `github` for
-inline annotations. Each of those has a reader who cannot use any of the others. A fifth format
-would be a format with no reader — and SARIF in particular implies a line number `idem`
-deliberately refuses to guess (§9).
+`text` for people, `json` and `yaml` for machines, `markdown` for a pull-request comment,
+`github` for inline annotations. Each has a reader who cannot use the others, and SARIF in
+particular implies a line number `idem` deliberately refuses to guess (§9).
+
+**`yaml` was added later, and it bends this rule rather than following it.** It is not a format
+with a reader `json` cannot serve — `idem -o json | yq -P` produced the same thing before it
+existed. What it buys is that the audience is Kubernetes operators, the remediation entries end
+up in YAML manifests, and `yq` is as common here as `jq`. The cost is one more rendering to keep
+correct, and that cost is paid structurally rather than by discipline: both formats encode the
+same `contract()` value, and a test decodes both and requires deep equality. Note that
+`gopkg.in/yaml.v3` does **not** read `json` struct tags — without the mirrored `yaml` tags every
+key would silently lowercase into a different contract.
 
 ### Why the `ignoreDifferences` block carries a caveat — and only sometimes
 

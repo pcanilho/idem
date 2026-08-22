@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/engine"
+	"gopkg.in/yaml.v3"
 )
 
 func render(t *testing.T, r Report, f func(Report, io.Writer) error) string {
@@ -107,6 +109,60 @@ func TestJSONCarriesTheRemediation(t *testing.T) {
 	first := entries[0].(map[string]any)
 	if _, ok := first["jsonPointers"]; !ok {
 		t.Errorf("entry = %v, want jsonPointers in ArgoCD's spelling", first)
+	}
+}
+
+// `-o yaml` is the SAME document as `-o json`, differently encoded.
+//
+// Compared by decoding both and requiring deep equality, rather than by
+// eyeballing two golden files. This repository has twice shipped two output
+// formats that disagreed about the same run - the Flux fix block existing only
+// in text, and potential findings carrying a different path in json than in
+// github - and a hand-maintained YAML renderer would be the third. The
+// comparison goes through JSON on the YAML side too, so an int decoded as int
+// by YAML and float64 by JSON does not read as a difference.
+func TestYAMLIsTheJSONContractInAnotherEncoding(t *testing.T) {
+	r := Report{
+		Root: repoWith(t, "charts/home/templates/s.yaml"),
+		Charts: []Chart{func() Chart {
+			c := churnsUnderFlux("home", secretFinding("creds", ".data.password"))
+			c.RepoDir = "charts/home"
+			c.Namespace = "home"
+			c.Potential = []analyze.Use{{Function: "randAlphaNum", File: "templates/s.yaml", Line: 3, Call: true}}
+			return c
+		}()},
+		Helm: "4.2.4", Rounds: 2, Engines: []string{"argocd", "flux"},
+	}
+
+	var jb, yb strings.Builder
+	if err := r.JSON(&jb); err != nil {
+		t.Fatalf("JSON() error = %v", err)
+	}
+	if err := r.YAML(&yb); err != nil {
+		t.Fatalf("YAML() error = %v", err)
+	}
+
+	var fromJSON any
+	if err := json.Unmarshal([]byte(jb.String()), &fromJSON); err != nil {
+		t.Fatalf("emitted JSON does not parse: %v", err)
+	}
+
+	var decoded any
+	if err := yaml.Unmarshal([]byte(yb.String()), &decoded); err != nil {
+		t.Fatalf("emitted YAML does not parse: %v\n%s", err, yb.String())
+	}
+	// Round-trip so numbers land in the same Go types on both sides.
+	normalised, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("YAML did not survive a JSON round trip: %v", err)
+	}
+	var fromYAML any
+	if err := json.Unmarshal(normalised, &fromYAML); err != nil {
+		t.Fatalf("round-tripped YAML does not parse: %v", err)
+	}
+
+	if !reflect.DeepEqual(fromJSON, fromYAML) {
+		t.Errorf("YAML and JSON disagree.\n json: %s\n yaml: %s", jb.String(), normalised)
 	}
 }
 

@@ -155,7 +155,7 @@ drift loop that no amount of rendering reveals.
 Findings are informative by default. `--strict` turns them into a failing build:
 
 ```yaml
-- uses: pcanilho/idem@v1
+- uses: pcanilho/idem@main   # no tag is published yet; pin a v* tag once one is
   with:
     args: ./charts --strict
 ```
@@ -192,7 +192,7 @@ that is a gap in what was checked rather than a finding about it.
 ```yaml
 repos:
   - repo: https://github.com/pcanilho/idem
-    rev: v0.1.0
+    rev: main          # no tag is published yet; pin a v* tag once one is
     hooks:
       - id: idem
 ```
@@ -278,7 +278,7 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 | `--rounds` | how many renders to compare (default 2) |
 | `--strict` | exit 1 when something will churn |
 | `-v` | expand every finding instead of capping each at five fields |
-| `-o` | `text`, `json`, `markdown` or `github` |
+| `-o` | `text`, `json`, `yaml`, `markdown` or `github` |
 | `--engine` | `argocd`, `flux`, `helm`, `all`, or `auto` (default) |
 | `--context` | resolve `lookup` and capabilities against a cluster |
 | `--namespace` | render into this namespace instead of the one your config names |
@@ -292,11 +292,13 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 
 Flags may come before or after the chart path.
 
-`-o json` is the machine-readable contract, so you can gate on it however you like:
+`-o json` is the machine-readable contract, so you can gate on it however you like. `-o yaml` is
+the same document, for when the next thing in the pipe reads YAML:
 
 ```sh
 idem ./charts -o json | jq '.findings[] | select(.consequence == "rolls")'
 idem ./charts -o json | conftest test -
+idem ./charts -o yaml | yq '.remediation[] | select(.engine == "argocd")'
 ```
 
 ---

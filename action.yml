@@ -27,6 +27,7 @@ inputs:
       github    inline annotations on the diff (default)
       text      human-readable, for reading in the log
       json      machine-readable
+      yaml      the same document as json, for a yq pipeline
       markdown  shaped for `gh pr comment --body-file`
     required: false
     default: github

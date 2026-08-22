@@ -81,7 +81,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
 	fs.StringVar(&opt.engine, "engine", "auto", "argocd, flux, helm, all, or auto")
-	fs.StringVar(&opt.output, "o", "text", "text, json, markdown or github")
+	fs.StringVar(&opt.output, "o", "text", "text, json, yaml, markdown or github")
 	fs.BoolVar(&opt.dependencyUpdate, "dependency-update", false, "resolve missing dependencies in place, not a temp dir")
 	fs.BoolVar(&opt.noDeps, "no-deps", false, "never fetch dependencies")
 	fs.StringVar(&opt.newFromRev, "new-from-rev", "", "report only findings in charts changed since REV")
@@ -801,12 +801,14 @@ func formatter(name string) (func(report.Report, io.Writer) error, error) {
 		return report.Report.Text, nil
 	case "json":
 		return report.Report.JSON, nil
+	case "yaml":
+		return report.Report.YAML, nil
 	case "markdown":
 		return report.Report.Markdown, nil
 	case "github":
 		return report.Report.GitHub, nil
 	}
-	return nil, fmt.Errorf("unknown output format %q: valid values are text, json, markdown, github", name)
+	return nil, fmt.Errorf("unknown output format %q: valid values are text, json, yaml, markdown, github", name)
 }
 
 // selectEngines resolves which engines' verdicts to display.
