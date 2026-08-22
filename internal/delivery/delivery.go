@@ -1003,7 +1003,22 @@ func parseValues(text string) map[string]any {
 // guessing from the HelmRelease's own metadata.namespace would be inventing a
 // join idem cannot make.
 func argoDestinations(spec appSpec, meta metadata, file string) []Destination {
-	if spec.Destination == nil || spec.Destination.Namespace == "" {
+	var namespace string
+	if spec.Destination != nil {
+		namespace = spec.Destination.Namespace
+	}
+	createNamespace := spec.SyncPolicy != nil && slices.Contains(spec.SyncPolicy.SyncOptions, createNamespaceOption)
+	serverSideDiff := hasCompareOption(meta, serverSideDiffOption)
+
+	// A Destination records what the Application claiming this chart says about
+	// it. The namespace is ONE of those things, not the reason the record
+	// exists - and spec.destination.namespace is optional in ArgoCD, so gating
+	// on it made CreateNamespace=true with no explicit namespace, which is a
+	// perfectly ordinary Application, invisible to both accessors below.
+	//
+	// A namespace-less Destination is safe for NamespaceFor: it already skips
+	// any destination whose Namespace is empty.
+	if namespace == "" && !createNamespace && !serverSideDiff {
 		return nil
 	}
 
@@ -1011,13 +1026,13 @@ func argoDestinations(spec appSpec, meta metadata, file string) []Destination {
 	for _, path := range chartPaths(spec) {
 		out = append(out, Destination{
 			Path:      path,
-			Namespace: spec.Destination.Namespace,
+			Namespace: namespace,
 			File:      file,
 			// Either half can be templated, and either makes the join useless.
-			Templated: strings.Contains(path, "{{") || strings.Contains(spec.Destination.Namespace, "{{"),
+			Templated: strings.Contains(path, "{{") || strings.Contains(namespace, "{{"),
 
-			CreateNamespace: spec.SyncPolicy != nil && slices.Contains(spec.SyncPolicy.SyncOptions, createNamespaceOption),
-			ServerSideDiff:  hasCompareOption(meta, serverSideDiffOption),
+			CreateNamespace: createNamespace,
+			ServerSideDiff:  serverSideDiff,
 		})
 	}
 	return out

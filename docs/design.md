@@ -277,6 +277,22 @@ them all.
 | **3. Admission-side** | a webhook or the API server mutates the object as it is applied | admission chain | `--dry-run=server`, compare to what was sent |
 | **4. Post-apply writes** | another controller writes into the object *later* | ESO, cert-manager, operators | compare live against `last-applied` — **retrospective only** |
 
+### Why render-side gets a tool of its own
+
+Worth stating, because it is the obvious objection: **render-side churn is a minority of real
+`OutOfSync` reports.** Admission and defaulting cause far more of them, and ArgoCD's Server-Side
+Diff addresses that dominant class natively.
+
+Two things answer it. Render-side is the only cause on this list detectable **statically,
+offline, before merge** — every other row needs a running cluster, and cause 4 needs the drift to
+have already happened. And nothing else generates the suppression config: `argo-cd#5453` has been
+open since February 2021.
+
+`idem` covers causes 2, 3 and 4 as well, and says so where those features live rather than in a
+taxonomy at the front of the README. This argument lives here rather than there for the reason
+§13 gives: a README that argues with an objection the reader has not raised is an author arguing
+with a stranger.
+
 Causes 3 and 4 look similar and are not. Admission mutation is **synchronous**: it happens
 during the apply, so a server dry-run reproduces it. A post-apply write is **asynchronous**,
 arriving seconds or minutes afterwards, so a dry-run cannot see it at all — the object comes

@@ -36,8 +36,8 @@ Under `helm install`, `lookup` finds the existing Secret and the password is sta
 ArgoCD, `lookup` returns `{}` — the repo-server has no cluster access — so the third branch
 fires and a new password is generated. Every time the manifests are rendered again.
 
-The same chart also rewrote a Postgres superuser password until it no longer matched the
-database. That `StatefulSet` had no `checksum/` annotation, so **nothing restarted and nothing
+The same chart rewrote a Postgres superuser password until it no longer matched the database —
+and that `StatefulSet` had no `checksum/` annotation, so **nothing restarted and nothing
 alerted.** It was silently broken for two years.
 
 You cannot catch this with `argocd app diff` either —
@@ -55,9 +55,6 @@ helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep post
 ```
 
 Two different values. Five renders give five passwords.
-
-That is the failure `idem` is built around. It is not the only way a release drifts, and the
-others are covered further down in [what makes a release drift](#what-makes-a-release-drift).
 
 ---
 
@@ -85,8 +82,8 @@ idem myapp --repo https://charts.example.com
 idem oci://registry.example.com/charts/myapp
 ```
 
-Here is a chart that churns, and what `idem` says about it — trimmed to the ArgoCD half, because
-the real run prints the matching Flux block too:
+Here is a chart that churns. The real run prints more — a matching Flux block, and the
+non-deterministic functions it found — but this is the shape of it:
 
 ```console
 $ idem ./examples/churning-chart
@@ -102,15 +99,6 @@ $ idem ./examples/churning-chart
       That is a chart defect rather than an ArgoCD limitation — worth reporting
       upstream, and pinning the value meanwhile.
 
-  — potential · not counted, not fatal —
-
-    churning-chart
-      randAlphaNum   random   examples/churning-chart/templates/main.yaml:7
-
-      This chart already churns, and idem cannot say which function did it —
-      a rendered value cannot be traced back to the call that produced it.
-      These are where to look first.
-
   1 of 1 chart will churn under ArgoCD.
   helm 4.2.4 · 2 rounds
 
@@ -125,21 +113,15 @@ $ idem ./examples/churning-chart
         syncOptions: [RespectIgnoreDifferences=true]
 ```
 
-Read it in three parts:
-
-- **what differs** — the object, the field, and what it costs you. `silent — no checksum` means
-  nothing will restart and nothing will alert; you would never have noticed.
-- **what it means for your engine** — the same chart gets three different answers, because the
-  three engines render it under different conditions.
-- **what to do about it** — a block you can paste. For Flux, `idem` emits
-  `spec.driftDetection.ignore` instead; the paths differ, because the two engines evaluate them
-  against different shapes.
+Three parts: **what differs**, where `silent — no checksum` means nothing will restart and
+nothing will alert; **what your engine does about it**, which is three different answers because
+the three render it under different conditions; and **a block you can paste**. Flux gets
+`spec.driftDetection.ignore` instead — different paths, because the two engines evaluate them
+against different shapes.
 
 ---
 
 ## Three engines, three different answers
-
-This is the part other tools do not do, and it is the reason `idem` exists.
 
 | Engine | Does `lookup` resolve? | So a `lookup`-guarded value is… |
 |---|---|---|
@@ -147,9 +129,9 @@ This is the part other tools do not do, and it is the reason `idem` exists.
 | **Flux** | Yes — helm-controller does a real install | stable |
 | **Helm** | Yes — `helm upgrade` talks to the cluster | stable |
 
-So "is this chart broken?" has no single answer. A chart using `lookup` is *correct Helm*; it
-just cannot work under ArgoCD. `idem` tells you which situation you are in, and whether the fix
-belongs in your Application or upstream in the chart.
+So "is this chart broken?" has no single answer — a chart using `lookup` is *correct Helm* that
+cannot work under ArgoCD. `idem` tells you which case you are in, and so whether the fix belongs
+in your Application or upstream in the chart.
 
 Without a cluster, `idem` says `unknown` for Flux and Helm rather than guessing. Give it one and
 those become measured facts:
@@ -162,37 +144,9 @@ idem ./charts --context=prod          # a named one
 `--context` is opt-in and read-only. It renders through the API server (`--dry-run=server`), so
 `lookup` resolves and your real cluster capabilities are used. It never applies anything.
 
-It also reports **what the cluster would rewrite as it admits each object** — under
-`the cluster rewrites these on admission`, marking each field as one the cluster *defaults* or
-one it *assigns*. Most of that is ordinary API-server defaulting your engine normalises away.
-A mutating webhook writing into a field your chart also sets is not, and that is a drift loop
-you cannot see from `helm template` alone.
-
----
-
-## What makes a release drift
-
-Something ends up in your cluster that git does not describe. That happens at one of five
-stages, and each needs different evidence — so no single check finds them all:
-
-| Stage | What happens | Does `idem` check it? |
-|---|---|---|
-| **Source** | a `Chart.yaml` version range resolves to a new subchart, with no git change | **No.** Analysed in [`docs/design.md`](docs/design.md), not built |
-| **Render** | the chart renders differently every time | **Yes** — `idem ./charts`, offline |
-| **Engine** | ArgoCD or Flux adds, strips or rewrites fields after rendering | **Yes** — every pointer is checked against what that engine actually evaluates |
-| **Admission** | the API server or a webhook mutates the object as it is applied | **Yes** — `idem ./charts --context=` |
-| **Post-apply** | another controller writes into the object *seconds later* | **Yes** — `idem doctor --namespace <ns>` |
-
-Two things worth being straight about.
-
-**Render-side churn is a minority of real `OutOfSync` reports.** Admission and defaulting cause
-far more of them. What makes the render-side case worth a tool of its own is that it is the only
-one on this list you can catch **offline and before merge** — the others need a running cluster,
-and the last needs the drift to have already happened. `idem` checks those too when you give it
-a cluster; it just cannot check them in a pull request.
-
-**Source-side is not built.** The analysis is written up in the design notes and the check would
-be a single label comparison, but nothing implements it, so the table says no.
+With a cluster it also reports `the cluster rewrites these on admission` — mostly harmless
+API-server defaulting, but a mutating webhook writing into a field your chart also sets is a
+drift loop that no amount of rendering reveals.
 
 ---
 
@@ -228,7 +182,9 @@ A permanently red pipeline gets switched off, so the ratchet exists to keep it g
 one. It filters *findings* only — a chart that will not render at all is still reported, because
 that is a gap in what was checked rather than a finding about it.
 
-### Before the commit, not after
+---
+
+## Before the commit, not after
 
 `idem` ships a hook for [pre-commit](https://pre-commit.com) and
 [prek](https://github.com/j178/prek):
@@ -242,11 +198,12 @@ repos:
 ```
 
 It runs only when something that changes a render is staged — `Chart.yaml`, any `values*.yaml`,
-anything under `templates/` — and checks **every chart in the repository**, because a `values.yaml`
-edit changes what every template in that chart renders.
+anything under `templates/` — and then checks **every chart in the repository**, because a
+`values.yaml` edit changes what every template in that chart renders.
 
-You need Go (the hook builds `idem` itself) and `helm` on your `PATH`. To report without blocking
-the commit, override the default `--strict`:
+You need Go (the hook builds `idem` itself) and `helm` on your `PATH`. Install it in repositories
+that hold charts — `idem .` exits 2 where there is no chart to find, which would fail every
+commit. To report without blocking one, override the default `--strict`:
 
 ```yaml
       - id: idem
@@ -285,23 +242,17 @@ idem doctor --namespace lab      # what is being written after apply
 
 It ranks workloads by how often they roll against the cluster's own median, names the Application
 or HelmRelease that owns each, and resolves that to a chart path — so the last line is a command
-you can run. It calls that triage rather than proof, because deploying often looks the same from
-here.
+you can run. It calls that triage rather than proof: deploying often looks the same from here.
 
-`--namespace` answers the other question: which fields were **written after the apply**, and by
-what. It separates *applied absent, live set* from *applied and live differ*, and names the
-controller when the object carries evidence of one — cert-manager, External Secrets, an operator.
-Where it cannot tell, it says so instead of guessing a name you would then go and chase.
+`--namespace` asks the other question, which fields were written *after* the apply — separating
+`applied absent, live set` from `applied and live differ`, and naming the controller that did it
+where the object carries evidence of one.
 
 ---
 
 ## Compare two renders yourself
 
-```sh
-idem diff a.yaml b.yaml
-```
-
-The comparison engine on its own: no helm, no network, no cluster. This is also how you point
+The comparison engine on its own — no helm, no network, no cluster. This is also how you point
 `idem` at kustomize:
 
 ```sh
@@ -395,18 +346,14 @@ each case.
 
 ---
 
-## Design notes
+## Going further
 
-The reasoning, the evidence, and the places `idem` can itself be wrong are in
-[`docs/design.md`](docs/design.md) — including why there is no rules file, why input type is
-detected rather than declared, and what each engine actually does, checked against its source.
-
-## Contributing
-
-Bug reports are most useful with a chart that reproduces the problem — something the size of
-`examples/churning-chart` is worth more than any description. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for how the codebase works, and
-[SECURITY.md](SECURITY.md) for what `idem` does and does not touch.
+- [`docs/design.md`](docs/design.md) — the reasoning, the evidence, and the places `idem` can
+  itself be wrong: why there is no rules file, and what each engine does, checked against source.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how the codebase works. Bug reports are most useful with a
+  chart that reproduces the problem; something the size of `examples/churning-chart` beats any
+  description.
+- [SECURITY.md](SECURITY.md) — what `idem` does and does not touch.
 
 ## License
 

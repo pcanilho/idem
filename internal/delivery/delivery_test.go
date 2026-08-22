@@ -1209,3 +1209,73 @@ func TestAnApplicationWithoutTheAnnotationIsNotAssumedToBeOnEitherMode(t *testin
 		t.Error("ServerSideDiff() = true, want false - no annotation says so")
 	}
 }
+
+// spec.destination.namespace is optional in ArgoCD, and CreateNamespace=true
+// with no explicit namespace is exactly the shape you would expect to meet.
+//
+// Both facts were stored on Destination, whose EXISTENCE is gated on the
+// namespace being set - so an Application saying either of these things while
+// omitting the namespace produced no Destination at all and both answers came
+// back false. Every fixture written for them set a namespace, so nothing caught
+// it.
+func TestAnApplicationWithNoNamespaceStillReportsCreateNamespace(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+spec:
+  source:
+    path: charts/home
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+`)
+
+	if !load(t, dir).CreatesNamespace("charts/home") {
+		t.Error("CreatesNamespace() = false, want true - the option does not depend on a namespace being named")
+	}
+}
+
+func TestAnApplicationWithNoNamespaceStillReportsServerSideDiff(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+  annotations:
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+spec:
+  source:
+    path: charts/home
+`)
+
+	if !load(t, dir).ServerSideDiff("charts/home") {
+		t.Error("ServerSideDiff() = false, want true - the annotation does not depend on a namespace being named")
+	}
+}
+
+// The namespace-less destinations these two now create must stay invisible to
+// NamespaceFor, which answers a different question and must not start claiming
+// a chart deploys into "".
+func TestANamespacelessApplicationStillNamesNoNamespace(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+spec:
+  source:
+    path: charts/home
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+`)
+
+	if ns, file := load(t, dir).NamespaceFor("charts/home"); ns != "" || file != "" {
+		t.Errorf("NamespaceFor() = %q from %q, want empty - no manifest names a namespace", ns, file)
+	}
+}
