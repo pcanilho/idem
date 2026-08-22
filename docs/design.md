@@ -599,6 +599,38 @@ not show up in measurement.
 That a 15% false-negative rate sat under the default for the class §5 calls "arguably the worst
 of the set" is worth recording plainly. It was found by running the tool, not by reading it.
 
+### Parsing is quadratic in the size of one mapping
+
+`manifest.Parse` decodes each document through `yaml.Node.Decode`, whose duplicate-key check
+scans the keys already seen for every new key — O(n²) within a single mapping. Measured, one
+ConfigMap diffed against itself:
+
+| document | keys in one mapping | parse |
+|---|---|---|
+| 155 KB | 5,000 | 0.4s |
+| 620 KB | 20,000 | 4.6s |
+| 1.55 MB | 50,000 | 63s |
+
+It is per-mapping, not per-byte: 200,000 *small* documents totalling 14 MB parse linearly.
+
+**The ceiling is real but bounded.** Kubernetes documents that *"the data stored in a ConfigMap
+cannot exceed 1 MiB"*, so the 1.55 MB row is a manifest no cluster would accept. The realistic
+worst case is the middle row — around 4.6s per render, multiplied by `--rounds` and again by the
+cluster condition under `--context`.
+
+**Not fixed, deliberately.** The obvious repair is to walk the `yaml.Node` tree directly and build
+the map ourselves, which would make duplicate detection O(n) as a side effect. But that same
+`node.Decode` is what currently produces both of these, and neither is optional:
+
+```console
+line 6: mapping key "k" already defined at line 5
+yaml: document contains excessive aliasing
+```
+
+The first is a genuinely useful message. The second is billion-laughs protection, and
+reimplementing an alias-expansion budget correctly is exactly the kind of change that trades a
+bounded slowness for an unbounded vulnerability. Recorded rather than rushed.
+
 ### Temporal blindness
 
 `idem` renders repeatedly, back to back. That finds anything random or clock-driven. It cannot

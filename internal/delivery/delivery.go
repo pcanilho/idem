@@ -10,6 +10,7 @@
 package delivery
 
 import (
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -493,6 +494,19 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 	for {
 		var doc document
 		if err := decoder.Decode(&doc); err != nil {
+			// A type error is confined to ONE document: the decoder has
+			// consumed it and can be asked for the next. Breaking here
+			// abandoned every later document in the file, and silently - the
+			// suppression vanished, the namespace reverted to the default so
+			// every round rendered into the wrong one, and --strict turned red
+			// because of a typo in an unrelated Application.
+			//
+			// A syntax error does end the stream: after one there is no
+			// dependable document boundary to resume from.
+			var typeErr *yaml.TypeError
+			if errors.As(err, &typeErr) {
+				continue
+			}
 			break
 		}
 

@@ -1475,3 +1475,54 @@ spec:
 		t.Errorf("Templated = %v, want the unresolvable source named", got[0].Templated)
 	}
 }
+
+// One malformed document must not discard the rest of the file.
+//
+// The decode loop did `break` on any error, so a type error in document 1
+// abandoned documents 2..N - silently. The consequences are all invisible: the
+// suppression is lost so a covered finding reappears, the namespace reverts to
+// the default so every round renders into the WRONG namespace, and --strict
+// turns a pipeline red because of a typo in an unrelated Application.
+//
+// yaml.TypeError is recoverable: the decoder has consumed that document and can
+// be asked for the next one. Only a syntax error ends the stream, because after
+// one the decoder cannot find a document boundary to resume from.
+func TestAMalformedDocumentDoesNotDiscardTheRestOfTheFile(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/all.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: broken
+spec:
+  destination:
+    namespace: [this, should, be, a, string]
+  source:
+    path: charts/other
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: good
+spec:
+  destination:
+    namespace: prod
+  source:
+    path: charts/home
+  ignoreDifferences:
+    - kind: Secret
+      name: creds
+      jsonPointers:
+        - /data/password
+`)
+
+	cfg := load(t, dir)
+
+	ns, file := cfg.NamespaceFor("charts/home")
+	if ns != "prod" {
+		t.Errorf("NamespaceFor() = %q from %q, want prod - the second document is well-formed", ns, file)
+	}
+	if len(cfg.Rules) == 0 {
+		t.Errorf("Rules = %+v, want the second document's ignoreDifferences", cfg.Rules)
+	}
+}
