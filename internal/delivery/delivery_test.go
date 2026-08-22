@@ -1348,3 +1348,130 @@ spec:
 		t.Error("CreatesNamespace(\"\") = true, want false - an empty path joins to nothing")
 	}
 }
+
+const helmRelease = `
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: home
+  namespace: flux-system
+spec:
+  releaseName: home-release
+  targetNamespace: home
+  chart:
+    spec:
+      chart: ./charts/home
+      sourceRef:
+        kind: GitRepository
+        name: estate
+  values:
+    replicas: 3
+    image:
+      tag: "1.2.3"
+`
+
+// A HelmRelease says what its release is rendered with, and idem ignored all of
+// it: only rules and the engine name were read, so every Flux user's chart was
+// rendered with defaults and the findings described a release nobody deploys.
+//
+// The join is possible in exactly one case and this is it: with
+// sourceRef.kind: GitRepository, spec.chart.spec.chart is a path inside the
+// repository idem is already looking at. An OCIRepository or HelmRepository
+// source names a packaged chart idem cannot match to a local directory, and
+// guessing would be worse than saying nothing.
+func TestAHelmReleaseSuppliesTheValuesItsChartIsRenderedWith(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", helmRelease)
+
+	got := load(t, dir).ReleasesFor("charts/home")
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+
+	if got[0].Name != "home-release" {
+		t.Errorf("Name = %q, want home-release", got[0].Name)
+	}
+	if got[0].Namespace != "home" {
+		t.Errorf("Namespace = %q, want home (targetNamespace)", got[0].Namespace)
+	}
+	if got[0].Inline["replicas"] != 3 {
+		t.Errorf("Inline = %+v, want replicas: 3 from spec.values", got[0].Inline)
+	}
+}
+
+// A source idem cannot join to a local directory must not be guessed at.
+func TestAHelmReleaseFromAPackagedChartClaimsNoLocalPath(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/remote.yaml", `
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: remote
+spec:
+  chart:
+    spec:
+      chart: podinfo
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+  values:
+    replicas: 9
+`)
+
+	if got := load(t, dir).ReleasesFor("podinfo"); len(got) != 0 {
+		t.Errorf("ReleasesFor() = %+v, want none - a HelmRepository chart is not a path in this repo", got)
+	}
+}
+
+// $values/… names a file in ANOTHER source, which is another repository.
+//
+// valueFilePath did path.Join(chartPath, file) with no $ref handling, so idem
+// handed helm `charts/app/$values/env/prod.yaml`, helm could not open it, and
+// the chart came back unrenderable - exit 2, which is always fatal and escapes
+// the ratchet. That is the documented ArgoCD pattern for keeping values in a
+// second repository, so any estate using it was permanently red.
+//
+// It is an unresolvable value source, which idem already has a shape for: name
+// it, count it as unconstructed, and never fail the run over a limit of idem's.
+func TestAMultiSourceValueFileFromAnotherRepositoryIsNamedNotJoined(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/app.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app
+spec:
+  destination:
+    namespace: apps
+  sources:
+    - path: charts/app
+      repoURL: https://example.com/estate.git
+      helm:
+        valueFiles:
+          - $values/env/prod.yaml
+          - overrides.yaml
+    - repoURL: https://example.com/values.git
+      ref: values
+`)
+
+	got := load(t, dir).ReleasesFor("charts/app")
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+
+	// The one idem CAN resolve is still resolved, relative to the chart path.
+	if !slices.Contains(got[0].ValueFiles, "charts/app/overrides.yaml") {
+		t.Errorf("ValueFiles = %v, want the ordinary file still joined", got[0].ValueFiles)
+	}
+	// The one it cannot must not be handed to helm as a path.
+	for _, f := range got[0].ValueFiles {
+		if strings.Contains(f, "$values") {
+			t.Errorf("ValueFiles = %v, want no $ref path passed through to helm", got[0].ValueFiles)
+		}
+	}
+	// And it must be named, so the report can say why this is not the release
+	// ArgoCD deploys.
+	if !slices.ContainsFunc(got[0].Templated, func(s string) bool { return strings.Contains(s, "$values") }) {
+		t.Errorf("Templated = %v, want the unresolvable source named", got[0].Templated)
+	}
+}

@@ -785,7 +785,10 @@ func writeUnconstructed(b *strings.Builder, charts []Chart) bool {
 	}
 
 	if len(partial) > 0 {
-		b.WriteString("\n  rendered without values only a generator can supply\n")
+		// Not "only a generator can supply": the same shape now carries a
+		// multi-source $ref, which is another repository rather than a
+		// generator, and Flux valuesFrom, which is a cluster read.
+		b.WriteString("\n  rendered without values idem cannot reach\n")
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, c := range partial {
 			fmt.Fprintf(tw, "    %s\tmissing %s\n", c.Name, strings.Join(c.Unresolved, ", "))
@@ -1169,6 +1172,25 @@ func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []s
 	return true
 }
 
+// primaryEngine names the engine the verdict sentence speaks for.
+//
+// ArgoCD unless the delivery config says otherwise, because the render-side
+// condition idem measures without a cluster IS ArgoCD's - and because with no
+// signal at all, a reader evaluating a chart wants the strictest answer. But a
+// repository holding only HelmReleases has told idem what it runs, and naming
+// ArgoCD at it in the first line of output is naming an engine it does not use.
+func (r Report) primaryEngine() string {
+	if len(r.Engines) == 1 {
+		switch r.Engines[0] {
+		case "flux":
+			return "Flux"
+		case "helm":
+			return "Helm"
+		}
+	}
+	return "ArgoCD"
+}
+
 // verdict is the sentence the whole run reduces to.
 //
 // It names ArgoCD because `helm template` renders exactly as ArgoCD's
@@ -1188,8 +1210,8 @@ func (r Report) verdict() string {
 	// The ratchet's sentence says what it measured against, because "1 of 2"
 	// is a different claim when 14 other charts were left out of the count.
 	if r.Since != "" && churning > 0 {
-		return fmt.Sprintf("%d of the %d %s changed since %s will churn under ArgoCD%s.",
-			churning, total, plural(total, "chart", "charts"), r.Since, lookupClause(lookupOnly))
+		return fmt.Sprintf("%d of the %d %s changed since %s will churn under %s%s.",
+			churning, total, plural(total, "chart", "charts"), r.Since, r.primaryEngine(), lookupClause(lookupOnly))
 	}
 
 	if churning == 0 && unevaluable == 0 && lookupOnly == 0 && r.Unconstructed() == 0 {
@@ -1199,14 +1221,14 @@ func (r Report) verdict() string {
 		// chart - so the config gets the credit and the section above it
 		// stops reading as decoration.
 		if found, charts := r.covered(); found > 0 {
-			return fmt.Sprintf("✓ Nothing will churn under ArgoCD — %d %s in %d of %d %s %s covered by your delivery config.",
-				found, plural(found, "finding", "findings"), charts, total, plural(total, "chart", "charts"),
+			return fmt.Sprintf("✓ Nothing will churn under %s — %d %s in %d of %d %s %s covered by your delivery config.",
+				r.primaryEngine(), found, plural(found, "finding", "findings"), charts, total, plural(total, "chart", "charts"),
 				plural(found, "is", "are"))
 		}
 		if total == 1 {
-			return fmt.Sprintf("✓ %s renders consistently under ArgoCD.", r.Charts[0].Name)
+			return fmt.Sprintf("✓ %s renders consistently under %s.", r.Charts[0].Name, r.primaryEngine())
 		}
-		return fmt.Sprintf("✓ All %d charts render consistently under ArgoCD.", total)
+		return fmt.Sprintf("✓ All %d charts render consistently under %s.", total, r.primaryEngine())
 	}
 
 	// ArgoCD is genuinely fine here and the sentence must not say otherwise -
@@ -1231,14 +1253,14 @@ func (r Report) verdict() string {
 
 	var s string
 	if churning > 0 {
-		s = fmt.Sprintf("%d of %d %s will churn under ArgoCD", churning, total, plural(total, "chart", "charts"))
+		s = fmt.Sprintf("%d of %d %s will churn under %s", churning, total, plural(total, "chart", "charts"), r.primaryEngine())
 	} else {
 		// Counted, not subtracted. `total` is the charts in ratchet scope while
 		// `unevaluable` spans every chart the run touched - the ratchet does
 		// not hide a chart that would not render - so taking one from the
 		// other mixes two populations and goes negative.
 		clean := r.consistent()
-		s = fmt.Sprintf("%d %s consistently under ArgoCD", clean, plural(clean, "chart renders", "charts render"))
+		s = fmt.Sprintf("%d %s consistently under %s", clean, plural(clean, "chart renders", "charts render"), r.primaryEngine())
 	}
 	if coveredCharts > 0 {
 		// The verb agrees with the findings, not the charts: "4 findings in 1

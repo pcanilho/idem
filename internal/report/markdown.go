@@ -82,7 +82,7 @@ func (r Report) headline() string {
 		}
 		return fmt.Sprintf("%d %s could not be rendered", r.Unevaluable(), plural(r.Unevaluable(), "chart", "charts"))
 	}
-	return fmt.Sprintf("%d of %d %s will churn under ArgoCD%s", churning, total, plural(total, "chart", "charts"), lookupClause(r.ChurningWithLookup()))
+	return fmt.Sprintf("%d of %d %s will churn under %s%s", churning, total, plural(total, "chart", "charts"), r.primaryEngine(), lookupClause(r.ChurningWithLookup()))
 }
 
 func (r Report) unevaluableNote() string {

@@ -445,6 +445,31 @@ type document struct {
 			Spec     appSpec  `yaml:"spec"`
 		} `yaml:"template"`
 
+		// ReleaseName and TargetNamespace are the Flux spellings of what
+		// ArgoCD calls releaseName and destination.namespace.
+		ReleaseName     string `yaml:"releaseName"`
+		TargetNamespace string `yaml:"targetNamespace"`
+
+		// Chart.Spec.Chart is a PATH inside the repository when the source is a
+		// GitRepository, and a packaged chart name otherwise.
+		Chart *struct {
+			Spec struct {
+				Chart     string `yaml:"chart"`
+				SourceRef struct {
+					Kind string `yaml:"kind"`
+				} `yaml:"sourceRef"`
+			} `yaml:"spec"`
+		} `yaml:"chart"`
+
+		// Values is spec.values, inline. ValuesFrom points at ConfigMaps and
+		// Secrets that resolve in the cluster, which idem cannot read - it is
+		// recorded as unresolved rather than rendered around.
+		Values     map[string]any `yaml:"values"`
+		ValuesFrom []struct {
+			Kind string `yaml:"kind"`
+			Name string `yaml:"name"`
+		} `yaml:"valuesFrom"`
+
 		DriftDetection *struct {
 			Mode   string `yaml:"mode"`
 			Ignore []struct {
@@ -508,9 +533,66 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 		case "HelmRelease":
 			engines = append(engines, "flux")
 			rules = append(rules, fluxRules(doc, file)...)
+			values = append(values, fluxValues(doc, file)...)
+			dests = append(dests, fluxDestinations(doc, file)...)
 		}
 	}
 	return rules, dests, values, engines
+}
+
+// fluxChartPath is the repository path a HelmRelease renders, when there is one.
+//
+// Only for a GitRepository source. Flux resolves spec.chart.spec.chart against
+// the source it names: for a GitRepository that is a path inside the repository
+// idem is already reading, and for a HelmRepository or OCIRepository it is a
+// packaged chart name that matches no local directory. Joining the second kind
+// on name would attach one chart's values to a different chart that happens to
+// share it - worse than saying nothing, which is what §9 requires.
+//
+// spec.chartRef (Flux 2.3+) points at a HelmChart or OCIRepository object
+// elsewhere in the cluster and is deliberately not followed.
+func fluxChartPath(doc document) string {
+	if doc.Spec.Chart == nil || doc.Spec.Chart.Spec.SourceRef.Kind != "GitRepository" {
+		return ""
+	}
+	return path.Clean(strings.TrimPrefix(doc.Spec.Chart.Spec.Chart, "./"))
+}
+
+// fluxValues reads what a HelmRelease renders its chart with.
+func fluxValues(doc document, file string) []Values {
+	chartPath := fluxChartPath(doc)
+	if chartPath == "" {
+		return nil
+	}
+
+	v := Values{
+		Path:      chartPath,
+		File:      file,
+		Name:      doc.Spec.ReleaseName,
+		Namespace: doc.Spec.TargetNamespace,
+		Inline:    doc.Spec.Values,
+	}
+	// valuesFrom resolves in the cluster, at reconcile time. Recorded so the
+	// report can say the release idem rendered is not the one Flux deploys,
+	// rather than quietly rendering without them - docs/design.md §1.
+	for _, from := range doc.Spec.ValuesFrom {
+		v.Templated = append(v.Templated, "valuesFrom "+from.Kind+"/"+from.Name)
+	}
+	return []Values{v}
+}
+
+// fluxDestinations records the namespace a HelmRelease targets.
+func fluxDestinations(doc document, file string) []Destination {
+	chartPath := fluxChartPath(doc)
+	if chartPath == "" || doc.Spec.TargetNamespace == "" {
+		return nil
+	}
+	return []Destination{{
+		Path:      chartPath,
+		Namespace: doc.Spec.TargetNamespace,
+		File:      file,
+		Templated: templated(chartPath) || templated(doc.Spec.TargetNamespace),
+	}}
 }
 
 // templated reports whether a generator substitutes this at runtime. idem has
@@ -543,6 +625,16 @@ func argoValues(spec appSpec, file string) []Values {
 		for _, f := range src.Helm.ValueFiles {
 			if templated(f) {
 				v.Templated = append(v.Templated, f)
+				continue
+			}
+			// $ref/… names a file in ANOTHER source of a multi-source
+			// Application - another repository, which idem is not looking at.
+			// Joining it onto the chart path produced a path helm cannot open,
+			// so the chart came back unrenderable and exit 2 - always fatal,
+			// and it escapes the ratchet. It is an unresolvable value source,
+			// not a broken chart.
+			if ref, ok := crossSourceRef(f); ok {
+				v.Templated = append(v.Templated, ref)
 				continue
 			}
 			v.ValueFiles = append(v.ValueFiles, valueFilePath(src.Path, f))
@@ -987,6 +1079,27 @@ func valueFilePath(chartPath, file string) string {
 		return after
 	}
 	return path.Join(chartPath, file)
+}
+
+// crossSourceRef reports whether a valueFiles entry points into another source.
+//
+// ArgoCD's multi-source syntax is `$<ref>/path/within/that/repo`, where <ref>
+// matches a source declaring `ref: <name>`. That source is a different
+// repository by construction - a single-repo Application has no reason to use
+// it - so idem cannot read the file and does not pretend to.
+//
+// Returned as a name rather than resolved: the report says the release it
+// rendered is not the one ArgoCD deploys, which is true and useful, where a
+// guess would be neither.
+func crossSourceRef(file string) (string, bool) {
+	if !strings.HasPrefix(file, "$") {
+		return "", false
+	}
+	name, rest, _ := strings.Cut(strings.TrimPrefix(file, "$"), "/")
+	if name == "" {
+		return "", false
+	}
+	return "$" + name + " (" + rest + ", from another source)", true
 }
 
 // parseValues reads the spec.source.helm.values string. Unparseable YAML is

@@ -1969,3 +1969,31 @@ func TestSuppressedFindingsNameTheirManifestOnceNotPerRow(t *testing.T) {
 		}
 	}
 }
+
+// The verdict sentence must name an engine the reader actually runs.
+//
+// Every branch hardcoded "under ArgoCD" - so a Flux-only estate, whose
+// HelmRelease idem had just read well enough to know the engine, was told about
+// an engine it does not use, in the first and usually only line it reads.
+func TestTheVerdictNamesTheEngineTheReaderRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		engines []string
+		want    string
+	}{
+		{"flux only", []string{"flux"}, "under Flux"},
+		{"argocd only", []string{"argocd"}, "under ArgoCD"},
+		{"nothing detected", nil, "under ArgoCD"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := text(t, Report{
+				Charts:  []Chart{clean("home")},
+				Engines: tc.engines,
+				Helm:    "4.2.4", Rounds: 3,
+			})
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("Text() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
