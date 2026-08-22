@@ -228,6 +228,31 @@ A permanently red pipeline gets switched off, so the ratchet exists to keep it g
 one. It filters *findings* only — a chart that will not render at all is still reported, because
 that is a gap in what was checked rather than a finding about it.
 
+### Before the commit, not after
+
+`idem` ships a hook for [pre-commit](https://pre-commit.com) and
+[prek](https://github.com/j178/prek):
+
+```yaml
+repos:
+  - repo: https://github.com/pcanilho/idem
+    rev: v0.1.0
+    hooks:
+      - id: idem
+```
+
+It runs only when something that changes a render is staged — `Chart.yaml`, any `values*.yaml`,
+anything under `templates/` — and checks **every chart in the repository**, because a `values.yaml`
+edit changes what every template in that chart renders.
+
+You need Go (the hook builds `idem` itself) and `helm` on your `PATH`. To report without blocking
+the commit, override the default `--strict`:
+
+```yaml
+      - id: idem
+        args: []
+```
+
 ---
 
 ## Already fixed it? `idem` knows

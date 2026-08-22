@@ -1,0 +1,38 @@
+# Hooks this repository offers to pre-commit and prek.
+#
+# Consumed from a chart repository's own .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/pcanilho/idem
+#       rev: v0.1.0
+#       hooks:
+#         - id: idem
+#
+# `language: golang` means the consumer needs Go and nothing else - the hook
+# manager builds this module in its own cache. helm still has to be on PATH,
+# because idem shells out to it the same way ArgoCD's repo-server does.
+
+- id: idem
+  name: idem
+  description: Check that every Helm chart renders consistently under your GitOps engine.
+
+  # `.` and not the changed files, for two reasons. idem takes ONE chart
+  # reference - a chart is a directory, and handing it six template paths is
+  # not a smaller question, it is a different one. And a values.yaml edit
+  # changes what every template renders, so the unit that has to be re-checked
+  # is the chart, never the file.
+  #
+  # Flags land after the path deliberately: idem's parseArgs loops rather than
+  # stopping at the first operand, so a user's own `args:` appends cleanly
+  # instead of having to be spliced before `.`.
+  entry: idem .
+  args: [--strict]
+  language: golang
+  pass_filenames: false
+
+  # Only when something that changes a render was touched. Without this the
+  # hook runs on every commit in the repository, including the ones that edit
+  # a README - and a hook that always runs is the one people learn to skip.
+  #
+  # values*.yaml rather than values.yaml: values-prod.yaml is the same input.
+  files: (^|/)(Chart\.ya?ml|Chart\.lock|values[^/]*\.ya?ml)$|(^|/)templates/.+
