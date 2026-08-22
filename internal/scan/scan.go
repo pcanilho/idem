@@ -16,6 +16,7 @@ import (
 
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/manifest"
 )
@@ -45,6 +46,10 @@ type Chart struct {
 // serial tail - and so that --jobs bounds all the work, not just some of it.
 type Inspect func(Chart) ([]analyze.Use, error)
 
+// Admission asks the cluster what it would change about a chart's rendered
+// output on admission. Optional; nil skips it.
+type Admission func(Chart, []manifest.Object) ([]doctor.Rewrite, error)
+
 // Prepare readies a chart for rendering, returning the spec to render and a
 // cleanup to run once its rounds are done.
 //
@@ -52,6 +57,19 @@ type Inspect func(Chart) ([]analyze.Use, error)
 // same prepared chart, and letting each round resolve dependencies for itself
 // would do the work N times and race on the same directory.
 type Prepare func(Chart) (engine.Spec, func(), error)
+
+// Hooks are the optional stages Charts runs alongside rendering. A zero Hooks
+// renders and compares, which is the whole job without a repository or a
+// cluster to ask about.
+//
+// A struct rather than positional arguments: every one of these is optional,
+// and `Charts(ctx, h, charts, 2, 8, nil, nil, nil)` says nothing about which
+// nil is which.
+type Hooks struct {
+	Inspect   Inspect
+	Prepare   Prepare
+	Admission Admission
+}
 
 // Result is one chart's outcome. Err set means the chart could not be
 // rendered, which is exit 2 - never a silent skip.
@@ -77,13 +95,20 @@ type Result struct {
 	// Rendered is the first round's output, kept so the caller can ask the
 	// API server what it would do with it without rendering again.
 	Rendered []manifest.Object
+
+	// Rewrites is what the API server said it would change on admission, and
+	// RewriteErr why it could not be asked. A cluster that will not answer
+	// leaves the question open; it never fails the chart, which renders
+	// perfectly well without one.
+	Rewrites   []doctor.Rewrite
+	RewriteErr error
 }
 
 // Charts checks every chart, running at most jobs renders at once.
 //
 // Results come back in the order the charts were given, whatever order they
 // finished in. A tool that reports non-determinism cannot exhibit it.
-func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, inspect Inspect, prepare Prepare) []Result {
+func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, hooks Hooks) []Result {
 	// One semaphore for every render in the run, so the two levels of
 	// parallelism cannot multiply into charts*rounds processes at once.
 	gate := make(chan struct{}, resolveJobs(jobs))
@@ -92,7 +117,7 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, i
 	var wg sync.WaitGroup
 	for i, c := range charts {
 		wg.Go(func() {
-			results[i] = one(ctx, r, c, rounds, gate, inspect, prepare)
+			results[i] = one(ctx, r, c, rounds, gate, hooks)
 		})
 	}
 	wg.Wait()
@@ -104,15 +129,15 @@ func Charts(ctx context.Context, r Renderer, charts []Chart, rounds, jobs int, i
 //
 // The chart's goroutine never holds the gate itself - only the renders do - so
 // charts waiting on their rounds cannot starve the pool.
-func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}, inspect Inspect, prepare Prepare) Result {
+func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{}, hooks Hooks) Result {
 	if rounds < 2 {
 		return Result{Chart: c, Err: fmt.Errorf("checking %s: rounds is %d, and at least 2 renders are needed", c.Name, rounds)}
 	}
 
 	spec := c.Spec
-	if prepare != nil {
+	if hooks.Prepare != nil {
 		gate <- struct{}{}
-		prepared, cleanup, err := prepare(c)
+		prepared, cleanup, err := hooks.Prepare(c)
 		<-gate
 
 		if cleanup != nil {
@@ -162,12 +187,12 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 
 	// Reading the chart source does not depend on rendering it, so it runs
 	// alongside the rounds, taking a slot like any other unit of work.
-	if inspect != nil {
+	if hooks.Inspect != nil {
 		wg.Go(func() {
 			gate <- struct{}{}
 			defer func() { <-gate }()
 
-			uses, inspectErr = inspect(c)
+			uses, inspectErr = hooks.Inspect(c)
 		})
 	}
 	wg.Wait()
@@ -195,6 +220,16 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 	out := Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr, Rendered: renders[0]}
 	if c.Server != nil {
 		out.ServerFindings, out.ServerRendered, out.ServerErr = compareServer(c, serverRenders, serverErrs)
+	}
+
+	// Asked here rather than in a pass over the finished results: it is a
+	// cluster round trip, the slowest single thing idem does, and one chart's
+	// query overlaps every other chart's renders from inside the pool. Only
+	// after the rounds, because it needs something rendered to ask about.
+	if hooks.Admission != nil && len(renders[0]) > 0 {
+		gate <- struct{}{}
+		out.Rewrites, out.RewriteErr = hooks.Admission(c, renders[0])
+		<-gate
 	}
 	return out
 }

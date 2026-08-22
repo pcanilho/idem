@@ -211,7 +211,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since,
 		Cluster: opt.cluster, Context: opt.kubeContext,
 	}
-	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, inspector(ref), prepare) {
+	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, scan.Hooks{Inspect: inspector(ref), Prepare: prepare, Admission: admission(ctx, opt)}) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
 
 		evidence := engines.Evidence{
@@ -244,7 +244,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			serverOnly = delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.ServerFindings)
 		}
 
-		rewrites := rewritesFor(ctx, opt, result, stderr)
+		// Said, not swallowed. idem is a tool about knowing what was and was
+		// not checked, so a question it could not ask has to be visible.
+		if result.RewriteErr != nil {
+			fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n",
+				result.Chart.Name, result.RewriteErr)
+		}
 
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:       result.Chart.Name,
@@ -258,7 +263,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Maybe:      append(applied.Maybe, serverOnly.Maybe...),
 			Verdicts:   verdictsFor(result, evidence),
 			Potential:  analyze.Potential(result.Uses),
-			Rewrites:   rewrites,
+			Rewrites:   result.Rewrites,
 			Err:        result.Err,
 		})
 	}
@@ -395,27 +400,30 @@ func releaseName(raw string) string {
 // missing CRD or RBAC that forbids the dry run all mean idem cannot answer
 // this particular question, not that the chart is broken. Everything measured
 // without a cluster still stands.
-func rewritesFor(ctx context.Context, opt options, result scan.Result, stderr io.Writer) []doctor.Rewrite {
-	if !opt.cluster || result.Err != nil || len(result.Rendered) == 0 {
+// admission asks the API server what it would change about a chart's rendered
+// output, or nil when no cluster was asked for.
+//
+// Returned as a hook rather than called over the finished results: it is a
+// round trip per chart, and running them after the pool had drained took a
+// 16-chart estate from ~10s to ~41s. Inside the pool each one overlaps other
+// charts' renders and --jobs bounds them like everything else.
+func admission(ctx context.Context, opt options) scan.Admission {
+	if !opt.cluster {
 		return nil
 	}
 
-	manifests, err := manifest.Encode(result.Rendered)
-	if err == nil {
-		var returned []manifest.Object
-		returned, err = cluster.New("", opt.kubeContext).DryRunApply(ctx, opt.namespace, manifests)
-		if err == nil {
-			var rewrites []doctor.Rewrite
-			if rewrites, err = doctor.Rewrites(result.Rendered, returned); err == nil {
-				return rewrites
-			}
+	c := cluster.New("", opt.kubeContext)
+	return func(_ scan.Chart, rendered []manifest.Object) ([]doctor.Rewrite, error) {
+		manifests, err := manifest.Encode(rendered)
+		if err != nil {
+			return nil, err
 		}
+		returned, err := c.DryRunApply(ctx, opt.namespace, manifests)
+		if err != nil {
+			return nil, err
+		}
+		return doctor.Rewrites(rendered, returned)
 	}
-
-	// Said, not swallowed. idem is a tool about knowing what was and was not
-	// checked, so a question it could not ask has to be visible.
-	fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n", result.Chart.Name, err)
-	return nil
 }
 
 // chartPath expresses a chart directory the way an Application names it:
