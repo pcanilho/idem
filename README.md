@@ -177,7 +177,11 @@ no token, no API calls, no extra permissions. To post one summary comment instea
 ```yaml
 - run: idem ./charts -o markdown > /tmp/idem.md
 - run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
+  if: ${{ hashFiles('/tmp/idem.md') != '' }}
 ```
+
+A clean run writes **nothing**, so the guard is what stops a comment saying everything is fine on
+every pull request that touches a chart.
 
 Adopting `idem` on an estate that already has problems? Report only what your branch changed:
 

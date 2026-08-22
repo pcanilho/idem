@@ -76,27 +76,120 @@ func consoleBlock(t *testing.T, readme, prompt string) []string {
 	return out
 }
 
-// Every flag the README documents has to exist. `-v` and `idem diff` were both
-// promised for months and neither was built.
-func TestTheREADMEDocumentsOnlyFlagsThatExist(t *testing.T) {
+// `-o markdown` writes NOTHING on a clean run, and internal/report/markdown.go
+// justifies that by pointing at the snippet in this README - so the snippet has
+// to carry the guard the code is relying on.
+//
+// It did, and the rewrite that shortened the README dropped it, leaving a
+// documented workflow that pipes an empty file into `gh pr comment` on every
+// pull request that touches a chart. Neither half is wrong on its own; they
+// stopped agreeing, and nothing was watching the join.
+func TestTheDocumentedCommentWorkflowGuardsAgainstAnEmptyFile(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("reading README: %v", err)
+	}
+
+	_, snippet, found := strings.Cut(string(readme), "gh pr comment")
+	if !found {
+		t.Fatal("README no longer documents the `gh pr comment` workflow")
+	}
+	snippet, _, _ = strings.Cut(snippet, "```")
+
+	if !strings.Contains(snippet, "hashFiles") {
+		t.Errorf("the documented `gh pr comment` step does not guard on the file being non-empty:\n%s", snippet)
+	}
+}
+
+// The README's flag table and the binary have to agree, in both directions.
+//
+// The first version of this checked `strings.Contains(help, "-"+name)`, which
+// was vacuous in exactly the case it was written for: `-v` matched the `-v` in
+// `-chart-version`, so deleting `-v` from the binary left the test green. It
+// also carried a hand-written list of flag names, so a flag added to the
+// binary and left out of the README was nobody's failure.
+//
+// Both halves are now derived - the flag names PrintDefaults emits, and the
+// first cell of every row in the README's table - and compared as sets. `-v`
+// and `idem diff` were each documented for months without existing; a flag
+// that exists without being documented is the same defect facing the other
+// way.
+func TestTheREADMEAndTheBinaryAgreeOnEveryFlag(t *testing.T) {
 	readme, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatalf("reading README: %v", err)
 	}
 
 	_, help, _ := invoke(t, "--help")
-	for _, flag := range []string{
-		"-f", "--set", "--rounds", "--strict", "-v", "-o", "--engine", "--context",
-		"--namespace", "--repo", "--chart-version", "--jobs", "--new-from-rev",
-		"--new-from-merge-base", "--dependency-update", "--no-deps", "--helm", "--version",
-	} {
-		if !strings.Contains(string(readme), "`"+flag+"`") {
-			t.Errorf("README does not document %s", flag)
-		}
-		// helm's own flag listing is single-dash; the README writes the long
-		// form the way a user types it.
-		if !strings.Contains(help, "-"+strings.TrimLeft(flag, "-")) {
-			t.Errorf("README documents %s, which the binary does not accept", flag)
+
+	documented := documentedFlags(string(readme))
+	if len(documented) == 0 {
+		t.Fatal("no flag table found in the README")
+	}
+	actual := binaryFlags(help)
+	if len(actual) == 0 {
+		t.Fatal("no flags found in `idem --help`")
+	}
+
+	for name := range documented {
+		if !actual[name] {
+			t.Errorf("README documents -%s, which the binary does not accept", name)
 		}
 	}
+	for name := range actual {
+		if !documented[name] {
+			t.Errorf("the binary accepts -%s, which the README does not document", name)
+		}
+	}
+}
+
+// binaryFlags is the set of flag names `idem --help` prints. PrintDefaults
+// writes each one as two spaces, a dash, the name, then either a space and a
+// type or a tab and the description.
+func binaryFlags(help string) map[string]bool {
+	out := map[string]bool{}
+	for line := range strings.SplitSeq(help, "\n") {
+		rest, ok := strings.CutPrefix(line, "  -")
+		if !ok {
+			continue
+		}
+		// A tab for a boolean flag (`-v\texpand every…`), a space for one
+		// that takes a value (`-o string`). Cut on whichever comes first.
+		name := strings.TrimRight(rest, " \t")
+		if i := strings.IndexAny(name, " \t"); i >= 0 {
+			name = name[:i]
+		}
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// documentedFlags is the set of flag names in the first cell of the README's
+// flag table. Only the first cell: the description column cites flags too
+// (`--repo` is described as "as helm's `--repo`"), and counting those would
+// let a documented-but-missing flag hide behind a mention of itself.
+func documentedFlags(readme string) map[string]bool {
+	_, table, found := strings.Cut(readme, "| Flag | What it does |")
+	if !found {
+		return nil
+	}
+	table, _, _ = strings.Cut(table, "\n\n")
+
+	out := map[string]bool{}
+	for line := range strings.SplitSeq(table, "\n") {
+		cell, _, ok := strings.Cut(strings.TrimPrefix(line, "|"), "|")
+		if !ok {
+			continue
+		}
+		// Odd fields of a backtick split are the quoted spans.
+		parts := strings.Split(cell, "`")
+		for i := 1; i < len(parts); i += 2 {
+			if name := strings.TrimLeft(parts[i], "-"); name != parts[i] {
+				out[name] = true
+			}
+		}
+	}
+	return out
 }
