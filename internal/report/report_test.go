@@ -1147,9 +1147,9 @@ func TestTheProvenanceLineAdmitsWhenIdemChoseTheNamespaceItself(t *testing.T) {
 	// Nothing claimed the chart, so idem picked one. Silently rendering into
 	// "default" and displaying it as fact would read as something the
 	// repository said.
-	got := text(t, Report{Charts: []Chart{namespaced("home", "default", "")}, Helm: "4.2.4", Rounds: 2})
+	got := text(t, Report{Charts: []Chart{namespaced("home", "elsewhere", "")}, Helm: "4.2.4", Rounds: 2})
 
-	if !strings.Contains(got, "namespace default (idem's own, nothing claims this chart)") {
+	if !strings.Contains(got, "namespace elsewhere (idem's own, nothing claims this chart)") {
 		t.Errorf("Text() = %q, want the fallback owned up to", got)
 	}
 }
@@ -1569,5 +1569,59 @@ func TestVerboseExpandsThePotentialSectionToo(t *testing.T) {
 
 	if !strings.Contains(got, "templates/t8.yaml") {
 		t.Errorf("Text() = %q, want every potential finding", got)
+	}
+}
+
+func TestTheCleanRunSaysNothingAboutADefaultedNamespace(t *testing.T) {
+	// The modal case is "nothing claims this chart", so this clause printed on
+	// essentially every run — including the two-line success, where it is half
+	// the output and none of the news. Interesting when a manifest or the user
+	// decided it; noise when idem just picked the default.
+	got := text(t, Report{
+		Charts: []Chart{namespaced("home", DefaultNamespace, "")},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "namespace") {
+		t.Errorf("Text() = %q, want no namespace clause when idem simply defaulted", got)
+	}
+}
+
+func TestANamespaceSomeoneChoseIsStillReported(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{namespaced("home", "home", "apps/home.yaml")},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "namespace home") {
+		t.Errorf("Text() = %q, want a namespace the repository chose still named", got)
+	}
+}
+
+func TestANamespaceIdemChoseIsStillReportedWhenItIsNotTheDefault(t *testing.T) {
+	// Only the boring default goes quiet. Anything else idem picked is still
+	// worth saying, because the reader cannot infer it.
+	got := text(t, Report{
+		Charts: []Chart{namespaced("home", "somewhere-else", "")},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "somewhere-else") {
+		t.Errorf("Text() = %q, want it named", got)
+	}
+}
+
+func TestTheTwoFixBlocksAreNotSeparatedByADoubleBlank(t *testing.T) {
+	// The ArgoCD block ends with a trailing blank so an exit-code line does not
+	// read as part of the YAML; the Flux block then opens with its own. Two in
+	// a row is a rendering seam, and it shows on the most-copied output there
+	// is.
+	got := text(t, Report{
+		Charts: []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "\n\n\n") {
+		t.Errorf("Text() = %q, want no doubled blank line", got)
 	}
 }

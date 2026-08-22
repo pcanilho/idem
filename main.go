@@ -537,7 +537,7 @@ func specFor(ref chartref.Ref, t target, opt options, rel release) engine.Spec {
 // namespaced ignoreDifferences rule match in one place and not the other.
 // idem's own output has to be reproducible; that means saying which namespace,
 // not inheriting one.
-const defaultNamespace = "default"
+const defaultNamespace = report.DefaultNamespace
 
 // releaseNamespace decides the namespace a chart renders into, and what
 // decided it.

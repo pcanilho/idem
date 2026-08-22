@@ -541,6 +541,11 @@ func (r Report) depsNote() string {
 	return " · " + strings.Join(parts, ", ")
 }
 
+// DefaultNamespace is the namespace idem renders into when nothing claims the
+// chart. Named here because the report has to know which value is the boring
+// one that needs no explaining.
+const DefaultNamespace = "default"
+
 // NamespaceFromFlag marks a namespace the user gave on the command line, so
 // the provenance line credits the flag rather than inventing a file for it.
 const NamespaceFromFlag = "--namespace"
@@ -563,6 +568,12 @@ func (r Report) namespaceNote() string {
 
 	switch {
 	case ns == "":
+		return ""
+	case from == "" && ns == DefaultNamespace:
+		// idem picked the boring default and nothing claimed the chart, which
+		// is the modal case. Saying so on every run - including the two-line
+		// success, where it is half the output - is noise, and the reader
+		// loses nothing: the default is what "unsaid" means.
 		return ""
 	case from == "":
 		return fmt.Sprintf(" · namespace %s (idem's own, nothing claims this chart)", ns)
@@ -835,8 +846,11 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 		}
 	}
 
-	writeArgoRemediation(b, findings, show)
-	writeFluxRemediation(b, charts, show)
+	// Whether ArgoCD's block printed decides whether Flux's needs its own
+	// leading blank: the ArgoCD block already ends with one, and two in a row
+	// reads as a rendering seam on the most-copied output idem has.
+	wrote := writeArgoRemediation(b, findings, show)
+	writeFluxRemediation(b, charts, show, wrote)
 }
 
 // writeFluxRemediation emits driftDetection.ignore for the churn Flux will
@@ -848,7 +862,7 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 // trusted. Findings the ArgoCD condition saw count only when the Flux verdict
 // says Flux churns too; findings only the cluster condition saw always do,
 // because that verdict is an observation of exactly this engine.
-func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string) {
+func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string, afterArgo bool) {
 	if !shows(show, "flux") {
 		return
 	}
@@ -869,7 +883,10 @@ func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string) {
 		return
 	}
 
-	b.WriteString("\n  Add to your HelmRelease to stop the churn under Flux:\n\n")
+	if !afterArgo {
+		b.WriteString("\n")
+	}
+	b.WriteString("  Add to your HelmRelease to stop the churn under Flux:\n\n")
 	for line := range strings.SplitSeq(strings.TrimRight(remediate.FluxYAML(entries), "\n"), "\n") {
 		b.WriteString("    " + line + "\n")
 	}
@@ -890,14 +907,14 @@ func churnsUnder(verdicts []engine.Verdict, name string) bool {
 	return false
 }
 
-func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []string) {
+func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []string) bool {
 	if !shows(show, "argocd") {
-		return
+		return false
 	}
 
 	entries := remediate.Entries(findings)
 	if len(entries) == 0 {
-		return
+		return false
 	}
 
 	b.WriteString("\n  Add to your ArgoCD Application to stop the churn:\n\n")
@@ -916,6 +933,7 @@ func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []s
 	// Blank line so an exit-code line printed after the report does not read
 	// as part of the YAML the user is about to paste.
 	b.WriteString("\n")
+	return true
 }
 
 // verdict is the sentence the whole run reduces to.

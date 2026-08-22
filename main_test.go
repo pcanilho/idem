@@ -856,16 +856,21 @@ func TestAChartNoApplicationClaimsRendersIntoAStatedDefault(t *testing.T) {
 	requireHelm(t)
 
 	// Whatever idem picks must not depend on the machine it runs on, and it
-	// has to admit that it picked.
+	// has to be recoverable. Reported through the machine contract rather than
+	// the provenance line: "idem defaulted the namespace" is the modal case,
+	// and printing it on every run made the two-line success half boilerplate.
 	dir := tree(t, map[string]string{
 		"charts/owned/Chart.yaml":               ownedChart,
 		"charts/owned/templates/configmap.yaml": ownedTemplate,
 	})
 
-	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/owned"))
+	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/owned"), "-o", "json")
 
-	if !strings.Contains(stdout, "namespace default (idem's own") {
-		t.Errorf("stdout = %q, want the fallback named and owned up to", stdout)
+	if !strings.Contains(stdout, `"namespace": "default"`) {
+		t.Errorf("stdout = %q, want the namespace idem chose still recorded", stdout)
+	}
+	if strings.Contains(stdout, `"from"`) {
+		t.Errorf("stdout = %q, want no source claimed for a namespace nobody chose", stdout)
 	}
 }
 
