@@ -44,8 +44,11 @@ import (
 // Exit codes. Findings are informative by default: a chart using `lookup` is
 // correct Helm, so failing the build by default would often simply be wrong.
 // Exit 2 is the exception and is never negotiable.
-// maxRounds caps --rounds. See the note at its use.
-const maxRounds = 20
+// maxRounds caps --rounds, and maxJobs --jobs. See the notes at their uses.
+const (
+	maxRounds = 20
+	maxJobs   = 256
+)
 
 const (
 	exitOK      = 0
@@ -172,6 +175,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(operands) == 0 {
 		writeHelp(stdout, fs)
 		return exitOK
+	}
+
+	// --jobs is validated here as well as coerced in scan.resolveJobs, and the
+	// two are not redundant: the package boundary defends itself, while this
+	// refuses a value the user meant something by. Silently turning `--jobs 0`
+	// into NumCPU gave the opposite of what was asked for and said nothing, and
+	// `--jobs 999999` was honoured literally.
+	if opt.jobs < 1 || opt.jobs > maxJobs {
+		fmt.Fprintf(stderr, "idem: --jobs is %d: it takes 1 to %d renders at once\n", opt.jobs, maxJobs)
+		return exitFatal
 	}
 
 	// The verbs. Disambiguated by disk, the same way a chart reference is: a
@@ -501,6 +514,12 @@ func runDiff(files []string, opt options, stdout, stderr io.Writer) int {
 
 	result, err := check.Compare(rounds)
 	if err != nil {
+		// Unwrapped once: check.Compare frames its errors as "comparing round 1
+		// against round N", which is true of a chart rendered N times and
+		// meaningless here - `idem diff` has two files and no rounds at all.
+		if inner := errors.Unwrap(err); inner != nil {
+			err = inner
+		}
 		fmt.Fprintf(stderr, "idem: comparing %s and %s: %v\n", files[0], files[1], err)
 		return exitFatal
 	}

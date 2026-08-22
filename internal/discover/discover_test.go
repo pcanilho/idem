@@ -257,3 +257,39 @@ func TestASymlinkLoopTerminates(t *testing.T) {
 		t.Errorf("Charts() found %d charts, want 1: %+v", len(got), got)
 	}
 }
+
+// One unreadable directory must not discard every chart in the tree.
+//
+// Charts returned WalkDir's error verbatim, so a single `chmod 000` directory
+// anywhere under the root aborted the run with `idem: open secret: permission
+// denied` and exit 2 - every readable chart thrown away, and the printed path a
+// bare relative name nobody can open.
+//
+// A directory idem cannot enter holds no charts it can check. That is a gap in
+// coverage, not a reason to check nothing.
+func TestAnUnreadableDirectoryDoesNotDiscardTheRest(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads unreadable directories")
+	}
+
+	root := t.TempDir()
+	chart(t, filepath.Join(root, "good"), "good")
+
+	locked := filepath.Join(root, "secret")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chart(t, filepath.Join(locked, "hidden"), "hidden")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Skipf("cannot make a directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	got, err := Charts(root)
+	if err != nil {
+		t.Fatalf("Charts() = %v, want the readable charts rather than an error", err)
+	}
+	if len(got) != 1 || got[0].Name != "good" {
+		t.Errorf("Charts() = %+v, want just the readable chart", got)
+	}
+}

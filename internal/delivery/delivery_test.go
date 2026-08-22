@@ -1526,3 +1526,80 @@ spec:
 		t.Errorf("Rules = %+v, want the second document's ignoreDifferences", cfg.Rules)
 	}
 }
+
+// A file too large to be a delivery manifest is not read into memory.
+//
+// Load walked every .yaml under the repository root, os.ReadFile'd it whole,
+// and then mentionsDeliveryKind did string(body) - doubling it. Measured: 3.1GB
+// resident to check ONE small chart, in a repository that happened to contain an
+// unrelated 1.5GB YAML file. And delivery.Root climbs to the nearest ancestor
+// .git, so a dotfiles repository at $HOME makes that every YAML in the home
+// directory.
+//
+// An Application or a HelmRelease is a few kilobytes. Anything past the cap is
+// something else, and idem does not need to hold it to know that.
+func TestAnEnormousFileIsNotReadIntoMemory(t *testing.T) {
+	dir := t.TempDir()
+
+	// A REAL Application, buried under padding that pushes the file past the
+	// cap. If the file is read it lands in Files; if it is skipped on size it
+	// does not. Asserting on Files alone would pass vacuously - padding parses
+	// to no documents, so an unparsed giant is indistinguishable from a
+	// skipped one unless the giant actually contains something.
+	padding := strings.Repeat("# padding\n", (maxManifestBytes/9)+1024)
+	write(t, dir, "junk/huge.yaml", padding+withDestination)
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	cfg := load(t, dir)
+
+	if slices.Contains(cfg.Files, "junk/huge.yaml") {
+		t.Errorf("Files = %v, want the oversized file skipped", cfg.Files)
+	}
+	if !slices.Contains(cfg.Files, "apps/home.yaml") {
+		t.Errorf("Files = %v, want the real manifest still read", cfg.Files)
+	}
+}
+
+// A manifest just under the cap is still read: the guard must not become a
+// silent size limit on ordinary ApplicationSets, which can carry large inline
+// values blocks.
+func TestALargeButPlausibleManifestIsStillRead(t *testing.T) {
+	dir := t.TempDir()
+	padding := strings.Repeat("# padding to make this big but plausible\n", 4096)
+	write(t, dir, "apps/home.yaml", padding+withDestination)
+
+	if !slices.Contains(load(t, dir).Files, "apps/home.yaml") {
+		t.Error("a large but plausible manifest was skipped")
+	}
+}
+
+// Load's own comment says an unreadable file is not a reason to abandon the
+// scan, and its walk returned the error anyway - so one chmod 000 directory
+// discarded ALL delivery config. That has the same shape as losing the file to
+// a parse error: the suppression vanishes and the namespace reverts, except
+// here it also printed an error and turned --strict red.
+func TestAnUnreadableDirectoryDoesNotDiscardTheDeliveryConfig(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads unreadable directories")
+	}
+
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	locked := filepath.Join(dir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Skipf("cannot make a directory unreadable here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() = %v, want the readable config rather than an error", err)
+	}
+	if !slices.Contains(cfg.Files, "apps/home.yaml") {
+		t.Errorf("Files = %v, want the readable manifest", cfg.Files)
+	}
+}

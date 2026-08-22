@@ -10,6 +10,7 @@
 package delivery
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"maps"
@@ -31,6 +32,20 @@ import (
 
 // respectOption is the sync option without which ignoreDifferences hides the
 // diff but selfHeal re-applies the object anyway.
+// maxManifestBytes caps a file idem will read looking for delivery config.
+//
+// Load walks every .yaml under the repository root, and it used to read each
+// one whole - then mentionsDeliveryKind did string(body), doubling it.
+// Measured: 3.1GB resident to check ONE small chart, in a repository that
+// happened to hold an unrelated 1.5GB YAML. delivery.Root climbs to the nearest
+// ancestor .git, so a dotfiles repository at $HOME makes that every YAML in the
+// home directory.
+//
+// 4 MiB is far past any real Application or HelmRelease - the largest thing one
+// carries is an inline values block - and comfortably past ArgoCD's own limits
+// on the objects it stores.
+const maxManifestBytes = 4 << 20
+
 const respectOption = "RespectIgnoreDifferences=true"
 
 // createNamespaceOption is a syncOption; serverSideDiffOption is NOT - it lives
@@ -286,8 +301,16 @@ func Load(root string) (Config, error) {
 	engines := make(map[string]struct{})
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		// Matching the comment on the read below, which said this all along:
+		// an unreadable entry tells idem nothing, and is not a reason to
+		// abandon the scan. Returning it discarded ALL delivery config over one
+		// unreadable directory - so the suppression vanished, the namespace
+		// reverted, and --strict went red.
 		if err != nil {
-			return err
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			if d.Name() == ".git" {
@@ -296,6 +319,12 @@ func Load(root string) (Config, error) {
 			return nil
 		}
 		if ext := filepath.Ext(path); ext != ".yaml" && ext != ".yml" {
+			return nil
+		}
+
+		// Size before reading: a file past the cap is not a delivery manifest,
+		// and idem does not need to hold it in memory to know that.
+		if info, infoErr := d.Info(); infoErr != nil || info.Size() > maxManifestBytes {
 			return nil
 		}
 
@@ -346,9 +375,10 @@ func mapKeys(m map[string]struct{}) func(func(string) bool) {
 // mentionsDeliveryKind is a cheap pre-filter, so a repository of chart
 // templates is not fully YAML-parsed to discover it holds no Applications.
 func mentionsDeliveryKind(body []byte) bool {
-	text := string(body)
-	for _, kind := range []string{"Application", "HelmRelease"} {
-		if strings.Contains(text, kind) {
+	// bytes, not string(body): converting copied the whole file a second time,
+	// on every YAML in the repository, purely to run Contains over it.
+	for _, kind := range [][]byte{[]byte("Application"), []byte("HelmRelease")} {
+		if bytes.Contains(body, kind) {
 			return true
 		}
 	}

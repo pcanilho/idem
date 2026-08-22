@@ -1579,3 +1579,26 @@ func TestAnImplausibleRoundCountIsRefused(t *testing.T) {
 		t.Errorf("stderr = %q, want the flag named", stderr)
 	}
 }
+
+// --jobs validates like --rounds, at both ends.
+//
+// It did neither: 0 and negatives were silently coerced to NumCPU by
+// resolveJobs - so a user who typed --jobs 0 believing they had disabled
+// concurrency got the opposite and was never told - and --jobs 999999 was
+// honoured literally, spawning helm processes until something gave out.
+//
+// resolveJobs keeps its own coercion: it is the package boundary's defence and
+// is independently tested. This is the CLI refusing to accept the value in the
+// first place.
+func TestAnImplausibleJobCountIsRefused(t *testing.T) {
+	for _, jobs := range []string{"0", "-3", "999999"} {
+		code, _, stderr := invoke(t, "--jobs", jobs, "./chart")
+
+		if code != exitFatal {
+			t.Errorf("--jobs %s exit = %d, want %d", jobs, code, exitFatal)
+		}
+		if !strings.Contains(stderr, "--jobs") {
+			t.Errorf("--jobs %s stderr = %q, want the flag named", jobs, stderr)
+		}
+	}
+}

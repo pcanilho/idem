@@ -1997,3 +1997,46 @@ func TestTheVerdictNamesTheEngineTheReaderRuns(t *testing.T) {
 		})
 	}
 }
+
+// An object path has no length bound, and the column layout is the whole
+// readability strategy.
+//
+// A deeply nested difference printed a single 4,000+ character line, destroying
+// the alignment every other rule in this package protects. Unlike a FILE path -
+// which is never truncated, because Phase 1 made printed paths openable - an
+// object path is not something the reader opens: it is a coordinate, and the
+// interesting end is the leaf.
+//
+// Clipped in the MIDDLE for that reason: `.spec…[3].image` says far more than
+// the first sixty characters of `.spec.template.spec.containers…` would.
+func TestADeeplyNestedPathStaysWithinTheColumn(t *testing.T) {
+	var deep strings.Builder
+	deep.WriteString(".data")
+	for range 500 {
+		deep.WriteString(".nested")
+	}
+
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:     "deep",
+			Findings: []check.Finding{finding("deep/templates/cm.yaml", "cm", deep.String()+".leaf")},
+		}},
+		Helm: "4.2.4", Rounds: 3,
+	})
+
+	// The findings section only. The remediation block below it carries the
+	// same path as a jsonPointer, and that is CONFIG THE READER PASTES - a
+	// clipped pointer addresses nothing, silently, which is the failure the
+	// whole remediate package is written to avoid. Same rule as a file path:
+	// what the reader acts on is never truncated, what they merely read is.
+	findings, _, _ := strings.Cut(got, "Add to your ArgoCD Application")
+	for line := range strings.SplitSeq(findings, "\n") {
+		if n := len([]rune(line)); n > 200 {
+			t.Errorf("line is %d columns, want it clipped:\n%.120s…", n, line)
+		}
+	}
+	// The leaf survives: that is the part that identifies the field.
+	if !strings.Contains(findings, "leaf") {
+		t.Errorf("Text() = %q, want the leaf segment kept", findings)
+	}
+}

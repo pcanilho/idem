@@ -89,8 +89,16 @@ func walk(root, dir string, seen map[string]bool, out *[]Chart) error {
 	seen[real] = true
 
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		// A directory idem cannot enter holds no charts it can check. That is a
+		// gap in coverage, not a reason to check nothing - returning the error
+		// discarded every readable chart in the tree and exited 2 over one
+		// chmod 000 directory. Skipped rather than reported: this walk also
+		// crosses whatever a user happens to keep beside their charts.
 		if err != nil {
-			return err
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
 
 		// A symlink: resolve it, and walk it if it is a directory.

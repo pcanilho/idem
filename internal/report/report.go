@@ -581,10 +581,10 @@ func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding, limit
 	shown := min(len(f.Change.Paths), limit)
 	for i, p := range f.Change.Paths[:shown] {
 		if i == 0 {
-			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, p.Path, cost)
+			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, clipPath(p.Path.String()), cost)
 			continue
 		}
-		fmt.Fprintf(tw, "    \t%s\t\n", p.Path)
+		fmt.Fprintf(tw, "    \t%s\t\n", clipPath(p.Path.String()))
 	}
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
 		fmt.Fprintf(tw, "    \t… and %d more %s\t\n", elided, plural(elided, "field", "fields"))
@@ -848,6 +848,31 @@ func clip(value any, limit int) string {
 		return text
 	}
 	return string([]rune(text)[:maxValue]) + "…"
+}
+
+// maxPath is how many columns an object path may occupy.
+const maxPath = 80
+
+// clipPath shortens an object path from the MIDDLE.
+//
+// An object path has no length bound - a deeply nested difference printed a
+// single 4,000-character line, destroying the column alignment that the
+// no-emoji and no-box-drawing rules exist to protect.
+//
+// Middle, not end, and unlike a FILE path it is clipped at all. A file path is
+// never truncated because Phase 1 made printed paths openable and that wins. An
+// object path is not opened: it is a coordinate, and both ends carry meaning -
+// the root says which section, the leaf says which field. `.spec…[3].image`
+// identifies far more than the first eighty characters of
+// `.spec.template.spec.containers…` would.
+func clipPath(p string) string {
+	r := []rune(p)
+	if len(r) <= maxPath {
+		return p
+	}
+	keep := maxPath - 1
+	head := keep / 2
+	return string(r[:head]) + "…" + string(r[len(r)-(keep-head):])
 }
 
 // heading names a chart, qualified by its directory only when another chart in
