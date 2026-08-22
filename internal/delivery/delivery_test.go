@@ -606,7 +606,7 @@ spec:
         - values-prod.yaml
         - /shared/base.yaml
       valuesObject:
-        cluster: truenas
+        cluster: prod-a
         replicas: 3
       parameters:
         - name: image.tag
@@ -619,7 +619,7 @@ func TestTheReleaseNameComesFromTheApplication(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "apps/home.yaml", withHelmValues)
 
-	if got := load(t, dir).ValuesFor("charts/home").Release; got != "home-release" {
+	if got := load(t, dir).ValuesFor("charts/home").Name; got != "home-release" {
 		t.Errorf("Release = %q, want home-release", got)
 	}
 }
@@ -654,8 +654,8 @@ func TestValuesObjectIsCarriedAsAMap(t *testing.T) {
 
 	got := load(t, dir).ValuesFor("charts/home").Inline
 
-	if got["cluster"] != "truenas" {
-		t.Errorf("Inline[cluster] = %v, want truenas", got["cluster"])
+	if got["cluster"] != "prod-a" {
+		t.Errorf("Inline[cluster] = %v, want prod-a", got["cluster"])
 	}
 	if got["replicas"] != 3 {
 		t.Errorf("Inline[replicas] = %v, want 3 - the type has to survive", got["replicas"])
@@ -699,7 +699,7 @@ spec:
   template:
     spec:
       source:
-        path: charts/platform/flux-bootstrap
+        path: charts/platform/agent
         helm:
           valuesObject:
             cluster: '{{ .name }}'
@@ -708,12 +708,211 @@ spec:
               value: '{{ .enabled }}'
 `)
 
-	got := load(t, dir).ValuesFor("charts/platform/flux-bootstrap")
+	got := load(t, dir).ValuesFor("charts/platform/agent")
 
 	if len(got.Inline) != 0 || len(got.Sets) != 0 {
 		t.Errorf("Inline = %v, Sets = %v, want neither guessed at", got.Inline, got.Sets)
 	}
 	if !slices.Contains(got.Templated, "cluster") || !slices.Contains(got.Templated, "webRoute.enabled") {
 		t.Errorf("Templated = %v, want both keys recorded as unresolvable", got.Templated)
+	}
+}
+
+// An ApplicationSet template is not a release — it is a template for many, one
+// per generator element. idem expands the generators whose input is the
+// repository, because it has the repository; every other generator reads state
+// idem cannot see, and those releases are reported as unconstructible rather
+// than invented.
+
+const filesGenerator = `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: tenants}
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://example.com/repo.git
+        files:
+          - path: "config/tenants/*.yaml"
+  template:
+    spec:
+      destination:
+        namespace: '{{ .tenant }}-system'
+      source:
+        path: charts/app
+        helm:
+          releaseName: '{{ .tenant }}'
+          valueFiles:
+            - '/{{ .path.path }}/{{ .path.filename }}'
+`
+
+func TestAGitFilesGeneratorIsOneReleasePerMatchedFile(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", filesGenerator)
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+	write(t, dir, "config/tenants/beta.yaml", "tenant: beta\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 2 {
+		t.Fatalf("ReleasesFor() returned %d releases, want one per matched file: %+v", len(got), got)
+	}
+	var names []string
+	for _, r := range got {
+		names = append(names, r.Name)
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"alpha", "beta"}) {
+		t.Errorf("release names = %v, want each element's own value", names)
+	}
+}
+
+func TestTheMatchedFileIsItselfAValuesFile(t *testing.T) {
+	// `.path.path` and `.path.filename` are the generator's metadata for the
+	// file it matched. Resolving them turns a templated valueFiles entry into
+	// a path that exists.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", filesGenerator)
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+	if !slices.Contains(got[0].ValueFiles, "config/tenants/alpha.yaml") {
+		t.Errorf("ValueFiles = %v, want the matched file", got[0].ValueFiles)
+	}
+	if got[0].Namespace != "alpha-system" {
+		t.Errorf("Namespace = %q, want alpha-system - resolved from the element", got[0].Namespace)
+	}
+}
+
+func TestEachReleaseNamesTheElementItCameFrom(t *testing.T) {
+	// Two releases of one chart are not a conflict to resolve; they are
+	// separate deployments, and a finding has to say which one it is about.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", filesGenerator)
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Instance != "config/tenants/alpha.yaml" {
+		t.Errorf("Instance = %+v, want the element identified", got)
+	}
+}
+
+func TestAGitDirectoriesGeneratorExpandsToo(t *testing.T) {
+	// The other generator whose input is the repository.
+	dir := t.TempDir()
+	write(t, dir, "apps/addons.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: addons}
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://example.com/repo.git
+        directories:
+          - path: "addons/*"
+  template:
+    spec:
+      source:
+        path: charts/app
+        helm:
+          releaseName: '{{ .path.basename }}'
+`)
+	write(t, dir, "addons/ingress/values.yaml", "x: 1\n")
+	write(t, dir, "addons/metrics/values.yaml", "x: 1\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 2 {
+		t.Fatalf("ReleasesFor() returned %d, want one per directory: %+v", len(got), got)
+	}
+}
+
+func TestAGeneratorReadingTheClusterIsNotExpanded(t *testing.T) {
+	// A clusters generator enumerates registered clusters, which live in the
+	// cluster. idem records the values it could not supply and invents none.
+	dir := t.TempDir()
+	write(t, dir, "apps/platform.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: platform}
+spec:
+  goTemplate: true
+  generators:
+    - clusters:
+        selector:
+          matchLabels: {platform: "true"}
+  template:
+    spec:
+      source:
+        path: charts/agent
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+`)
+
+	got := load(t, dir).ReleasesFor("charts/agent")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want the release still reported", got)
+	}
+	if len(got[0].Inline) != 0 {
+		t.Errorf("Inline = %v, want no invented value", got[0].Inline)
+	}
+	if !slices.Contains(got[0].Templated, "cluster") {
+		t.Errorf("Templated = %v, want the key idem could not supply", got[0].Templated)
+	}
+}
+
+func TestAGeneratorThatMatchesNothingProducesNoRelease(t *testing.T) {
+	// Not an error, and emphatically not one release with the template strings
+	// left unexpanded.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", filesGenerator)
+
+	if got := load(t, dir).ReleasesFor("charts/app"); len(got) != 0 {
+		t.Errorf("ReleasesFor() = %+v, want nothing to expand", got)
+	}
+}
+
+func TestLegacySubstitutionIsNotExpanded(t *testing.T) {
+	// Without goTemplate, ArgoCD uses its own fasttemplate substitution with
+	// different semantics. Guessing that it matches Go templates would make
+	// idem analyse a release ArgoCD never generates.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", strings.Replace(filesGenerator, "goTemplate: true", "goTemplate: false", 1))
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: alpha\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 || got[0].Name == "alpha" {
+		t.Errorf("ReleasesFor() = %+v, want no expansion without goTemplate", got)
+	}
+}
+
+func TestASubstitutionThatStaysTemplatedIsNotAccepted(t *testing.T) {
+	// The element resolved, but what it resolved TO is itself a template. idem
+	// cannot tell whose template it is or who expands it next, so it does not
+	// hand it to helm as though the repository had stated a value.
+	dir := t.TempDir()
+	write(t, dir, "apps/tenants.yaml", filesGenerator)
+	write(t, dir, "config/tenants/alpha.yaml", "tenant: '{{ .Release.Name }}'\n")
+
+	got := load(t, dir).ReleasesFor("charts/app")
+
+	if len(got) != 1 {
+		t.Fatalf("ReleasesFor() = %+v, want one release", got)
+	}
+	if got[0].Name != "" {
+		t.Errorf("Name = %q, want it left unresolved rather than passed through", got[0].Name)
+	}
+	if len(got[0].Templated) == 0 {
+		t.Error("Templated is empty, want idem to record what it could not resolve rather than drop it")
 	}
 }

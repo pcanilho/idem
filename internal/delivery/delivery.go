@@ -11,11 +11,13 @@ package delivery
 
 import (
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"text/template"
 
 	"gopkg.in/yaml.v3"
 
@@ -82,10 +84,19 @@ type Values struct {
 	Path string
 	File string
 
-	// Release is spec.source.helm.releaseName. .Release.Name is in the name of
+	// Instance names the generator element this release came from - the file
+	// or directory a git generator matched - and is empty for a plain
+	// Application. One ApplicationSet is many releases and they are not
+	// interchangeable, so a finding has to be able to say which.
+	Instance string
+
+	// Namespace is where this release deploys, resolved per element.
+	Namespace string
+
+	// Name is spec.source.helm.releaseName. .Release.Name is in the name of
 	// nearly every object a chart produces, so getting it from the chart name
 	// instead reports identities the cluster will never have.
-	Release string
+	Name string
 
 	// ValueFiles are repository-relative, in order: later files win, so the
 	// order is semantic. A leading slash in the manifest means "from the repo
@@ -122,6 +133,20 @@ type Config struct {
 // nobody deploys. The first is used and the rest ignored only when they agree
 // on being absent; otherwise nothing is returned.
 func (c Config) ValuesFor(chartPath string) Values {
+	found := c.ReleasesFor(chartPath)
+	if len(found) != 1 {
+		return Values{}
+	}
+	return found[0]
+}
+
+// ReleasesFor is every release of this chart the delivery config describes.
+//
+// More than one is the normal shape for an ApplicationSet: one release per
+// generator element, each with its own values, namespace and release name.
+// They are not a conflict to resolve - they are separate deployments, and
+// idem's unit of analysis is a release rather than a chart.
+func (c Config) ReleasesFor(chartPath string) []Values {
 	var found []Values
 	for _, v := range c.Values {
 		if v.Path == "" || v.Path != chartPath {
@@ -129,10 +154,7 @@ func (c Config) ValuesFor(chartPath string) Values {
 		}
 		found = append(found, v)
 	}
-	if len(found) != 1 {
-		return Values{}
-	}
-	return found[0]
+	return found
 }
 
 // NamespaceFor is the namespace the delivery config says this chart deploys
@@ -212,7 +234,7 @@ func Load(root string) (Config, error) {
 			rel = path
 		}
 
-		rules, dests, values, found := parse(body, rel)
+		rules, dests, values, found := parse(root, body, rel)
 		if len(found) == 0 {
 			return nil
 		}
@@ -303,10 +325,33 @@ type appSpec struct {
 	SyncPolicy        *syncPolicy        `yaml:"syncPolicy"`
 }
 
+// gitGenerator is the only generator shape idem expands: its input is the
+// repository, which idem already has. Every other generator reads state idem
+// cannot see.
+type gitGenerator struct {
+	Files []struct {
+		Path string `yaml:"path"`
+	} `yaml:"files"`
+	Directories []struct {
+		Path    string `yaml:"path"`
+		Exclude bool   `yaml:"exclude"`
+	} `yaml:"directories"`
+}
+
 type document struct {
 	Kind string `yaml:"kind"`
 	Spec struct {
 		appSpec `yaml:",inline"`
+
+		// GoTemplate selects Go text/template substitution. Without it ArgoCD
+		// uses its own fasttemplate pass with different semantics, and
+		// assuming they agree would make idem analyse a release ArgoCD never
+		// generates.
+		GoTemplate bool `yaml:"goTemplate"`
+
+		Generators []struct {
+			Git *gitGenerator `yaml:"git"`
+		} `yaml:"generators"`
 
 		// An ApplicationSet carries the same fields one level deeper. Reading
 		// only spec.ignoreDifferences would silently miss every app an
@@ -328,7 +373,7 @@ type document struct {
 //
 // A document that will not decode is skipped rather than reported: most YAML
 // in a chart repository is Go template source and was never meant to parse.
-func parse(body []byte, file string) ([]Rule, []Destination, []Values, []string) {
+func parse(root string, body []byte, file string) ([]Rule, []Destination, []Values, []string) {
 	var rules []Rule
 	var dests []Destination
 	var values []Values
@@ -349,10 +394,31 @@ func parse(body []byte, file string) ([]Rule, []Destination, []Values, []string)
 			values = append(values, argoValues(doc.Spec.appSpec, file)...)
 		case "ApplicationSet":
 			engines = append(engines, "argocd")
-			if doc.Spec.Template != nil {
-				rules = append(rules, argoRules(doc.Spec.Template.Spec, file)...)
+			if doc.Spec.Template == nil {
+				break
+			}
+
+			// Rules come from the template as written: a suppression is about
+			// a shape, and every generated Application shares that shape.
+			rules = append(rules, argoRules(doc.Spec.Template.Spec, file)...)
+
+			// Values and namespaces are not shared - they are what differs per
+			// element - so they come from expansion where idem can expand.
+			elements, ok := repoElements(root, doc)
+			if !ok {
 				dests = append(dests, argoDestinations(doc.Spec.Template.Spec, file)...)
 				values = append(values, argoValues(doc.Spec.Template.Spec, file)...)
+				break
+			}
+			for _, el := range elements {
+				spec, resolved := resolveSpec(doc.Spec.Template.Spec, el)
+				dests = append(dests, argoDestinations(spec, file)...)
+				for _, v := range argoValues(spec, file) {
+					v.Instance = el.name
+					v.Namespace = namespaceOf(spec)
+					v.Templated = append(v.Templated, resolved...)
+					values = append(values, v)
+				}
 			}
 		case "HelmRelease":
 			engines = append(engines, "flux")
@@ -386,7 +452,7 @@ func argoValues(spec appSpec, file string) []Values {
 
 		v := Values{Path: src.Path, File: file}
 		if !templated(src.Helm.ReleaseName) {
-			v.Release = src.Helm.ReleaseName
+			v.Name = src.Helm.ReleaseName
 		}
 
 		for _, f := range src.Helm.ValueFiles {
@@ -423,6 +489,217 @@ func argoValues(spec appSpec, file string) []Values {
 		out = append(out, v)
 	}
 	return out
+}
+
+// element is one thing a generator produced: the data its templates see, and
+// a name for the thing itself.
+type element struct {
+	name string
+	data map[string]any
+}
+
+// repoElements expands the generators whose input is the repository.
+//
+// ok is false when idem will not expand this ApplicationSet at all - a
+// generator that reads the cluster, an unsupported glob, or legacy
+// substitution - which is different from expanding it to nothing. The caller
+// reports the template unresolved rather than treating it as zero releases.
+func repoElements(root string, doc document) ([]element, bool) {
+	if !doc.Spec.GoTemplate || len(doc.Spec.Generators) == 0 {
+		return nil, false
+	}
+
+	var out []element
+	for _, gen := range doc.Spec.Generators {
+		if gen.Git == nil {
+			// A generator idem cannot expand poisons the whole set: the
+			// elements it would have produced are missing, so expanding the
+			// rest would report a subset of the releases as if it were all.
+			return nil, false
+		}
+
+		for _, f := range gen.Git.Files {
+			matched, ok := matches(root, f.Path)
+			if !ok {
+				return nil, false
+			}
+			for _, rel := range matched {
+				out = append(out, fileElement(root, rel))
+			}
+		}
+		for _, d := range gen.Git.Directories {
+			matched, ok := matches(root, d.Path)
+			if !ok {
+				return nil, false
+			}
+			for _, rel := range matched {
+				if d.Exclude {
+					continue
+				}
+				out = append(out, element{name: rel, data: pathData(rel, "")})
+			}
+		}
+	}
+	return out, true
+}
+
+// matches globs a generator path against the repository.
+//
+// `**` is refused rather than approximated: filepath.Glob does not implement
+// it, and a pattern that quietly matches less than ArgoCD's would drop
+// releases without saying so.
+func matches(root, pattern string) ([]string, bool) {
+	if strings.Contains(pattern, "**") {
+		return nil, false
+	}
+
+	found, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+	if err != nil {
+		return nil, false
+	}
+
+	var out []string
+	for _, abs := range found {
+		rel, err := filepath.Rel(root, abs)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, filepath.ToSlash(rel))
+	}
+	slices.Sort(out)
+	return out, true
+}
+
+// fileElement is one matched file: its parsed contents, plus the path metadata
+// the generator injects over them. Injected last, which is ArgoCD's own
+// precedence - a `path` key in the file cannot shadow it.
+func fileElement(root, rel string) element {
+	data := map[string]any{}
+	if body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel))); err == nil {
+		var parsed map[string]any
+		if yaml.Unmarshal(body, &parsed) == nil {
+			data = parsed
+		}
+	}
+
+	maps.Copy(data, pathData(path.Dir(rel), path.Base(rel)))
+	return element{name: rel, data: data}
+}
+
+// pathData is the generator's own metadata for a matched path.
+func pathData(dir, filename string) map[string]any {
+	meta := map[string]any{
+		"path":     dir,
+		"basename": path.Base(dir),
+		"segments": strings.Split(dir, "/"),
+	}
+	if filename != "" {
+		meta["filename"] = filename
+	}
+	return map[string]any{"path": meta}
+}
+
+// resolveSpec substitutes an element into the fields that decide what gets
+// rendered, returning the resolved spec and the keys that would not resolve.
+//
+// Only these fields: idem is not reimplementing ArgoCD's controller, it is
+// working out what one release renders with.
+func resolveSpec(spec appSpec, el element) (appSpec, []string) {
+	var unresolved []string
+	sub := func(in string) string {
+		out, ok := substitute(in, el.data)
+		if !ok {
+			unresolved = append(unresolved, in)
+			return in
+		}
+		return out
+	}
+
+	if spec.Destination != nil {
+		dest := *spec.Destination
+		dest.Namespace = sub(dest.Namespace)
+		spec.Destination = &dest
+	}
+	spec.Source = resolveSource(spec.Source, sub)
+	sources := make([]source, 0, len(spec.Sources))
+	for _, src := range spec.Sources {
+		sources = append(sources, *resolveSource(&src, sub))
+	}
+	spec.Sources = sources
+
+	return spec, unresolved
+}
+
+func resolveSource(src *source, sub func(string) string) *source {
+	if src == nil {
+		return nil
+	}
+
+	out := *src
+	out.Path = sub(out.Path)
+	if out.Helm == nil {
+		return &out
+	}
+
+	helm := *out.Helm
+	helm.ReleaseName = sub(helm.ReleaseName)
+	helm.Values = sub(helm.Values)
+
+	files := make([]string, 0, len(helm.ValueFiles))
+	for _, f := range helm.ValueFiles {
+		files = append(files, sub(f))
+	}
+	helm.ValueFiles = files
+
+	object := make(map[string]any, len(helm.ValuesObject))
+	for key, val := range helm.ValuesObject {
+		if text, ok := val.(string); ok {
+			object[key] = sub(text)
+			continue
+		}
+		object[key] = val
+	}
+	helm.ValuesObject = object
+
+	for i, p := range helm.Parameters {
+		helm.Parameters[i].Value = sub(p.Value)
+	}
+
+	out.Helm = &helm
+	return &out
+}
+
+// substitute renders one templated string against an element.
+//
+// missingkey=error, so a key the element does not carry fails loudly here
+// rather than rendering as "<no value>" and being handed to helm as if the
+// repository had said it.
+func substitute(in string, data map[string]any) (string, bool) {
+	if !templated(in) {
+		return in, true
+	}
+
+	tmpl, err := template.New("").Option("missingkey=error").Parse(in)
+	if err != nil {
+		return in, false
+	}
+
+	var out strings.Builder
+	if err := tmpl.Execute(&out, data); err != nil {
+		return in, false
+	}
+	if templated(out.String()) {
+		return in, false
+	}
+	return out.String(), true
+}
+
+// namespaceOf is the destination namespace a resolved template names.
+func namespaceOf(spec appSpec) string {
+	if spec.Destination == nil || templated(spec.Destination.Namespace) {
+		return ""
+	}
+	return spec.Destination.Namespace
 }
 
 // valueFilePath resolves a valueFiles entry to a repository-relative path.

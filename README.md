@@ -333,6 +333,46 @@ Use both together: annotations for what has a line, one comment for the rest. Gi
 how many annotations it will render per run, so `-o github` prints the cap it hit rather than
 letting findings disappear silently.
 
+### What a chart is rendered with
+
+`idem`'s unit of analysis is a **release** — chart plus values plus engine — so rendering a chart
+with no values at all analyses a release nobody deploys. When an `Application` or
+`ApplicationSet` claims the chart, `idem` renders it the way that manifest says:
+`spec.source.helm.releaseName`, `valueFiles` (a leading slash is repo-root relative),
+`values`, `valuesObject` and `parameters`, with your own `-f` and `--set` last so a flag typed at
+the terminal still wins.
+
+**ApplicationSets are expanded where their input is the repository.** A `git.files` or
+`git.directories` generator enumerates files `idem` already has, so each matched element becomes
+its own release — its own values, namespace and release name — and each is checked separately:
+
+```console
+$ idem ./charts
+
+  clusters (config/tenants/alpha.yaml)   …
+  clusters (config/tenants/beta.yaml)    …
+```
+
+Every other generator — `clusters`, `list`, `matrix`, `scmProvider` — reads state that is not in
+the repository. `idem` does not invent an element for it. If the chart still renders, the
+findings are reported with a note that this is not the release you deploy; if the chart's own
+`required` guards fire, that is **not** a broken chart and **not** exit 2:
+
+```console
+  could not be built — values come from a generator idem cannot expand
+
+    flux-bootstrap      needs cluster, webRoute.enabled
+    storage-bootstrap   needs cluster
+
+      The chart is not at fault: its guards fired because idem withheld a value.
+```
+
+It is counted (`summary.unconstructed` in `-o json`) so the gap cannot pass unnoticed, and it
+never fails the run: `idem` could not construct the release, which is a limit of `idem` rather
+than a defect in your chart. Legacy (non-`goTemplate`) ApplicationSets are not expanded either —
+ArgoCD substitutes those with different semantics, and guessing they agree would mean analysing a
+release ArgoCD never generates.
+
 ### Which namespace a chart renders into
 
 `.Release.Namespace` is not cosmetic: it appears in object names, in labels, in `lookup` calls,

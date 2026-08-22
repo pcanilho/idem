@@ -25,13 +25,14 @@ type jsonReport struct {
 	// one" without being told.
 	Releases []jsonRelease `json:"releases,omitempty"`
 
-	Summary     jsonSummary       `json:"summary"`
-	Findings    []jsonFinding     `json:"findings"`
-	Suppressed  []jsonSuppressed  `json:"suppressed,omitempty"`
-	Potential   []jsonPotential   `json:"potential,omitempty"`
-	Unevaluable []jsonUnevaluable `json:"unevaluable,omitempty"`
-	Verdicts    []jsonVerdict     `json:"verdicts,omitempty"`
-	Remediation []jsonEntry       `json:"remediation,omitempty"`
+	Summary       jsonSummary         `json:"summary"`
+	Findings      []jsonFinding       `json:"findings"`
+	Suppressed    []jsonSuppressed    `json:"suppressed,omitempty"`
+	Potential     []jsonPotential     `json:"potential,omitempty"`
+	Unevaluable   []jsonUnevaluable   `json:"unevaluable,omitempty"`
+	Unconstructed []jsonUnconstructed `json:"unconstructed,omitempty"`
+	Verdicts      []jsonVerdict       `json:"verdicts,omitempty"`
+	Remediation   []jsonEntry         `json:"remediation,omitempty"`
 }
 
 type jsonRelease struct {
@@ -46,6 +47,14 @@ type jsonRelease struct {
 	// and absent when idem defaulted. Absent means idem chose, which is the
 	// one case a consumer must not read as a fact about the repository.
 	From string `json:"from,omitempty"`
+}
+
+// jsonUnconstructed is a release idem could not build, and the values it
+// lacked. Separate from unevaluable because the two need opposite responses.
+type jsonUnconstructed struct {
+	Chart  string   `json:"chart"`
+	Needs  []string `json:"needs"`
+	Reason string   `json:"reason,omitempty"`
 }
 
 type jsonSummary struct {
@@ -65,6 +74,12 @@ type jsonSummary struct {
 	ChurningWithLookup int `json:"churningWithLookup"`
 
 	Unevaluable int `json:"unevaluable"`
+
+	// Unconstructed counts releases idem could not build because their values
+	// come from a generator it cannot expand. Never fatal, always counted: a
+	// gap in what idem checked is not a defect in the chart, and not silence
+	// either.
+	Unconstructed int `json:"unconstructed"`
 }
 
 type jsonFinding struct {
@@ -155,6 +170,7 @@ func (r Report) JSON(w io.Writer) error {
 			Suppressed:         suppressedCount(r),
 			ChurningWithLookup: r.ChurningWithLookup(),
 			Unevaluable:        r.Unevaluable(),
+			Unconstructed:      r.Unconstructed(),
 		},
 		// Never null: a consumer iterating .findings should not have to guard
 		// against the clean case.
@@ -164,7 +180,12 @@ func (r Report) JSON(w io.Writer) error {
 	// A chart that would not render is reported whatever the ratchet says, so
 	// these come from every chart rather than from those in scope.
 	for _, c := range r.Charts {
-		if c.Err != nil {
+		switch {
+		case unbuilt(c):
+			out.Unconstructed = append(out.Unconstructed, jsonUnconstructed{
+				Chart: c.Name, Needs: c.Unresolved, Reason: c.Err.Error(),
+			})
+		case c.Err != nil:
 			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
 		}
 	}

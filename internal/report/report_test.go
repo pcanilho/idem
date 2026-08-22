@@ -1285,3 +1285,89 @@ func TestWithoutARatchetTheRenderFailureClauseStaysPlain(t *testing.T) {
 		t.Errorf("Text() = %q, want no ratchet wording when no revision was given", got)
 	}
 }
+
+// A chart that renders perfectly well given the values its delivery config
+// supplies is not a broken chart. When those values come from a generator idem
+// cannot expand, idem could not BUILD the release — a different statement from
+// "this chart could not be rendered", and not the same exit code.
+
+func unbuiltChart(name string, keys ...string) Chart {
+	return Chart{
+		Name:       name,
+		Err:        errors.New(`execution error: .Values.cluster is required`),
+		Unresolved: keys,
+	}
+}
+
+func TestAReleaseIdemCouldNotBuildIsNotAnUnrenderableChart(t *testing.T) {
+	r := Report{Charts: []Chart{unbuiltChart("agent", "cluster")}, Helm: "4.2.4", Rounds: 2}
+
+	if got := r.Unevaluable(); got != 0 {
+		t.Errorf("Unevaluable() = %d, want 0 - the chart was never the problem", got)
+	}
+	if got := r.Unconstructed(); got != 1 {
+		t.Errorf("Unconstructed() = %d, want 1", got)
+	}
+}
+
+func TestAnUnbuiltReleaseNamesTheValuesItLacked(t *testing.T) {
+	// Without the keys the reader cannot tell an idem limitation from a chart
+	// that genuinely will not render, and the two need opposite responses.
+	got := text(t, Report{Charts: []Chart{unbuiltChart("agent", "cluster")}, Helm: "4.2.4", Rounds: 2})
+
+	if !strings.Contains(got, "cluster") {
+		t.Errorf("Text() = %q, want the missing value named", got)
+	}
+	if !strings.Contains(got, "could not be built") {
+		t.Errorf("Text() = %q, want it stated as its own kind of gap", got)
+	}
+}
+
+func TestAnUnbuiltReleaseIsNotReportedAsUnrenderable(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{unbuiltChart("agent", "cluster")}, Helm: "4.2.4", Rounds: 2})
+
+	if strings.Contains(got, "could not be rendered") {
+		t.Errorf("Text() = %q, want it kept apart from a real render failure", got)
+	}
+}
+
+func TestTheVerdictSentenceCountsWhatCouldNotBeBuilt(t *testing.T) {
+	// Reported without being counted anywhere is how a coverage gap becomes
+	// invisible. It is not fatal, but it is not silent either.
+	got := text(t, Report{
+		Charts: []Chart{clean("app"), unbuiltChart("agent", "cluster")},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "1 could not be built") {
+		t.Errorf("Text() = %q, want the gap in the sentence", got)
+	}
+}
+
+func TestAChartThatFailedForItsOwnReasonsIsStillUnrenderable(t *testing.T) {
+	// No unresolved values, so nothing excuses it: this is exit 2 as before.
+	r := Report{
+		Charts: []Chart{{Name: "app", Err: errors.New("no repository definition")}},
+		Helm:   "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Unevaluable(); got != 1 {
+		t.Errorf("Unevaluable() = %d, want 1", got)
+	}
+	if got := r.Unconstructed(); got != 0 {
+		t.Errorf("Unconstructed() = %d, want 0", got)
+	}
+}
+
+func TestAReleaseThatRenderedDespiteMissingValuesSaysSo(t *testing.T) {
+	// It rendered, so idem has something to report - but about a release that
+	// is not the one deployed, and the reader has to know which.
+	got := text(t, Report{
+		Charts: []Chart{{Name: "app", Unresolved: []string{"cluster"}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "cluster") {
+		t.Errorf("Text() = %q, want the values idem could not supply named", got)
+	}
+}

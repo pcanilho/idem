@@ -914,7 +914,7 @@ spec:
     path: charts/needs
     helm:
       valuesObject:
-        cluster: truenas
+        cluster: prod-a
       parameters:
         - name: image.tag
           value: v1.2.3
@@ -949,7 +949,7 @@ spec:
     path: charts/needs
     helm:
       releaseName: chosen
-      valuesObject: {cluster: truenas}
+      valuesObject: {cluster: prod-a}
 `,
 		"charts/needs/Chart.yaml":        guardedChart,
 		"charts/needs/values.yaml":       "image: {}\n",
@@ -988,5 +988,91 @@ spec:
 
 	if code != exitOK {
 		t.Fatalf("exit = %d, want %d — a leading slash is repo-root relative\n%s%s", code, exitOK, stdout, stderr)
+	}
+}
+
+func TestAReleaseIdemCannotBuildIsReportedWithoutFailingTheRun(t *testing.T) {
+	requireHelm(t)
+
+	// The chart's `required` guard fires because idem withheld a value the
+	// generator supplies. Calling that "could not be rendered" would blame the
+	// chart, and exiting 2 would make every estate driven by a cluster-reading
+	// generator permanently red.
+	dir := tree(t, map[string]string{
+		"apps/agents.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: agents}
+spec:
+  goTemplate: true
+  generators:
+    - clusters: {}
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, _ := invoke(t, filepath.Join(dir, "charts/needs"))
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d — idem could not build it, the chart is fine", code, exitOK)
+	}
+	if !strings.Contains(stdout, "could not be built") {
+		t.Errorf("stdout = %q, want the gap stated as its own kind", stdout)
+	}
+	if !strings.Contains(stdout, "cluster") {
+		t.Errorf("stdout = %q, want the value it lacked named", stdout)
+	}
+}
+
+func TestAGitFilesGeneratorIsCheckedOncePerElement(t *testing.T) {
+	requireHelm(t)
+
+	// Two files, two releases, both rendered from the repository alone.
+	dir := tree(t, map[string]string{
+		"apps/tenants.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: tenants}
+spec:
+  goTemplate: true
+  generators:
+    - git:
+        repoURL: https://example.com/repo.git
+        files:
+          - path: "config/*.yaml"
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          releaseName: '{{ .cluster }}'
+          valueFiles:
+            - '/{{ .path.path }}/{{ .path.filename }}'
+`,
+		"config/alpha.yaml":              "cluster: alpha\n",
+		"config/beta.yaml":               "cluster: beta\n",
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"), "-o", "json")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	for _, want := range []string{`"release": "alpha"`, `"release": "beta"`} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, want %s — one release per matched file", stdout, want)
+		}
 	}
 }

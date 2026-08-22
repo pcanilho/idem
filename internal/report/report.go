@@ -89,8 +89,16 @@ type Chart struct {
 	// Rewrites are fields the API server said it would change on admission.
 	Rewrites []doctor.Rewrite
 
+	// Unresolved names values the delivery config supplies through a generator
+	// idem cannot expand - one that reads the cluster rather than the
+	// repository. With Err set it means idem could not BUILD this release,
+	// which is a gap in idem rather than a defect in the chart; without Err it
+	// means the chart rendered, but as a release nobody deploys.
+	Unresolved []string
+
 	// Err is set when the chart could not be rendered at all. That is exit 2
-	// and always fatal - a chart silently skipped is the bug idem exists for.
+	// and always fatal - a chart silently skipped is the bug idem exists for -
+	// unless Unresolved says why, in which case it is Unconstructed instead.
 	Err error
 }
 
@@ -221,6 +229,30 @@ func (r Report) ChurningWithLookup() int {
 // Scoped by the ratchet too: a chart that was already unrenderable before this
 // branch is not this branch's problem, and an estate with one of those could
 // otherwise never adopt the flag at all.
+// unbuilt reports whether idem could not construct this release, as opposed to
+// the chart failing on its own terms.
+//
+// The distinction is the whole point: a chart whose `required` guard fires
+// because idem withheld a value its Application supplies is a chart working
+// exactly as written.
+func unbuilt(c Chart) bool { return c.Err != nil && len(c.Unresolved) > 0 }
+
+// Unconstructed counts releases idem could not build.
+//
+// Reported and counted but never fatal: idem could not construct the release,
+// which is a limit of idem rather than a defect in the chart, and failing a
+// build for it would make every estate driven by a cluster-reading generator
+// permanently red. Counted so the gap cannot go unnoticed.
+func (r Report) Unconstructed() int {
+	n := 0
+	for _, c := range r.Charts {
+		if unbuilt(c) {
+			n++
+		}
+	}
+	return n
+}
+
 func (r Report) Unevaluable() int {
 	n := 0
 	// Every chart, in scope or not. The ratchet filters findings - claims idem
@@ -230,7 +262,7 @@ func (r Report) Unevaluable() int {
 	// processor, and ESLint, mypy and ruff, which each make an analysis
 	// failure unsuppressable by construction.
 	for _, c := range r.Charts {
-		if c.Err != nil {
+		if c.Err != nil && !unbuilt(c) {
 			n++
 		}
 	}
@@ -258,6 +290,9 @@ func (r Report) Text(w io.Writer) error {
 		detail = true
 	}
 	if writeRewrites(&b, scope) {
+		detail = true
+	}
+	if writeUnconstructed(&b, r.Charts) {
 		detail = true
 	}
 	if writeUnevaluable(&b, r.Charts) {
@@ -566,6 +601,48 @@ func writeSuppressed(b *strings.Builder, charts []Chart) bool {
 	return true
 }
 
+// writeUnconstructed lists releases idem could not build, and charts it built
+// only partially, naming the values it could not supply.
+//
+// Its own section and its own wording: "could not be rendered" would blame the
+// chart for a value idem withheld, and the two need opposite responses - one is
+// a chart to fix, the other is a generator idem cannot expand.
+func writeUnconstructed(b *strings.Builder, charts []Chart) bool {
+	var missing, partial []Chart
+	for _, c := range charts {
+		switch {
+		case unbuilt(c):
+			missing = append(missing, c)
+		case len(c.Unresolved) > 0:
+			partial = append(partial, c)
+		}
+	}
+	if len(missing) == 0 && len(partial) == 0 {
+		return false
+	}
+
+	if len(missing) > 0 {
+		b.WriteString("\n  could not be built — values come from a generator idem cannot expand\n")
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, c := range missing {
+			fmt.Fprintf(tw, "    %s\tneeds %s\n", c.Name, strings.Join(c.Unresolved, ", "))
+		}
+		tw.Flush()
+		b.WriteString("      The chart is not at fault: its guards fired because idem withheld a value.\n")
+	}
+
+	if len(partial) > 0 {
+		b.WriteString("\n  rendered without values only a generator can supply\n")
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, c := range partial {
+			fmt.Fprintf(tw, "    %s\tmissing %s\n", c.Name, strings.Join(c.Unresolved, ", "))
+		}
+		tw.Flush()
+		b.WriteString("      Findings above are about this release, which is not the one deployed.\n")
+	}
+	return true
+}
+
 // writePotential lists functions that could make a chart churn but did not
 // this time, and reports whether there were any.
 //
@@ -676,7 +753,7 @@ func kindOf(c doctor.Change) string {
 func writeUnevaluable(b *strings.Builder, charts []Chart) bool {
 	var failed []Chart
 	for _, c := range charts {
-		if c.Err != nil {
+		if c.Err != nil && !unbuilt(c) {
 			failed = append(failed, c)
 		}
 	}
@@ -765,7 +842,7 @@ func (r Report) verdict() string {
 			churning, total, plural(total, "chart", "charts"), r.Since, lookupClause(lookupOnly))
 	}
 
-	if churning == 0 && unevaluable == 0 && lookupOnly == 0 {
+	if churning == 0 && unevaluable == 0 && lookupOnly == 0 && r.Unconstructed() == 0 {
 		// Saying these charts "render consistently" would be false: they do
 		// not, and idem measured that. What is true is that nothing will
 		// churn, and the reason is the user's own config rather than the
@@ -784,9 +861,9 @@ func (r Report) verdict() string {
 
 	// ArgoCD is genuinely fine here and the sentence must not say otherwise -
 	// but the engines that do a real install are not, and that is the finding.
-	if churning == 0 && unevaluable == 0 {
-		return fmt.Sprintf("%d of %d %s will churn under Flux and Helm: identical under `helm template`, different with `lookup` resolved.",
-			lookupOnly, total, plural(total, "chart", "charts"))
+	if churning == 0 && unevaluable == 0 && lookupOnly > 0 {
+		return fmt.Sprintf("%d of %d %s will churn under Flux and Helm: identical under `helm template`, different with `lookup` resolved.%s",
+			lookupOnly, total, plural(total, "chart", "charts"), builtClause(r.Unconstructed()))
 	}
 
 	// Nothing in scope rendered at all. "0 charts render consistently" is true
@@ -820,6 +897,9 @@ func (r Report) verdict() string {
 			found, plural(found, "finding", "findings"),
 			coveredCharts, plural(coveredCharts, "chart", "charts"),
 			plural(found, "is", "are"))
+	}
+	if unbuiltCount := r.Unconstructed(); unbuiltCount > 0 {
+		s += fmt.Sprintf("; %d could not be built", unbuiltCount)
 	}
 	if unevaluable > 0 {
 		s += fmt.Sprintf("; %d could not be rendered", unevaluable)
@@ -870,11 +950,20 @@ func (r Report) consistent() int {
 func (r Report) failedInScope() int {
 	n := 0
 	for _, c := range r.inScope() {
-		if c.Err != nil {
+		if c.Err != nil && !unbuilt(c) {
 			n++
 		}
 	}
 	return n
+}
+
+// builtClause reports releases idem could not construct, as a sentence ending
+// rather than a clause, so it can be appended to a verdict that already ends.
+func builtClause(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %d could not be built.", n)
 }
 
 // lookupClause reports churn only the API-server condition saw, without

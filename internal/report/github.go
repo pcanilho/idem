@@ -68,7 +68,14 @@ func (r Report) GitHub(w io.Writer) error {
 	// render is a gap in what was checked, and the ratchet only ever filters
 	// findings about charts it did check.
 	for _, c := range r.Charts {
-		if c.Err != nil {
+		switch {
+		case unbuilt(c):
+			// A notice, not an error: idem could not build the release, and
+			// failing a pull request for idem's own limit trains people to
+			// ignore its annotations.
+			fmt.Fprintf(&b, "::notice::idem: %s could not be built — needs %s, which comes from a generator idem cannot expand\n",
+				c.Name, data(strings.Join(c.Unresolved, ", ")))
+		case c.Err != nil:
 			fmt.Fprintf(&b, "::error::idem: %s could not be rendered: %s\n", c.Name, data(c.Err.Error()))
 		}
 	}

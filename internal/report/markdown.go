@@ -135,7 +135,7 @@ func writeLookupRows(b *strings.Builder, charts []Chart) {
 func writeUnevaluableRows(b *strings.Builder, charts []Chart) {
 	var failed []Chart
 	for _, c := range charts {
-		if c.Err != nil {
+		if c.Err != nil && !unbuilt(c) {
 			failed = append(failed, c)
 		}
 	}

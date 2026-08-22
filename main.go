@@ -204,29 +204,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 	queue := make([]scan.Chart, 0, len(charts))
 	releases := make(map[string]release, len(charts))
 	for _, c := range charts {
-		path := chartPath(root, c.ref)
+		for _, rel := range resolveReleases(deliveryCfg, opt, root, chartPath(root, c.ref), c.release, inlineDir) {
+			// The namespace is decided per release: an ApplicationSet gives
+			// each element its own, and --namespace overrides all of them.
+			rel.namespace, rel.from = releaseNamespaceFor(deliveryCfg, opt, chartPath(root, c.ref), rel)
 
-		inline, err := writeInline(inlineDir, c.release, deliveryCfg.ValuesFor(path).Inline)
-		if err != nil {
-			fmt.Fprintf(stderr, "idem: could not write the values %s supplies to %s: %v\n",
-				deliveryCfg.ValuesFor(path).File, c.release, err)
+			label := rel.label(c.release)
+			releases[label] = rel
+
+			chart := scan.Chart{Name: label, Dir: c.ref, Spec: specFor(ref, c, opt, rel)}
+
+			// A second, independent measurement of the same chart: through the
+			// API server, where lookup resolves and the chart sees the
+			// cluster's real capabilities. Read-only - a server dry run
+			// renders, never applies.
+			if opt.cluster {
+				server := chart.Spec
+				server.Cluster = true
+				server.KubeContext = opt.kubeContext
+				chart.Server = &server
+			}
+			queue = append(queue, chart)
 		}
-
-		rel := resolveRelease(deliveryCfg, opt, root, path, c.release, inline)
-		releases[c.ref] = rel
-
-		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt, rel)}
-
-		// A second, independent measurement of the same chart: through the API
-		// server, where lookup resolves and the chart sees the cluster's real
-		// capabilities. Read-only - a server dry run renders, never applies.
-		if opt.cluster {
-			server := chart.Spec
-			server.Cluster = true
-			server.KubeContext = opt.kubeContext
-			chart.Server = &server
-		}
-		queue = append(queue, chart)
 	}
 
 	prepare, resolutions := preparer(ctx, mode, h)
@@ -286,9 +285,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		rep.Charts = append(rep.Charts, report.Chart{
 			Name:          result.Chart.Name,
 			Dir:           result.Chart.Dir,
-			Release:       deliveredRelease(releases[result.Chart.Dir], result.Chart.Name),
-			Namespace:     releases[result.Chart.Dir].namespace,
-			NamespaceFrom: releases[result.Chart.Dir].from,
+			Release:       deliveredRelease(releases[result.Chart.Name], result.Chart.Name),
+			Namespace:     releases[result.Chart.Name].namespace,
+			NamespaceFrom: releases[result.Chart.Name].from,
+			Unresolved:    releases[result.Chart.Name].unresolved,
 			RepoDir:       chartPath(root, result.Chart.Dir),
 			Deps:          resolutions.of(result.Chart.Dir),
 			Changed:       gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
@@ -421,6 +421,19 @@ func releaseNamespace(cfg delivery.Config, opt options, chartPath string) (strin
 	return defaultNamespace, ""
 }
 
+// releaseNamespaceFor is releaseNamespace with the release's own answer first:
+// an ApplicationSet gives every element its own namespace, so the chart-level
+// question only applies when the element did not answer it.
+func releaseNamespaceFor(cfg delivery.Config, opt options, chartPath string, rel release) (string, string) {
+	if opt.namespace != "" {
+		return opt.namespace, report.NamespaceFromFlag
+	}
+	if rel.namespace != "" {
+		return rel.namespace, rel.from
+	}
+	return releaseNamespace(cfg, opt, chartPath)
+}
+
 // deliveredRelease is the release name to report, which is nothing at all when
 // it is simply the chart name: saying "release home, chart home" on every line
 // of a 16-chart estate is noise, and the interesting case is when they differ.
@@ -442,6 +455,10 @@ type release struct {
 	files     []string
 	sets      []string
 
+	// instance names the generator element this release came from, empty when
+	// a plain Application (or nothing at all) claims the chart.
+	instance string
+
 	// unresolved names values a generator substitutes, which idem refused to
 	// invent. Carried so a chart that will not render can say what it lacked.
 	unresolved []string
@@ -452,26 +469,58 @@ type release struct {
 // Order is ArgoCD's: valueFiles, then values/valuesObject, then parameters.
 // The user's own -f and --set go last in each, because a flag typed at the
 // terminal is a deliberate override of what the repository says.
-func resolveRelease(cfg delivery.Config, opt options, root, chartPath, chartName, inline string) release {
-	ns, from := releaseNamespace(cfg, opt, chartPath)
-	rel := release{namespace: ns, from: from, name: chartName}
+func resolveReleases(cfg delivery.Config, opt options, root, chartPath, chartName, inlineDir string) []release {
+	found := cfg.ReleasesFor(chartPath)
+	if len(found) == 0 {
+		// Nothing claims this chart, so there is one release to check: the
+		// chart as it stands, with whatever the user passed.
+		return []release{withUser(release{name: chartName}, opt)}
+	}
 
-	vals := cfg.ValuesFor(chartPath)
-	if vals.Release != "" {
-		rel.name = vals.Release
-	}
-	rel.unresolved = vals.Templated
+	out := make([]release, 0, len(found))
+	for _, vals := range found {
+		rel := release{name: chartName, instance: vals.Instance, unresolved: vals.Templated, from: vals.File}
+		if vals.Name != "" {
+			rel.name = vals.Name
+		}
 
-	for _, f := range vals.ValueFiles {
-		rel.files = append(rel.files, filepath.Join(root, f))
+		for _, f := range vals.ValueFiles {
+			rel.files = append(rel.files, filepath.Join(root, f))
+		}
+
+		// One file per release rather than per chart: two releases of one
+		// chart have different values, and sharing a name would have the
+		// second overwrite the first.
+		inline, err := writeInline(inlineDir, rel.label(chartName), vals.Inline)
+		if err != nil {
+			rel.unresolved = append(rel.unresolved, "valuesObject")
+		}
+		if inline != "" {
+			rel.files = append(rel.files, inline)
+		}
+
+		rel.sets = append(rel.sets, vals.Sets...)
+		out = append(out, withUser(rel, opt))
 	}
-	if inline != "" {
-		rel.files = append(rel.files, inline)
-	}
+	return out
+}
+
+// withUser puts the flags typed at the terminal last, so an explicit -f or
+// --set overrides what the repository says rather than the other way round.
+func withUser(rel release, opt options) release {
 	rel.files = append(rel.files, opt.valuesFiles...)
-	rel.sets = append(append(rel.sets, vals.Sets...), opt.setValues...)
-
+	rel.sets = append(rel.sets, opt.setValues...)
 	return rel
+}
+
+// label distinguishes one release of a chart from another, and is the chart
+// name alone when there is only one - a suffix nobody needs is noise on every
+// line of the report.
+func (r release) label(chart string) string {
+	if r.instance == "" {
+		return chart
+	}
+	return chart + " (" + r.instance + ")"
 }
 
 // writeInline materialises spec.source.helm.valuesObject as a values file,
