@@ -332,8 +332,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s%s%s\n",
-		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())
+	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s",
+		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())))
 	writeRemediation(&b, scope, r.Engines)
 
 	_, err := io.WriteString(w, b.String())
@@ -630,12 +630,7 @@ func writeSuppressed(b *strings.Builder, charts []Chart) bool {
 
 	if len(covered) > 0 {
 		b.WriteString("\n  already suppressed by your delivery config\n")
-		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
-		for _, s := range covered {
-			fmt.Fprintf(tw, "    %s\t%s\t%s\n",
-				s.Finding.Change.Object.Display(), strings.Join(s.By.Pointers, " "), s.By.File)
-		}
-		tw.Flush()
+		writeByManifest(b, covered)
 	}
 
 	if len(broken) > 0 {
@@ -693,6 +688,99 @@ func writeUnconstructed(b *strings.Builder, charts []Chart) bool {
 	return true
 }
 
+// maxLine is the width the provenance line wraps at.
+//
+// It accumulates a clause per thing worth saying - release names, namespaces,
+// which cluster, how dependencies resolved, how many delivery manifests - and
+// a full estate run measured 199 characters. Wrapped rather than trimmed,
+// because every clause is there to be read.
+const maxLine = 96
+
+// provenance wraps the run's footer on its own separators, so a continuation
+// line still reads as part of the same sentence.
+func provenance(line string) string {
+	var out strings.Builder
+	width := 0
+
+	for i, part := range strings.Split(line, " · ") {
+		switch {
+		case i == 0:
+			width = len([]rune(part))
+			out.WriteString(part)
+		case width+len([]rune(part))+3 > maxLine:
+			width = len([]rune(part)) + 4
+			out.WriteString("\n    · " + part)
+		default:
+			width += len([]rune(part)) + 3
+			out.WriteString(" · " + part)
+		}
+	}
+
+	out.WriteString("\n")
+	return out.String()
+}
+
+// maxValue is how much of a rewritten value is printed.
+//
+// The API server hands back whole annotation maps - one measured 298
+// characters on a real cluster, which wraps three times and takes the column
+// layout with it. Columns are this output's entire readability strategy, which
+// is also why it has no box drawing and no emoji.
+const maxValue = 60
+
+// clip renders a value at a width the columns can hold, unless the reader
+// asked for all of it. The ellipsis is there so the truncation is visible
+// rather than silent.
+func clip(value any, limit int) string {
+	text := fmt.Sprint(value)
+	if limit > maxFields || len([]rune(text)) <= maxValue {
+		return text
+	}
+	return string([]rune(text)[:maxValue]) + "…"
+}
+
+// heading names a chart, qualified by its directory only when another chart in
+// the same run shares the name.
+//
+// Two charts called `app` produce two identical blocks of chart-relative
+// paths, and nothing in either says which is which. Qualifying every heading
+// would be noise on the common case, where the name is already the answer.
+func heading(c Chart, charts []Chart) string {
+	if c.RepoDir == "" {
+		return c.Name
+	}
+	for _, other := range charts {
+		if other.Name == c.Name && other.RepoDir != c.RepoDir {
+			return c.RepoDir
+		}
+	}
+	return c.Name
+}
+
+// writeByManifest groups suppressed findings under the file that suppressed
+// them.
+//
+// The manifest path is the one cell that is not per-finding - on a real estate
+// it is identical on every row, and repeating it alongside an object identity
+// and a JSON pointer is what pushes those rows past any terminal width.
+func writeByManifest(b *strings.Builder, suppressed []delivery.Suppressed) {
+	byFile := make(map[string][]delivery.Suppressed)
+	for _, s := range suppressed {
+		byFile[s.By.File] = append(byFile[s.By.File], s)
+	}
+
+	for _, file := range slices.Sorted(maps.Keys(byFile)) {
+		fmt.Fprintf(b, "\n    %s\n", file)
+
+		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
+		for _, s := range byFile[file] {
+			fmt.Fprintf(tw, "      %s\t%s\n",
+				s.Finding.Change.Object.Display(), strings.Join(s.By.Pointers, " "))
+		}
+		tw.Flush()
+	}
+}
+
 // writePotential lists functions that could make a chart churn but did not
 // this time, and reports whether there were any.
 //
@@ -720,15 +808,14 @@ func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 		// Grouped by chart because the paths are chart-relative: on its own,
 		// "templates/job.yaml:351" names a file in some chart the reader then
 		// has to go and find.
-		fmt.Fprintf(b, "\n    %s\n", c.Name)
+		fmt.Fprintf(b, "\n    %s\n", heading(c, charts))
 
 		shown := min(len(c.Potential), limit)
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, u := range c.Potential[:shown] {
+			// Just the reason. That nothing fired this render is said once
+			// below, for the whole chart, rather than repeated on every row.
 			note := whyOf(u.Function)
-			if settled {
-				note += ", did not fire this render"
-			}
 			// file:line last, and deliberately: alignment pads every row to
 			// the widest cell, and a deeply vendored subchart path would drag
 			// all of them out past a readable width.
@@ -739,6 +826,19 @@ func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 		if elided := len(c.Potential) - shown; elided > 0 {
 			fmt.Fprintf(b, "      … and %d more\n", elided)
 		}
+
+		// The observed findings above get three sentences saying what will
+		// happen. Without one here, a reader has a function name, a reason and
+		// a line, and no way to tell whether any of it asks something of them.
+		if settled {
+			b.WriteString("\n      Nothing differed this render, so nothing is wrong today. These are the\n")
+			b.WriteString("      places it could start: whatever pins them is holding, and the failure\n")
+			b.WriteString("      idem exists for was a pin that silently stopped applying.\n")
+			continue
+		}
+		b.WriteString("\n      This chart already churns, and idem cannot say which function did it —\n")
+		b.WriteString("      a rendered value cannot be traced back to the call that produced it.\n")
+		b.WriteString("      These are where to look first.\n")
 	}
 
 	return any
@@ -764,7 +864,7 @@ func writeRewrites(b *strings.Builder, charts []Chart, limit int) bool {
 			tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 			shown := min(len(r.Changes), limit)
 			for _, change := range r.Changes[:shown] {
-				fmt.Fprintf(tw, "      %s\t%s\t%v\n", change.Path, kindOf(change), change.Value)
+				fmt.Fprintf(tw, "      %s\t%s\t%s\n", change.Path, kindOf(change), clip(change.Value, limit))
 			}
 			tw.Flush()
 

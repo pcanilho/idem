@@ -156,6 +156,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctor(context.Background(), opt, stdout, stderr)
 	}
 
+	// A bare `idem` used to mean `.` and recurse without bound - typed in a
+	// home directory it walks everything looking for a Chart.yaml. Someone
+	// typing the bare name is asking what this is, not asking for their whole
+	// disk to be scanned, and git, kubectl and helm all answer that question
+	// the same way. `idem .` is still there for the deliberate case.
+	if len(operands) == 0 {
+		writeHelp(stdout, fs)
+		return exitOK
+	}
+
 	target, err := chartTarget(operands)
 	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
@@ -476,13 +486,8 @@ func readManifests(name string) ([]manifest.Object, error) {
 }
 
 // chartTarget is the single chart reference a check runs against.
-//
-// Zero operands means the working directory, which is what a user typing
-// `idem` in a chart repository means.
 func chartTarget(operands []string) (string, error) {
 	switch len(operands) {
-	case 0:
-		return ".", nil
 	case 1:
 		return operands[0], nil
 	default:

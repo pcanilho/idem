@@ -103,6 +103,10 @@ $ idem ./examples/churning-chart
     churning-chart
       randAlphaNum   random   templates/main.yaml:7
 
+      This chart already churns, and idem cannot say which function did it —
+      a rendered value cannot be traced back to the call that produced it.
+      These are where to look first.
+
   1 of 1 chart will churn under ArgoCD.
   helm 4.2.4 · 2 rounds
 

@@ -1359,3 +1359,38 @@ func TestHelpNamesTheDiffVerbNowThatItExists(t *testing.T) {
 		t.Errorf("stdout = %q, want the diff verb shown", stdout)
 	}
 }
+
+func TestBareIdemPrintsHelpRatherThanScanningTheWorld(t *testing.T) {
+	// `idem` with no operand meant `.` and recursed without bound — typed in a
+	// home directory it walks everything looking for Chart.yaml, and a stranger
+	// typing the bare name is asking "what is this?", not "check my whole disk".
+	// git, kubectl and helm all print usage here.
+	code, stdout, _ := invoke(t)
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d", code, exitOK)
+	}
+	if !strings.Contains(stdout, "usage:") {
+		t.Errorf("stdout = %q, want the help", stdout)
+	}
+}
+
+func TestAnExplicitDotStillChecksTheCurrentDirectory(t *testing.T) {
+	requireHelm(t)
+
+	// The deliberate case keeps working, and is one character longer.
+	dir := tree(t, map[string]string{
+		"charts/owned/Chart.yaml":               ownedChart,
+		"charts/owned/templates/configmap.yaml": ownedTemplate,
+	})
+	t.Chdir(dir)
+
+	code, stdout, _ := invoke(t, ".")
+
+	if code != exitOK {
+		t.Errorf("exit = %d, want %d: %s", code, exitOK, stdout)
+	}
+	if !strings.Contains(stdout, "owned") {
+		t.Errorf("stdout = %q, want the chart found", stdout)
+	}
+}

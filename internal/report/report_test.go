@@ -10,6 +10,7 @@ import (
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
 	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/objpath"
 )
@@ -745,7 +746,7 @@ func TestPotentialClaimsItDidNotFireOnlyWhenNothingChurned(t *testing.T) {
 		Helm: "4.2.4", Rounds: 2,
 	})
 
-	if strings.Contains(churning, "did not fire") {
+	if strings.Contains(churning, "Nothing differed") {
 		t.Errorf("Text() = %q, want no claim about which function fired", churning)
 	}
 
@@ -757,7 +758,7 @@ func TestPotentialClaimsItDidNotFireOnlyWhenNothingChurned(t *testing.T) {
 		Helm: "4.2.4", Rounds: 2,
 	})
 
-	if !strings.Contains(clean, "did not fire") {
+	if !strings.Contains(clean, "Nothing differed") {
 		t.Errorf("Text() = %q, want the pin noted on a clean render", clean)
 	}
 }
@@ -1623,5 +1624,174 @@ func TestTheTwoFixBlocksAreNotSeparatedByADoubleBlank(t *testing.T) {
 
 	if strings.Contains(got, "\n\n\n") {
 		t.Errorf("Text() = %q, want no doubled blank line", got)
+	}
+}
+
+// The observed finding above gets three sentences saying what will happen. A
+// potential finding gets a function name, a reason and a line — and a newcomer
+// cannot tell from that whether they are supposed to do anything.
+
+func TestAPotentialFindingOnACleanChartSaysWhyItIsListed(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:      "home",
+			Potential: []analyze.Use{{Function: "randAlphaNum", File: "templates/main.yaml", Line: 7}},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "Nothing differed this render") {
+		t.Errorf("Text() = %q, want the reader told what this section is", got)
+	}
+	if !strings.Contains(got, "stopped applying") {
+		t.Errorf("Text() = %q, want it to say when these start mattering", got)
+	}
+}
+
+func TestAPotentialFindingOnAChurningChartDoesNotClaimItStayedQuiet(t *testing.T) {
+	// idem cannot attribute an observed difference to a particular function,
+	// so on a chart that DID churn it must not say this one was innocent.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:      "home",
+			Findings:  []check.Finding{secretFinding("creds", ".data.password")},
+			Potential: []analyze.Use{{Function: "randAlphaNum", File: "templates/main.yaml", Line: 7}},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "Nothing differed this render") {
+		t.Errorf("Text() = %q, want no claim of innocence on a chart that churned", got)
+	}
+	if !strings.Contains(got, "cannot say which") {
+		t.Errorf("Text() = %q, want it to say why these are listed anyway", got)
+	}
+}
+
+func TestTwoChartsWithTheSameNameAreToldApart(t *testing.T) {
+	// The potential section groups by chart name, so two charts called `app`
+	// in different directories produce two identical blocks — with
+	// chart-relative paths inside them, so nothing distinguishes the two.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "app", RepoDir: "a/app", Potential: []analyze.Use{potentialUse("templates/s.yaml", 5, "randAlphaNum")}},
+			{Name: "app", RepoDir: "b/app", Potential: []analyze.Use{potentialUse("templates/s.yaml", 5, "randAlphaNum")}},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for _, want := range []string{"a/app", "b/app"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Text() = %q, want %s named so the two blocks can be told apart", got, want)
+		}
+	}
+}
+
+func TestAChartWithAUniqueNameIsNotDecorated(t *testing.T) {
+	// Qualifying every heading with a path would be noise on the common case,
+	// where the name already says which chart it is.
+	got := text(t, Report{
+		Charts: []Chart{
+			{Name: "app", RepoDir: "charts/app", Potential: []analyze.Use{potentialUse("templates/s.yaml", 5, "randAlphaNum")}},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "charts/app") {
+		t.Errorf("Text() = %q, want just the name when it is unambiguous", got)
+	}
+}
+
+// Alignment is why this output has no box drawing and no emoji — columns are
+// the whole readability strategy, and a line that wraps destroys them for
+// every row beneath it.
+
+func TestARewrittenValueIsTruncatedRatherThanWrapping(t *testing.T) {
+	// The API server returns whole annotation maps. One of them measured 298
+	// characters on a real cluster, which wraps three times on a normal
+	// terminal and takes the column layout with it.
+	long := map[string]any{}
+	for i := range 12 {
+		long[fmt.Sprintf("pv.kubernetes.io/some-fairly-long-annotation-%d", i)] = "yes"
+	}
+
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Rewrites: []doctor.Rewrite{{
+			Object:  diff.ObjectRef{APIVersion: "v1", Kind: "Service", Name: "api"},
+			Changes: []doctor.Change{{Path: path(".metadata.annotations"), Value: long}},
+		}}}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	for line := range strings.SplitSeq(got, "\n") {
+		if len([]rune(line)) > 120 {
+			t.Errorf("line is %d characters, want it truncated:\n  %s", len([]rune(line)), line)
+		}
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("Text() = %q, want the truncation visible rather than silent", got)
+	}
+}
+
+func TestVerboseShowsTheWholeRewrittenValue(t *testing.T) {
+	long := strings.Repeat("x", 300)
+
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Rewrites: []doctor.Rewrite{{
+			Object:  diff.ObjectRef{APIVersion: "v1", Kind: "Service", Name: "api"},
+			Changes: []doctor.Change{{Path: path(".metadata.annotations"), Value: long}},
+		}}}},
+		Verbose: true,
+		Helm:    "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, long) {
+		t.Error("Text() truncated the value even with -v, which is the flag for seeing all of it")
+	}
+}
+
+func TestTheProvenanceLineWrapsRatherThanRunningOn(t *testing.T) {
+	// Five clauses is a normal estate run, and it measured 199 characters.
+	got := text(t, Report{
+		Charts:  []Chart{namespaced("home", "home", "apps/home.yaml")},
+		Helm:    "4.2.4",
+		Rounds:  2,
+		Cluster: true,
+		Context: "some-fairly-long-context-name",
+		Delivery: []string{
+			"a.yaml", "b.yaml", "c.yaml", "d.yaml", "e.yaml",
+			"f.yaml", "g.yaml", "h.yaml", "i.yaml", "j.yaml",
+		},
+	})
+
+	for line := range strings.SplitSeq(got, "\n") {
+		if len([]rune(line)) > 120 {
+			t.Errorf("provenance line is %d characters, want it wrapped:\n  %s", len([]rune(line)), line)
+		}
+	}
+}
+
+func TestSuppressedFindingsNameTheirManifestOnceNotPerRow(t *testing.T) {
+	// Object identity plus a JSON pointer plus a manifest path is 163
+	// characters on a real estate, and the path is identical on every row —
+	// it is the one cell that is not per-finding.
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name: "home",
+			Suppressed: []delivery.Suppressed{
+				suppressed("home-ollama", "/spec/template/metadata/annotations/checksum~1secrets", "deployment/apps/home.app.argo.yaml", true, true),
+				suppressed("home-ollama-ui", "/spec/template/metadata/annotations/checksum~1secrets", "deployment/apps/home.app.argo.yaml", true, true),
+			},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if n := strings.Count(got, "deployment/apps/home.app.argo.yaml"); n != 1 {
+		t.Errorf("the manifest is named %d times, want once", n)
+	}
+	for line := range strings.SplitSeq(got, "\n") {
+		if len([]rune(line)) > 120 {
+			t.Errorf("line is %d characters:\n  %s", len([]rune(line)), line)
+		}
 	}
 }
