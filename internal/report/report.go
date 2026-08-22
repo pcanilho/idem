@@ -103,6 +103,11 @@ type Chart struct {
 	// Rewrites are fields the API server said it would change on admission.
 	Rewrites []doctor.Rewrite
 
+	// Skipped counts objects excluded from the comparison because no engine
+	// applies them - Helm test and rollback hooks. Reported rather than
+	// dropped in silence: what was NOT checked is part of what was checked.
+	Skipped int
+
 	// ServerSideDiff records that a manifest claiming this chart asks for
 	// server-side diff. False means no manifest said so - NOT that the mode is
 	// off, which idem cannot know.
@@ -337,8 +342,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s",
-		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())))
+	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s%s",
+		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.skippedNote(), r.depsNote(), r.deliveryNote())))
 	writeRemediation(&b, scope, r.Engines)
 
 	return emit(w, b.String())
@@ -598,6 +603,23 @@ func (r Report) contextNote() string {
 		return " · current kube context"
 	}
 	return " · context " + r.Context
+}
+
+// skippedNote reports objects left out of the comparison.
+//
+// Only when there were any. ArgoCD skips manifests carrying hooks it does not
+// support, and a helm test hook is created only by `helm test` and never
+// reconciled - so churn in one is not churn. Saying nothing at all would make
+// this indistinguishable from having compared them.
+func (r Report) skippedNote() string {
+	n := 0
+	for _, c := range r.inScope() {
+		n += c.Skipped
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · %d hook %s not compared", n, plural(n, "object", "objects"))
 }
 
 // depsNote says what idem had to do to render at all.

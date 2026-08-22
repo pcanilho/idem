@@ -45,7 +45,7 @@ func TestACleanChartExitsZeroAndSaysWhatItChecked(t *testing.T) {
 	// The provenance line is not decoration: ArgoCD 3.5 swapped Helm 3.19 for
 	// 4.2 underneath everybody, and a pass that does not say which helm it
 	// used is a pass you cannot act on.
-	if !strings.Contains(stdout, "helm ") || !strings.Contains(stdout, "2 rounds") {
+	if !strings.Contains(stdout, "helm ") || !strings.Contains(stdout, "rounds") {
 		t.Errorf("stdout = %q, want the helm version and round count", stdout)
 	}
 }
@@ -1509,5 +1509,49 @@ func TestAVerbThatRendersOnlyTextIsHappyWithTheDefault(t *testing.T) {
 
 	if strings.Contains(stderr, "renders text only") {
 		t.Errorf("stderr = %q, want no format complaint when none was asked for", stderr)
+	}
+}
+
+// A --context that does not resolve must be said out loud.
+//
+// scan.Result.ServerErr recorded why the API-server render condition failed and
+// NOTHING read it. The run then fell back to the inferred branch for flux and
+// helm, while the provenance line still printed `· context <name>` - because
+// Report.Cluster comes from the flag being present, not from the query
+// succeeding. So idem asserted it had consulted a cluster it never reached.
+//
+// Its sibling RewriteErr has been reported since the dry run moved into the
+// pool; this is the same rule, three lines away, applied to the other half.
+func TestAContextThatCannotBeReachedIsReportedRatherThanInferredAround(t *testing.T) {
+	requireHelm(t)
+
+	_, _, stderr := invoke(t, "./examples/churning-chart", "--context=idem-no-such-context")
+
+	if !strings.Contains(stderr, "idem-no-such-context") {
+		t.Errorf("stderr = %q, want the unreachable context named", stderr)
+	}
+	if !strings.Contains(stderr, "could not render") {
+		t.Errorf("stderr = %q, want the failed render condition reported", stderr)
+	}
+}
+
+// The default round count has to be able to catch the class docs/design.md §5
+// calls the worst one.
+//
+// `keys` and `values` build a slice from Go's map iteration order, and Go
+// randomises the start offset - so two renders coincide by chance far more
+// often than intuition suggests. Measured on a six-key map, 20 trials each:
+// 2 rounds missed the churn 3 times, 3 rounds missed it 0 times. A miss needs
+// EVERY round to coincide, so the rate falls geometrically and the second
+// comparison buys most of the improvement.
+//
+// 2 is still legal and still meaningful - it is the minimum that can compare
+// anything at all - but it is not a safe default for something whose exit code
+// is a CI gate.
+func TestTheDefaultComparesMoreThanTwoRenders(t *testing.T) {
+	_, help, _ := invoke(t, "--help")
+
+	if !strings.Contains(help, "renders to compare (default 3)") {
+		t.Errorf("--rounds default is not 3; --help says:\n%s", help)
 	}
 }

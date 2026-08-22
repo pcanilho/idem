@@ -76,7 +76,11 @@ type Hooks struct {
 type Result struct {
 	Chart    Chart
 	Findings []check.Finding
-	Err      error
+
+	// Skipped counts objects no engine applies - helm test hooks and the like -
+	// which were excluded from the comparison rather than reported as churn.
+	Skipped int
+	Err     error
 
 	// Uses is what Inspect found, and InspectErr why it could not look.
 	// A failed inspection is an honest unknown for the engine verdicts, never
@@ -217,7 +221,7 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 		}
 	}
 
-	out := Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr, Rendered: renders[0]}
+	out := Result{Chart: c, Findings: result.Findings, Skipped: result.Skipped, Uses: uses, InspectErr: inspectErr, Rendered: renders[0]}
 	if c.Server != nil {
 		out.ServerFindings, out.ServerRendered, out.ServerErr = compareServer(c, serverRenders, serverErrs)
 	}

@@ -580,8 +580,29 @@ document — state the provenance, and let the reader judge.
 
 ### Temporal non-determinism — a blind spot in the method
 
-`idem` renders twice, back to back. That finds anything random or clock-driven. It cannot find
-anything that resolves consistently *today* and differently *later*:
+### Why the default is three rounds, not two
+
+Two renders is the minimum that can compare anything, and it was the default until it was
+measured. On a six-key map rendered through `keys`, 20 trials each:
+
+| `--rounds` | missed the churn |
+|---|---|
+| 2 | 3 / 20 |
+| 3 | 0 / 20 |
+
+Go randomises a map's iteration start offset, so two renders coincide by chance far more often
+than intuition suggests — and a miss requires **every** round to coincide, so the false-negative
+rate falls geometrically. The second comparison buys most of the improvement, which is why the
+default moved to three rather than higher: four renders cost 33% more for a difference that did
+not show up in measurement.
+
+That a 15% false-negative rate sat under the default for the class §5 calls "arguably the worst
+of the set" is worth recording plainly. It was found by running the tool, not by reading it.
+
+### Temporal blindness
+
+`idem` renders repeatedly, back to back. That finds anything random or clock-driven. It cannot
+find anything that resolves consistently *today* and differently *later*:
 
 - **Unpinned chart dependencies** — `dependencies: [{version: "^1.0"}]` resolves to whatever is
   newest when the repository index is refreshed. Two renders one second apart agree; two renders

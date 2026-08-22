@@ -289,7 +289,24 @@ func intoTempDir(ctx context.Context, dir string, b Builder) (string, Kind, func
 
 	// A directory inside the temp root, because helm names the release
 	// directory in its own errors and "idem-chart-1234" would be baffling.
-	target := filepath.Join(tmp, filepath.Base(dir))
+	//
+	// Named from the RESOLVED path, not from dir as typed. filepath.Base(".")
+	// is "." and filepath.Base("..") is "..", so `cd mychart && idem .` used to
+	// collapse target onto tmp itself - copyWithLocalRepos then saw its
+	// destination already existing and copied nothing - and `idem ..` put it
+	// outside the temp root entirely, which is where helm then ran. This
+	// package's promise is that nothing is written outside the directory the
+	// caller removes, and a relative reference broke it.
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		cleanup()
+		return "", Vendored, nil, fmt.Errorf("resolving %s: %w", dir, err)
+	}
+	target := filepath.Join(tmp, filepath.Base(abs))
+	if !within(tmp, target) {
+		cleanup()
+		return "", Vendored, nil, fmt.Errorf("refusing to prepare %s: %s is outside the temp directory", dir, target)
+	}
 	if err := copyWithLocalRepos(tmp, dir, target, map[string]bool{}); err != nil {
 		cleanup()
 		return "", Vendored, nil, err

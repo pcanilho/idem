@@ -74,7 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&opt.valuesFiles, "f", "values file, repeatable")
 	fs.Var(&opt.valuesFiles, "values", "values file, repeatable")
 	fs.Var(&opt.setValues, "set", "set a value, repeatable")
-	fs.IntVar(&opt.rounds, "rounds", 2, "renders to compare")
+	fs.IntVar(&opt.rounds, "rounds", 3, "renders to compare")
 	fs.BoolVar(&opt.strict, "strict", false, "exit non-zero on findings")
 	fs.BoolVar(&opt.verbose, "v", false, "expand every finding instead of capping each at five fields")
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
@@ -329,6 +329,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 		// Said, not swallowed. idem is a tool about knowing what was and was
 		// not checked, so a question it could not ask has to be visible.
+		// The cluster render condition failed. Said, not inferred around: without
+		// it the flux and helm verdicts fall back to their inferred branch and
+		// the provenance line still names the context, so a run that never
+		// reached the cluster reads exactly like one that did.
+		if result.ServerErr != nil {
+			fmt.Fprintf(stderr, "idem: could not render %s against %s: %v\n",
+				result.Chart.Name, contextName(opt), result.ServerErr)
+		}
+
 		if result.RewriteErr != nil {
 			fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n",
 				result.Chart.Name, result.RewriteErr)
@@ -355,6 +364,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			Verdicts:       verdictsFor(result, evidence),
 			Potential:      analyze.Potential(result.Uses),
 			Rewrites:       result.Rewrites,
+			Skipped:        result.Skipped,
 			ServerSideDiff: deliveryCfg.ServerSideDiff(chartPath(root, result.Chart.Dir)),
 			Err:            result.Err,
 		})
@@ -732,6 +742,16 @@ func resolve(ref chartref.Ref) ([]target, error) {
 // rounds would manufacture the very churn idem is looking for.
 func releaseName(raw string) string {
 	return path.Base(strings.TrimSuffix(raw, "/"))
+}
+
+// contextName names the cluster a message is about. `--context=` with no value
+// means whichever context is current, and saying so beats printing an empty
+// pair of quotes.
+func contextName(opt options) string {
+	if opt.kubeContext == "" {
+		return "the current kube context"
+	}
+	return "context " + opt.kubeContext
 }
 
 // unaskedNote explains a dry run idem could not make, when the delivery config

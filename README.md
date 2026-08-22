@@ -98,7 +98,7 @@ nothing wrong costs two lines —
 ```console
 $ idem ./examples/stable-chart
 ✓ stable-chart renders consistently under ArgoCD.
-  helm 4.2.4 · 2 rounds
+  helm 4.2.4 · 3 rounds
 ```
 
 — which is what most runs look like, and why `--strict` is opt-in rather than the default.
@@ -129,7 +129,7 @@ $ idem ./examples/churning-chart
       upstream, and pinning the value meanwhile.
 
   1 of 1 chart will churn under ArgoCD.
-  helm 4.2.4 · 2 rounds
+  helm 4.2.4 · 3 rounds
 
   Add to your ArgoCD Application to stop the churn:
 
@@ -305,7 +305,7 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 |---|---|
 | `-f`, `--values` | values file, repeatable |
 | `--set` | set a value, repeatable |
-| `--rounds` | how many renders to compare (default 2) |
+| `--rounds` | how many renders to compare (default 3) |
 | `--strict` | exit 1 when something will churn |
 | `-v` | expand every finding instead of capping each at five fields |
 | `-o` | `text`, `json`, `yaml`, `markdown` or `github` |

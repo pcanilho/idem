@@ -458,3 +458,49 @@ func TestObjectRefDisplayMarksAGeneratedName(t *testing.T) {
 		t.Errorf("Display() = %q, want %q", got, want)
 	}
 }
+
+// A mapping whose keys are not all strings must still be compared key by key.
+//
+// yaml.v3 decodes `8080: x` into map[any]any, not map[string]any, so walk fell
+// through to DeepEqual at the PARENT and reported `.data` as one leaf. That is
+// not merely imprecise: remediate turns the reported path into a jsonPointer,
+// so idem emitted `jsonPointers: [/data]` and told the user to suppress every
+// key in the ConfigMap - including the stable ones. Its own fix block
+// manufactured a permanent false negative for all future drift on that object.
+//
+// Numeric keys are ordinary in Kubernetes: port maps, error-code maps, and
+// anything a chart builds with `toYaml` over a dict keyed by number.
+func TestCompareDescendsIntoAMappingWithNonStringKeys(t *testing.T) {
+	const left = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ports
+data:
+  8080: alpha
+  9090: stable
+`
+	const right = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ports
+data:
+  8080: beta
+  9090: stable
+`
+
+	got := compare(t, left, right)
+	if len(got) != 1 {
+		t.Fatalf("got %d changes, want 1: %+v", len(got), got)
+	}
+	if len(got[0].Paths) != 1 {
+		t.Fatalf("got %d paths, want 1: %+v", len(got[0].Paths), got[0].Paths)
+	}
+
+	// The changed key, not its parent - so the emitted pointer suppresses one
+	// key and leaves 9090 answerable.
+	if p := got[0].Paths[0].Path.JSONPointer(); p != "/data/8080" {
+		t.Errorf("pointer = %q, want /data/8080 - suppressing /data would hide 9090 forever", p)
+	}
+}

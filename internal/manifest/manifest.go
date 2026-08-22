@@ -14,6 +14,35 @@ import (
 // sourcePrefix is how `helm template` marks which template produced a document.
 const sourcePrefix = "# Source:"
 
+// stringKeys rewrites every map[any]any in a decoded document as
+// map[string]any, recursively.
+//
+// Keys are rendered with fmt.Sprint, which is what a JSON pointer addresses
+// them by anyway: `8080` becomes "8080". A collision after rendering (`1` and
+// `"1"` in one mapping) keeps whichever came last, matching a JSON round trip -
+// and yaml.v3 rejects genuinely duplicate keys before this ever runs.
+func stringKeys(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, inner := range t {
+			t[k] = stringKeys(inner)
+		}
+		return t
+	case map[any]any:
+		out := make(map[string]any, len(t))
+		for k, inner := range t {
+			out[fmt.Sprint(k)] = stringKeys(inner)
+		}
+		return out
+	case []any:
+		for i, inner := range t {
+			t[i] = stringKeys(inner)
+		}
+		return t
+	}
+	return v
+}
+
 // Object is a single rendered Kubernetes object.
 type Object struct {
 	APIVersion string
@@ -98,6 +127,17 @@ func Parse(r io.Reader) ([]Object, error) {
 		if err := node.Decode(&body); err != nil {
 			return nil, fmt.Errorf("document %d: %w", i, err)
 		}
+		// yaml.v3 decodes a NESTED mapping whose keys are not all strings into
+		// map[any]any. Everything downstream type-asserts map[string]any, so
+		// such a mapping was invisible: diff.walk fell through to DeepEqual at
+		// the parent and reported the whole subtree as one leaf, and remediate
+		// then emitted a jsonPointer at the parent - config that suppresses
+		// every key in the object, including the stable ones.
+		//
+		// Numeric keys are ordinary in Kubernetes (port maps, error-code maps),
+		// and a JSON pointer addresses them by their string form anyway, so
+		// normalising here loses nothing and fixes every consumer at once.
+		body, _ = stringKeys(body).(map[string]any)
 		if len(body) == 0 {
 			continue
 		}

@@ -30,6 +30,11 @@ type Finding struct {
 type Result struct {
 	Rounds   int
 	Findings []Finding
+
+	// Skipped counts objects excluded from the comparison because no engine
+	// applies them. Counted rather than dropped in silence: a tool that reports
+	// what it checked has to report what it did not.
+	Skipped int
 }
 
 // Compare reports what differed across renders of one chart.
@@ -46,6 +51,15 @@ func Compare(renders [][]manifest.Object) (Result, error) {
 	if len(renders) < 2 {
 		return Result{}, fmt.Errorf("got %d renders: at least 2 are needed, because a single render cannot be compared to anything", len(renders))
 	}
+
+	var skipped int
+	kept := make([][]manifest.Object, 0, len(renders))
+	for _, round := range renders {
+		applied, dropped := applicable(round)
+		skipped += dropped
+		kept = append(kept, applied)
+	}
+	renders = kept
 
 	first := renders[0]
 	sources := sourceIndex(first)
@@ -64,7 +78,63 @@ func Compare(renders [][]manifest.Object) (Result, error) {
 	return Result{
 		Rounds:   len(renders),
 		Findings: sortedFindings(merged),
+		Skipped:  skipped,
 	}, nil
+}
+
+// unappliedHooks are the helm.sh/hook values no engine reconciles.
+//
+// Verified against ArgoCD's Helm page: it maps crd-install, pre/post-install,
+// pre/post-upgrade and pre/post-delete onto its own hook system, and of the
+// rest says "Argo CD currently skips manifests that include hooks not supported
+// by Argo CD, including Helm test hooks".
+//
+// Helm and Flux reach the same place by a different route: a test hook is
+// created only by `helm test`, deleted afterwards, and never compared against
+// the cluster. Rollback hooks fire only on a rollback. So churn in one of these
+// is not churn under any of the three engines idem answers for.
+//
+// `test` is Helm 3's spelling; test-success and test-failure are the Helm 2
+// names it still honours.
+var unappliedHooks = []string{"test", "test-success", "test-failure", "pre-rollback", "post-rollback"}
+
+// applicable drops the objects no engine applies, and counts them.
+func applicable(objs []manifest.Object) ([]manifest.Object, int) {
+	out := make([]manifest.Object, 0, len(objs))
+	for _, o := range objs {
+		if unapplied(o) {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out, len(objs) - len(out)
+}
+
+// unapplied reports whether an object carries only hooks nothing applies.
+//
+// The annotation is a comma-separated list, and ANY applied hook keeps the
+// object: `helm.sh/hook: post-install,test` is installed by ArgoCD as a
+// PostSync hook, so it is compared.
+func unapplied(o manifest.Object) bool {
+	meta, ok := o.Body["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	annotations, ok := meta["annotations"].(map[string]any)
+	if !ok {
+		return false
+	}
+	hooks, ok := annotations["helm.sh/hook"].(string)
+	if !ok || hooks == "" {
+		return false
+	}
+
+	for hook := range strings.SplitSeq(hooks, ",") {
+		if !slices.Contains(unappliedHooks, strings.TrimSpace(hook)) {
+			return false
+		}
+	}
+	return true
 }
 
 // sourceIndex maps object identity to the template that produced it.

@@ -410,3 +410,49 @@ func TestADifferentChartSharingAPrefixDoesNotSatisfyTheDependency(t *testing.T) 
 		t.Errorf("Missing() = %v, want redis still missing", got)
 	}
 }
+
+// `cd mychart && idem .` must work, and must stay inside the sandbox.
+//
+// target was filepath.Join(tmp, filepath.Base(dir)). filepath.Base(".") is ".",
+// so target collapsed to tmp itself: copyWithLocalRepos then saw its
+// destination already existing and copied NOTHING, and `within` was measured
+// from the wrong origin. filepath.Base("..") is worse - target became the
+// system TMPDIR, outside the tree idem created and owns, and `helm dependency
+// update` ran against it.
+//
+// The package's stated invariant is that nothing is written outside the temp
+// dir the caller removes. A relative chart reference broke it.
+func TestARelativeChartReferenceStillCopiesIntoTheSandbox(t *testing.T) {
+	// A declared-but-unvendored dependency, so Prepare actually takes the
+	// temp-dir path rather than short-circuiting on "nothing missing".
+	dir := chartWith(t, []string{"common"})
+
+	// The reference a user types from inside their own chart directory.
+	t.Chdir(dir)
+
+	// A Builder that does nothing: this test is about WHERE the copy lands,
+	// not about resolving anything.
+	prepared, _, cleanup, err := TempDir.Prepare(context.Background(), ".", noopBuilder{})
+	if err != nil {
+		t.Fatalf("Prepare(\".\") error = %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	// It must be a real directory holding the chart, not the bare temp root.
+	if _, err := os.Stat(filepath.Join(prepared, "Chart.yaml")); err != nil {
+		t.Fatalf("prepared %q has no Chart.yaml: %v", prepared, err)
+	}
+	// And it must be a subdirectory, so the sandbox still has a root to remove.
+	if filepath.Base(prepared) == "." || filepath.Base(prepared) == ".." {
+		t.Errorf("prepared = %q, want a named directory inside the temp root", prepared)
+	}
+}
+
+// noopBuilder resolves nothing, so a test can assert where the copy landed
+// without needing helm.
+type noopBuilder struct{}
+
+func (noopBuilder) DependencyBuild(context.Context, string) error  { return nil }
+func (noopBuilder) DependencyUpdate(context.Context, string) error { return nil }
