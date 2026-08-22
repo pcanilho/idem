@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 
@@ -23,6 +24,60 @@ var assigned = []string{"clusterIP", "clusterIPs", "nodePort", "healthCheckNodeP
 // differences when nothing changed, and reporting them wrongly is worse than
 // not reporting them - so they are dropped and counted, never shown.
 var unreliable = []string{"resources", "targetPort", "port", "nodePort", "containerPort"}
+
+// minted are identifiers the API server generates fresh on every request, so a
+// dry run - which IS a request - sees a different value each time.
+//
+// Reported with the generated part replaced rather than dropped: that the
+// cluster injects a serviceaccount token mount, or stamps a Job with a
+// controller uid, is a true and useful fact about admission. Which five
+// characters it picked this second is not, and carrying it into the output
+// would make idem's own report differ between two identical runs - the one
+// thing a tool that reports non-determinism must never do.
+var minted = []struct {
+	pattern *regexp.Regexp
+	as      string
+}{
+	// The projected serviceaccount token volume, named by the API server's
+	// ServiceAccount admission plugin as kube-api-access-<5 random chars>.
+	{regexp.MustCompile(`kube-api-access-[a-z0-9]{5}\b`), "kube-api-access-<generated>"},
+}
+
+// mintedKeys are map keys whose whole value the cluster mints per object. The
+// key is kept - it says what happened - and the value is replaced.
+var mintedKeys = []string{"controller-uid", "batch.kubernetes.io/controller-uid"}
+
+// redact replaces what the API server minted, leaving everything else exactly
+// as the cluster returned it.
+//
+// Applied to the reported value only, never to the comparison: what changed is
+// still decided by what the cluster actually wrote.
+func redact(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, val := range v {
+			if slices.Contains(mintedKeys, key) {
+				out[key] = "<generated>"
+				continue
+			}
+			out[key] = redact(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, val := range v {
+			out[i] = redact(val)
+		}
+		return out
+	case string:
+		for _, m := range minted {
+			v = m.pattern.ReplaceAllString(v, m.as)
+		}
+		return v
+	}
+	return value
+}
 
 // Change is one field the cluster wrote as an object was admitted.
 type Change struct {
@@ -75,7 +130,7 @@ func Rewrites(sent, returned []manifest.Object) ([]Rewrite, error) {
 			}
 			rewrite.Changes = append(rewrite.Changes, Change{
 				Path:     p.Path,
-				Value:    p.Right,
+				Value:    redact(p.Right),
 				Assigned: isAssigned(p.Path),
 			})
 		}

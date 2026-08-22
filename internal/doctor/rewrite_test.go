@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -192,5 +193,112 @@ func TestTheSuppliedNamespaceIsNotItselfARewrite(t *testing.T) {
 
 	if got := rewrites(t, sent, returned); len(got) != 0 {
 		t.Errorf("Rewrites() = %+v, want none - the context supplied that", got)
+	}
+}
+
+// The API server mints some of what it writes fresh on every request: the
+// projected serviceaccount token volume is named `kube-api-access-<random>`,
+// and a Job gets a new controller-uid each time. A dry run is a request, so
+// idem sees a different value on every run — and printing it makes idem's own
+// output non-reproducible, which is the one thing a tool that reports
+// non-determinism must never be.
+
+const sentPod = `
+apiVersion: v1
+kind: Pod
+metadata: {name: probe, namespace: default}
+spec:
+  containers:
+    - name: app
+      image: probe:1
+`
+
+func returnedPod(token string) string {
+	return `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: default
+  labels: {controller-uid: ` + token + `-uid, job-name: probe}
+spec:
+  containers:
+    - name: app
+      image: probe:1
+      volumeMounts:
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: kube-api-access-` + token + `
+          readOnly: true
+`
+}
+
+func valueOf(t *testing.T, rewrites []Rewrite, path string) string {
+	t.Helper()
+	for _, r := range rewrites {
+		for _, c := range r.Changes {
+			if c.Path.String() == path {
+				return fmt.Sprint(c.Value)
+			}
+		}
+	}
+	t.Fatalf("no change at %s in %+v", path, rewrites)
+	return ""
+}
+
+func TestTheSameApplyReportedTwiceIsByteIdentical(t *testing.T) {
+	// The invariant, stated as a test: two dry runs of the same object differ
+	// only in what the API server minted, and idem must not carry that
+	// difference into its own output.
+	first := rewrites(t, sentPod, returnedPod("2wjl2"))
+	second := rewrites(t, sentPod, returnedPod("cbrn2"))
+
+	if got, want := fmt.Sprint(first), fmt.Sprint(second); got != want {
+		t.Errorf("two runs disagree:\n %s\n %s", got, want)
+	}
+}
+
+func TestAGeneratedTokenVolumeNameIsNotPrintedVerbatim(t *testing.T) {
+	got := valueOf(t, rewrites(t, sentPod, returnedPod("2wjl2")), ".spec.containers[0].volumeMounts")
+
+	if strings.Contains(got, "2wjl2") {
+		t.Errorf("value = %q, want the generated suffix redacted", got)
+	}
+	if !strings.Contains(got, "kube-api-access") {
+		t.Errorf("value = %q, want the injected mount still recognisable", got)
+	}
+	if !strings.Contains(got, "serviceaccount") {
+		t.Errorf("value = %q, want the rest of the value intact", got)
+	}
+}
+
+func TestAMintedControllerUIDIsNotPrintedVerbatim(t *testing.T) {
+	got := valueOf(t, rewrites(t, sentPod, returnedPod("2wjl2")), ".metadata.labels")
+
+	if strings.Contains(got, "2wjl2-uid") {
+		t.Errorf("value = %q, want the minted uid redacted", got)
+	}
+	if !strings.Contains(got, "job-name:probe") {
+		t.Errorf("value = %q, want the labels the cluster did not mint left alone", got)
+	}
+}
+
+func TestAValueTheClusterDidNotMintIsLeftAlone(t *testing.T) {
+	// Redaction that reached ordinary values would hide real rewrites, which
+	// is a worse failure than the one it fixes.
+	got := valueOf(t, rewrites(t, sentPod, `
+apiVersion: v1
+kind: Pod
+metadata: {name: probe, namespace: default}
+spec:
+  containers:
+    - name: app
+      image: probe:1
+      volumeMounts:
+        - mountPath: /data
+          name: my-own-volume
+`), ".spec.containers[0].volumeMounts")
+
+	if !strings.Contains(got, "my-own-volume") {
+		t.Errorf("value = %q, want an ordinary name reported as it is", got)
 	}
 }
