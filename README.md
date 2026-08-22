@@ -315,8 +315,9 @@ idem ./charts -o yaml | yq '.remediation[] | select(.engine == "argocd")'
 
 ## What it does not do
 
-- It does not talk to your cluster unless you pass `--context`, and even then only to render —
-  never to apply, create, update, or own anything.
+- Checking a chart does not talk to your cluster unless you pass `--context`, and even then only
+  to render — never to apply, create, update, or own anything. (`idem doctor` is the exception by
+  definition: a cluster is the whole point, and it uses your current context. It only ever reads.)
 - It never writes to your repository. Subcharts resolve in a temp directory unless you ask
   otherwise with `--dependency-update`.
 - It does not reconstruct your delivery pipeline — no kustomize overlays, no `postBuild`

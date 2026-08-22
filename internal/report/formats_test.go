@@ -220,6 +220,42 @@ func TestMarkdownFooterCountsWhatCouldNotBeRendered(t *testing.T) {
 	}
 }
 
+// -o markdown is the PR-comment channel action.yml documents, and it was the
+// one format left out when text, json and github were aligned on engine scope
+// and on fluxFindings. A Flux-only estate got an ArgoCD ignoreDifferences block
+// posted on its pull request, and never got the fix that would have worked.
+func TestMarkdownRespectsTheEngineScopeAndCarriesTheFluxFix(t *testing.T) {
+	r := Report{
+		Charts:  []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Engines: []string{"flux"},
+		Helm:    "4.2.4", Rounds: 2,
+	}
+
+	got := render(t, r, Report.Markdown)
+
+	if strings.Contains(got, "ignoreDifferences") {
+		t.Errorf("Markdown() = %q, want no ArgoCD block when only flux is shown", got)
+	}
+	if !strings.Contains(got, "driftDetection") {
+		t.Errorf("Markdown() = %q, want the Flux fix", got)
+	}
+}
+
+func TestMarkdownStillCarriesTheArgoBlockWhenArgoIsShown(t *testing.T) {
+	got := render(t, Report{
+		Charts:  []Chart{churnsUnderFlux("home", secretFinding("creds", ".data.password"))},
+		Engines: []string{"argocd"},
+		Helm:    "4.2.4", Rounds: 2,
+	}, Report.Markdown)
+
+	if !strings.Contains(got, "ignoreDifferences") {
+		t.Errorf("Markdown() = %q, want the ArgoCD block", got)
+	}
+	if strings.Contains(got, "driftDetection") {
+		t.Errorf("Markdown() = %q, want no Flux block when only argocd is shown", got)
+	}
+}
+
 // --- github ---
 
 // repoWith writes real files, because the annotator refuses to point at a path

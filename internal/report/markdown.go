@@ -63,7 +63,7 @@ func (r Report) Markdown(w io.Writer) error {
 	}
 
 	writeUnevaluableRows(&b, r.Charts)
-	writeFixBlock(&b, r.inScope())
+	writeFixBlock(&b, r.inScope(), r.Engines)
 
 	fmt.Fprintf(&b, "<sub>helm %s · %d rounds%s</sub>\n", r.Helm, r.Rounds, r.unevaluableNote())
 
@@ -155,7 +155,13 @@ func writeUnevaluableRows(b *strings.Builder, charts []Chart) {
 
 // writeFixBlock collapses the remediation, because it is long and only some
 // readers need it.
-func writeFixBlock(b *strings.Builder, charts []Chart) {
+//
+// Scoped by engine and selected by the same helpers the text form uses. This
+// was the one format left behind when the others were aligned, and because it
+// is the pull-request channel the effect was the loudest: a Flux-only estate
+// got an ArgoCD ignoreDifferences block commented onto its PR, and never got
+// the fix that would have worked.
+func writeFixBlock(b *strings.Builder, charts []Chart, show []string) {
 	var all []check.Finding
 	for _, c := range charts {
 		if c.Err == nil {
@@ -163,15 +169,26 @@ func writeFixBlock(b *strings.Builder, charts []Chart) {
 		}
 	}
 
-	entries := remediate.Entries(all)
-	if len(entries) == 0 {
+	if shows(show, "argocd") {
+		writeDetails(b, "Fix — add to your ArgoCD Application", remediate.YAML(remediate.Entries(all)))
+	}
+	if shows(show, "flux") {
+		writeDetails(b, "Fix — add to your HelmRelease", remediate.FluxYAML(remediate.FluxEntries(fluxFindings(charts))))
+	}
+}
+
+// writeDetails emits one collapsed block, or nothing when there is no config to
+// put in it - an empty <details> is worse than no <details>.
+func writeDetails(b *strings.Builder, summary, body string) {
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
 		return
 	}
 
-	b.WriteString("<details>\n<summary>Fix — add to your ArgoCD Application</summary>\n\n")
+	fmt.Fprintf(b, "<details>\n<summary>%s</summary>\n\n", summary)
 	// Indented rather than fenced: a fenced block inside <details> is rendered
 	// inconsistently, and this survives GitHub's renderer as-is.
-	for line := range strings.SplitSeq(strings.TrimRight(remediate.YAML(entries), "\n"), "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		fmt.Fprintf(b, "    %s\n", line)
 	}
 	b.WriteString("\n</details>\n\n")

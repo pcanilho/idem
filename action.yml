@@ -46,11 +46,6 @@ inputs:
     required: false
     default: ""
 
-outputs:
-  findings:
-    description: Number of findings reported.
-    value: ${{ steps.run.outputs.findings }}
-
 runs:
   using: composite
   steps:

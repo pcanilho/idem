@@ -557,8 +557,21 @@ func TestGitHubOutputEmitsWorkflowCommands(t *testing.T) {
 
 	_, stdout, _ := invoke(t, "testdata/churn", "-o", "github")
 
-	if !strings.Contains(stdout, "::") {
-		t.Errorf("stdout = %q, want workflow commands", stdout)
+	// `::` alone was VACUOUS: the fallback `::notice::idem: N findings have no
+	// file in this repository` contains it, so forcing Report.locate to fail
+	// for every finding - zero inline annotations, the one thing this format
+	// exists for - left the test green.
+	const want = "::error file="
+	if !strings.Contains(stdout, want) {
+		t.Fatalf("stdout = %q, want an inline annotation (%q)", stdout, want)
+	}
+
+	// And the file it names has to be one a reader can open, because an
+	// annotation on a path GitHub cannot resolve renders nowhere.
+	_, after, _ := strings.Cut(stdout, want)
+	file, _, _ := strings.Cut(after, "::")
+	if _, err := os.Stat(file); err != nil {
+		t.Errorf("annotation points at %q, which is not a file here: %v", file, err)
 	}
 }
 
@@ -1405,7 +1418,7 @@ func TestAnExplicitDotStillChecksTheCurrentDirectory(t *testing.T) {
 func TestAFailedDryRunSaysWhenTheApplicationWouldHaveCreatedTheNamespace(t *testing.T) {
 	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
 
-	got := unaskedNote(err, "lab", true)
+	got := unaskedNote(err, "lab", "lab", true)
 
 	if !strings.Contains(got, "CreateNamespace=true") {
 		t.Errorf("unaskedNote() = %q, want it to name the option", got)
@@ -1418,7 +1431,7 @@ func TestAFailedDryRunSaysWhenTheApplicationWouldHaveCreatedTheNamespace(t *test
 func TestAFailedDryRunAddsNothingWhenTheApplicationDoesNotCreateTheNamespace(t *testing.T) {
 	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
 
-	if got := unaskedNote(err, "lab", false); got != "" {
+	if got := unaskedNote(err, "lab", "lab", false); got != "" {
 		t.Errorf("unaskedNote() = %q, want nothing - no manifest asks for the namespace", got)
 	}
 }
@@ -1429,7 +1442,7 @@ func TestAFailedDryRunAddsNothingWhenTheApplicationDoesNotCreateTheNamespace(t *
 func TestAFailedDryRunDoesNotBlameTheNamespaceForAnUnrelatedError(t *testing.T) {
 	err := errors.New("the server could not find the requested resource")
 
-	if got := unaskedNote(err, "lab", true); got != "" {
+	if got := unaskedNote(err, "lab", "lab", true); got != "" {
 		t.Errorf("unaskedNote() = %q, want nothing - that error is not a missing namespace", got)
 	}
 }
@@ -1439,7 +1452,62 @@ func TestAFailedDryRunDoesNotBlameTheNamespaceForAnUnrelatedError(t *testing.T) 
 func TestAFailedDryRunMatchesTheNamespaceThatIsActuallyMissing(t *testing.T) {
 	err := errors.New(`Error from server (NotFound): namespaces "prod" not found`)
 
-	if got := unaskedNote(err, "lab", true); got != "" {
+	if got := unaskedNote(err, "lab", "lab", true); got != "" {
 		t.Errorf("unaskedNote() = %q, want nothing - a different namespace is missing", got)
+	}
+}
+
+// --namespace overrides what the delivery config named, so the namespace idem
+// RENDERED into is not the one ArgoCD would create. Blaming the render
+// namespace sends the reader to a manifest that will never mention it - the
+// exact failure the quoted-name guard was written to prevent, one level up.
+func TestAFailedDryRunWillNotBlameANamespaceTheApplicationNeverNamed(t *testing.T) {
+	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
+
+	// The Application deploys to prod and would create prod; the user rendered
+	// into lab.
+	if got := unaskedNote(err, "lab", "prod", true); got != "" {
+		t.Errorf("unaskedNote() = %q, want nothing - ArgoCD would create prod, not lab", got)
+	}
+}
+
+// An Application with CreateNamespace=true and no destination.namespace names
+// no namespace to disagree with, so the render namespace is the only candidate
+// and is the one ArgoCD would create.
+func TestAFailedDryRunStillExplainsWhenTheApplicationNamesNoNamespace(t *testing.T) {
+	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
+
+	if got := unaskedNote(err, "lab", "", true); !strings.Contains(got, "lab") {
+		t.Errorf("unaskedNote() = %q, want the explanation - nothing contradicts lab", got)
+	}
+}
+
+// `idem diff -o json` used to print text and exit 0, so a script that believed
+// it was parsing JSON silently got a table. Same rule as flags after the chart
+// path: a flag the user believes is doing something, silently doing nothing, is
+// worse than one that is refused.
+func TestAVerbThatRendersOnlyTextRefusesAnotherFormat(t *testing.T) {
+	for _, args := range [][]string{
+		{"diff", "a.yaml", "b.yaml", "-o", "json"},
+		{"doctor", "-o", "yaml"},
+	} {
+		code, _, stderr := invoke(t, args...)
+
+		if code != exitFatal {
+			t.Errorf("idem %v exit = %d, want %d", args, code, exitFatal)
+		}
+		if !strings.Contains(stderr, "renders text only") {
+			t.Errorf("idem %v stderr = %q, want it to say the verb renders text only", args, stderr)
+		}
+	}
+}
+
+func TestAVerbThatRendersOnlyTextIsHappyWithTheDefault(t *testing.T) {
+	// -o text is the default and must stay silent, or every plain `idem doctor`
+	// starts failing.
+	_, _, stderr := invoke(t, "diff")
+
+	if strings.Contains(stderr, "renders text only") {
+		t.Errorf("stderr = %q, want no format complaint when none was asked for", stderr)
 	}
 }

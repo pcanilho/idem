@@ -229,7 +229,15 @@ func (c Config) ServerSideDiff(chartPath string) bool {
 // interesting one.
 func (c Config) destines(chartPath string, want func(Destination) bool) bool {
 	for _, d := range c.Destinations {
-		if !d.Templated && d.Path == chartPath && want(d) {
+		// No Templated check, unlike NamespaceFor. Templated says the
+		// path->namespace JOIN is unknowable, and neither fact below depends
+		// on that join - the compare-options annotation is not templated at
+		// all. Gating on it hid both from every per-cluster ApplicationSet.
+		//
+		// The empty-path skip IS kept, for the reason its two siblings keep
+		// it: chartPaths yields "" for a manifest naming no path, and an empty
+		// query must not match it.
+		if d.Path != "" && d.Path == chartPath && want(d) {
 			return true
 		}
 	}

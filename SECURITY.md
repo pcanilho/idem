@@ -9,10 +9,13 @@ question:
   kinds of call: `kubectl get … -o json`, and `kubectl apply --dry-run=server`, which the API
   server evaluates and discards without storing. There is no create, update, patch or delete
   anywhere in the codebase.
-- **`idem doctor` reads Secrets, and across all namespaces by default.** That is a
-  privilege-sensitive read: it needs `get`/`list` on `secrets` and `configmaps` cluster-wide to
-  find what is being written after apply. Narrow it with `--namespace <ns>` if that is more
-  access than you want to grant.
+- **Bare `idem doctor` reads no Secrets.** It makes two cluster-wide reads —
+  `deployments,statefulsets,daemonsets` and `applications.argoproj.io` — and nothing else.
+- **`idem doctor --namespace <ns>` additionally reads `secrets` and `configmaps`, in that one
+  namespace.** That is the privilege-sensitive call, and it is opt-in: finding what a controller
+  writes after apply means comparing live objects against their own `last-applied` record, and
+  for Secrets there is no other evidence. It is scoped to the namespace you name — `kubectl get
+  -n <ns>`, never `--all-namespaces`.
 - **It never writes to your repository.** Subchart dependencies resolve in a temporary directory
   that is removed afterwards, unless you explicitly pass `--dependency-update`.
 - **It sends nothing anywhere.** No telemetry, no analytics. `idem` imports no HTTP client at

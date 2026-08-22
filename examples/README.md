@@ -8,10 +8,14 @@ idem ./examples/stable-chart      # the same shape, pinned
 ```
 
 `churning-chart` generates a password with nothing to stabilise it, so every render produces a
-different Secret. Under `helm upgrade` that is survivable, because Helm stores the release and
-the value only changes when you actually upgrade. ArgoCD's repo-server renders from git with no
-cluster access, so it produces a new password every time it renders and the app can never reach
-`Synced`.
+different Secret. `stable-chart` is the same shape with the value pinned in `values.yaml`.
 
-The usual fix is a `{{ lookup }}` guard, which works under Flux and Helm and does nothing under
-ArgoCD. That is the difference `idem` reports.
+Neither chart contains a `{{ lookup }}`, and that is deliberate: it is why `idem` reports
+**CHURNS for all three engines** here rather than the split verdict. With no `lookup` anywhere,
+nothing can stabilise the value under Flux or Helm either, so this is a chart defect rather than
+an ArgoCD limitation — which is exactly the conclusion `idem` prints.
+
+The split verdict — churning under ArgoCD, stable under Flux and Helm — is what a `lookup` guard
+produces, because ArgoCD's repo-server renders from git with no cluster access and resolves
+`lookup` to `{}`. That case needs a cluster to demonstrate, so it lives in `testdata/guarded`
+rather than here.

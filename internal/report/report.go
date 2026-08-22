@@ -447,15 +447,32 @@ func (r Report) sourcePath(c Chart, source string) string {
 	return source
 }
 
-// statesServerSideDiff reports whether any chart in the run was claimed by a
-// manifest asking for server-side diff.
+// statesServerSideDiff reports whether EVERY chart contributing to this fix
+// block was claimed by a manifest asking for server-side diff.
 //
-// Any rather than all: the caveat is one sentence about one pointer, and the
-// manifest that DOES state the mode is the informative one. False keeps the
-// hedge, which is the honest default - the mode can be set cluster-wide in
-// argocd-cmd-params-cm, which is in no manifest idem reads.
+// All, not any. This was written as any, on the reasoning that the manifest
+// which states the mode is the informative one - but the sentence it gates is
+// singular ("This Application sets ServerSideDiff=true") and is printed once,
+// beside a pointer belonging to one object from one Application. With two
+// charts and one annotation, idem stated as a fact the opposite of what it had
+// just read from the manifest the reader was about to edit.
+//
+// Disagreement therefore falls back to the hedge, which is also what an empty
+// run gets. False never means "the mode is off": it can be set cluster-wide by
+// controller.diff.server.side in argocd-cmd-params-cm, which is in no manifest
+// idem reads.
 func statesServerSideDiff(charts []Chart) bool {
-	return slices.ContainsFunc(charts, func(c Chart) bool { return c.ServerSideDiff })
+	var stated bool
+	for _, c := range charts {
+		if c.Err != nil || len(c.Findings) == 0 {
+			continue
+		}
+		if !c.ServerSideDiff {
+			return false
+		}
+		stated = true
+	}
+	return stated
 }
 
 // stringDataPointer reports whether a block carries a pointer whose evaluation
@@ -1000,8 +1017,8 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 	writeFluxRemediation(b, charts, show, wrote)
 }
 
-// writeFluxRemediation emits driftDetection.ignore for the churn Flux will
-// actually have.
+// fluxFindings selects the findings a Flux block should cover, so every format
+// offering that fix offers the same one.
 //
 // Scoped by verdict rather than emitted for everything: a chart whose value a
 // `lookup` stabilises does not drift under Flux, and handing the reader config
@@ -1009,12 +1026,6 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 // trusted. Findings the ArgoCD condition saw count only when the Flux verdict
 // says Flux churns too; findings only the cluster condition saw always do,
 // because that verdict is an observation of exactly this engine.
-// fluxFindings selects the findings a Flux block should cover, so the text form
-// and `-o json` cannot drift into offering different fixes for the same run.
-//
-// Findings the ArgoCD condition saw count only when the Flux verdict says Flux
-// churns too; findings only the cluster condition saw always do, because that
-// verdict is an observation of exactly this engine.
 func fluxFindings(charts []Chart) []check.Finding {
 	var findings []check.Finding
 	for _, c := range charts {
@@ -1029,6 +1040,8 @@ func fluxFindings(charts []Chart) []check.Finding {
 	return findings
 }
 
+// writeFluxRemediation emits driftDetection.ignore for the churn Flux will
+// actually have, after the ArgoCD block when there was one.
 func writeFluxRemediation(b *strings.Builder, charts []Chart, show []string, afterArgo bool) {
 	if !shows(show, "flux") {
 		return

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -58,6 +59,24 @@ func TestThePreCommitHookOnlyUsesFlagsTheBinaryHas(t *testing.T) {
 			if !actual[name] {
 				t.Errorf("hook %q uses -%s, which the binary does not accept", h.ID, name)
 			}
+		}
+	}
+}
+
+// The published hook has to actually gate a commit.
+//
+// TestThePreCommitHookOnlyUsesFlagsTheBinaryHas checks that the flags it names
+// PARSE, and that was VACUOUS about the flags being there at all: with
+// `args: []` the loop body never runs, the whole suite stays green, and every
+// consumer silently gets a hook that reports and never blocks. `entry: idem .`
+// -> `entry: idem` is the same class - bare idem prints help and exits 0.
+func TestThePreCommitHookActuallyGatesTheCommit(t *testing.T) {
+	for _, h := range hooks(t) {
+		if got, want := strings.Fields(h.Entry), []string{"idem", "."}; !slices.Equal(got, want) {
+			t.Errorf("hook %q entry = %v, want %v - bare `idem` prints help and exits 0", h.ID, got, want)
+		}
+		if !slices.Contains(h.Args, "--strict") {
+			t.Errorf("hook %q args = %v, want --strict; without it the hook never fails a commit", h.ID, h.Args)
 		}
 	}
 }

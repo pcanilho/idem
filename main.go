@@ -147,23 +147,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	// The verbs. Disambiguated by disk, the same way a chart reference is: a
-	// directory actually named "doctor" is a chart, not the verb.
-	if verb(operands, "diff") {
-		return runDiff(operands[1:], opt, stdout, stderr)
-	}
-	if verb(operands, "doctor") {
-		return runDoctor(context.Background(), opt, stdout, stderr)
-	}
-
 	// A bare `idem` used to mean `.` and recurse without bound - typed in a
 	// home directory it walks everything looking for a Chart.yaml. Someone
 	// typing the bare name is asking what this is, not asking for their whole
 	// disk to be scanned, and git, kubectl and helm all answer that question
 	// the same way. `idem .` is still there for the deliberate case.
+	//
+	// Ahead of verb dispatch, which indexes operands[0].
 	if len(operands) == 0 {
 		writeHelp(stdout, fs)
 		return exitOK
+	}
+
+	// The verbs. Disambiguated by disk, the same way a chart reference is: a
+	// directory actually named "doctor" is a chart, not the verb.
+	//
+	// Both render text and nothing else, so -o is REFUSED here rather than
+	// ignored. Accepting `idem diff -o json` and printing a table would hand a
+	// script something it cannot parse while telling it nothing went wrong -
+	// the same failure as a flag silently dropped after the chart path.
+	if name := operands[0]; verb(operands, "diff") || verb(operands, "doctor") {
+		if opt.output != "text" {
+			fmt.Fprintf(stderr, "idem: `idem %s` renders text only, so -o %s would be ignored\n", name, opt.output)
+			fmt.Fprintf(stderr, "      drop -o, or use `idem <chart> -o %s` for the machine-readable report\n", opt.output)
+			return exitFatal
+		}
+		if name == "diff" {
+			return runDiff(operands[1:], opt, stdout, stderr)
+		}
+		return runDoctor(context.Background(), opt, stdout, stderr)
 	}
 
 	target, err := chartTarget(operands)
@@ -320,8 +332,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if result.RewriteErr != nil {
 			fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n",
 				result.Chart.Name, result.RewriteErr)
+			stated, _ := deliveryCfg.NamespaceFor(chartPath(root, result.Chart.Dir))
 			fmt.Fprint(stderr, unaskedNote(result.RewriteErr,
-				releases[result.Chart.Name].namespace,
+				releases[result.Chart.Name].namespace, stated,
 				deliveryCfg.CreatesNamespace(chartPath(root, result.Chart.Dir))))
 		}
 
@@ -721,12 +734,6 @@ func releaseName(raw string) string {
 	return path.Base(strings.TrimSuffix(raw, "/"))
 }
 
-// rewritesFor asks the API server what it would change about this render.
-//
-// Only with --context, and never fatal: a namespace that does not exist, a
-// missing CRD or RBAC that forbids the dry run all mean idem cannot answer
-// this particular question, not that the chart is broken. Everything measured
-// without a cluster still stands.
 // unaskedNote explains a dry run idem could not make, when the delivery config
 // already says why.
 //
@@ -734,17 +741,25 @@ func releaseName(raw string) string {
 // Application would have created. CreateNamespace=true does not explain an
 // unreachable cluster or a denied request, and naming it as the reason would
 // send the reader after the wrong thing - so this fails closed.
-func unaskedNote(err error, namespace string, creates bool) string {
-	if !creates || namespace == "" {
+func unaskedNote(err error, rendered, stated string, creates bool) string {
+	if !creates || rendered == "" {
+		return ""
+	}
+	// The Application names a namespace and idem rendered into a different one,
+	// because --namespace overrides the delivery config. ArgoCD would create
+	// the one the Application names, so blaming the render namespace would send
+	// the reader to a manifest that never mentions it. Stay silent: this note
+	// only ever adds a sentence, so saying nothing costs nothing.
+	if stated != "" && stated != rendered {
 		return ""
 	}
 	// kubectl says `namespaces "lab" not found`. Matched on the quoted name so
 	// an Application that creates `lab` cannot explain a failure about `prod`.
 	msg := err.Error()
-	if !strings.Contains(msg, `"`+namespace+`"`) || !strings.Contains(msg, "not found") {
+	if !strings.Contains(msg, `"`+rendered+`"`) || !strings.Contains(msg, "not found") {
 		return ""
 	}
-	return fmt.Sprintf("      the Application sets CreateNamespace=true, so ArgoCD would create %s first\n", namespace)
+	return fmt.Sprintf("      the Application sets CreateNamespace=true, so ArgoCD would create %s first\n", rendered)
 }
 
 // admission asks the API server what it would change about a chart's rendered

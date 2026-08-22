@@ -418,8 +418,47 @@ func TestTheFlaggedSetMatchesTheAudit(t *testing.T) {
 	// docs/design.md §5 pins this list, audited against sprig v3.3.0 - which
 	// both Helm 3.19 and Helm 4.2 pin, so one list covers both lines. If the
 	// set changes, that document changes with it.
-	if got, want := len(Functions), 24; got != want {
-		t.Errorf("Functions has %d entries, want %d (23 sprig + lookup)", got, want)
+	//
+	// The names, not the count. This asserted len(Functions) == 24 and was
+	// VACUOUS for everything the rest of the suite does not happen to name:
+	// renaming "htpasswd" to "htpasswdd" - so it is never detected in any
+	// chart - left the count at 24 and the whole suite green. About fifteen of
+	// the twenty-four were pinned by cardinality alone.
+	want := []string{
+		"ago",
+		"bcrypt",
+		"encryptAES",
+		"genCA",
+		"genCAWithKey",
+		"genPrivateKey",
+		"genSelfSignedCert",
+		"genSelfSignedCertWithKey",
+		"genSignedCert",
+		"genSignedCertWithKey",
+		"getHostByName",
+		"htpasswd",
+		"keys",
+		"lookup",
+		"now",
+		"randAlpha",
+		"randAlphaNum",
+		"randAscii",
+		"randBytes",
+		"randInt",
+		"randNumeric",
+		"shuffle",
+		"uuidv4",
+		"values",
+	}
+
+	got := make([]string, 0, len(Functions))
+	for _, f := range Functions {
+		got = append(got, f.Name)
+	}
+	slices.Sort(got)
+
+	if !slices.Equal(got, want) {
+		t.Errorf("Functions = %v,\nwant %v", got, want)
 	}
 }
 

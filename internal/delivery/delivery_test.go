@@ -1279,3 +1279,72 @@ spec:
 		t.Errorf("NamespaceFor() = %q from %q, want empty - no manifest names a namespace", ns, file)
 	}
 }
+
+// Templated says the path->namespace JOIN is unknowable. Neither of these two
+// facts depends on that join - the compare-options annotation is not templated
+// at all - so gating them on it made an ordinary per-cluster ApplicationSet
+// report "no manifest says so" about a manifest that says so.
+//
+// This is the same confusion that was fixed at the top of argoDestinations and
+// left in place here.
+func TestATemplatedNamespaceDoesNotHideWhatTheApplicationStates(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/set.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: per-cluster
+spec:
+  generators:
+    - clusters: {}
+  template:
+    metadata:
+      annotations:
+        argocd.argoproj.io/compare-options: ServerSideDiff=true
+    spec:
+      source:
+        path: charts/home
+      destination:
+        namespace: '{{.metadata.labels.env}}'
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true
+`)
+
+	cfg := load(t, dir)
+	if !cfg.CreatesNamespace("charts/home") {
+		t.Error("CreatesNamespace() = false, want true - a templated namespace does not unset the option")
+	}
+	if !cfg.ServerSideDiff("charts/home") {
+		t.Error("ServerSideDiff() = false, want true - the annotation is not templated")
+	}
+	// The join really is unknowable, and that answer must not change.
+	if ns, _ := cfg.NamespaceFor("charts/home"); ns != "" {
+		t.Errorf("NamespaceFor() = %q, want empty - the namespace is templated", ns)
+	}
+}
+
+// chartPaths returns []string{""} for a manifest that names no path -
+// unjoinable, but visible. NamespaceFor and For both skip those; destines did
+// not, so a query that arrived with an empty path would match an unrelated
+// manifest.
+func TestAManifestThatNamesNoPathIsNotMatchedByAnEmptyQuery(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/remote.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: remote-app
+spec:
+  source:
+    repoURL: https://charts.example.com
+    chart: nginx
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+`)
+
+	if load(t, dir).CreatesNamespace("") {
+		t.Error("CreatesNamespace(\"\") = true, want false - an empty path joins to nothing")
+	}
+}

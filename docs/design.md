@@ -129,9 +129,12 @@ Three caveats:
   has arguments that are themselves template expressions; `idem` names the object when they are
   literals and says so generically when they are not.
 
-With `--context`, `idem` also passes the cluster's real `--api-versions` and `--kube-version`,
-which is what ArgoCD does — so charts gated on `.Capabilities.APIVersions.Has` render the way
-they will in your cluster rather than against Helm's defaults.
+With `--context`, charts gated on `.Capabilities.APIVersions.Has` render against your cluster's
+real capabilities rather than Helm's built-in defaults — but by a different route than you might
+expect. `idem` does **not** pass `--api-versions`/`--kube-version`; `internal/helm` deliberately
+omits them, because `--dry-run=server` means the API server has already supplied the real ones.
+ArgoCD passes those flags precisely *because* its repo-server never does a server dry run, so the
+two arrive at the same place by opposite means.
 
 ---
 
@@ -407,9 +410,11 @@ Other engine-side transformations in the same family:
 - **Flux `postRenderers`** — kustomize patches applied after helm-controller renders, which can
   equally introduce or mask a difference.
 
-This class is detectable without a cluster *if* `idem` can read the engine's configuration; with
-`--context` it reads `argocd-cm` directly and can state the collision as fact rather than as a
-warning about defaults.
+This class is detectable without a cluster *if* `idem` can read the engine's configuration. It
+reads the `Application`/`ApplicationSet`/`HelmRelease` in your repository, which is where
+`ignoreDifferences`, `driftDetection.ignore` and the sync options live. It does **not** read
+`argocd-cm`, with or without `--context`, so the instance-label collision below is analysis
+rather than a check idem performs.
 
 ### 3. Apply-side — what the cluster does to what was applied
 
@@ -427,9 +432,10 @@ No new machinery: render, ask the API server what it would actually store
 
 1. **ArgoCD already normalises most plain defaulting**, so a raw diff of rendered-vs-stored
    overstates the problem. What actually breaks people is a mutating webhook writing fields
-   ArgoCD's normaliser does not expect. `idem` reports the diff and names the
-   `MutatingWebhookConfiguration`s whose rules match the objects involved, rather than implying
-   all of it is drift.
+   ArgoCD's normaliser does not expect. `idem` reports the diff and says that much in one
+   sentence; it does **not** read `admissionregistration.k8s.io`, so it cannot name which
+   webhook did it. Naming them would need the rules matched against each object, and that is
+   not built.
 2. **Pod-level injectors do not cause Deployment-level drift.** The Vault agent injector and
    Istio's sidecar injector match `pods`; ArgoCD compares Deployments. The mutation happens when
    the Pod is created from the template, not when the Deployment is applied, so it never appears
@@ -550,10 +556,12 @@ labels can manufacture evidence that was never there. This is mechanically just
 different in kind: it does not create drift, it corrupts the reading.
 
 There is no way to detect this from the object alone — a mutated label looks exactly like an
-honest one. What `idem` can do is say how much to trust the reading, by enumerating what is in
-the mutation chain:
+honest one. What `idem` *could* do is say how much to trust the reading, by enumerating what is
+in the mutation chain. **This is a sketch of an unbuilt check, not output `idem` produces** — it
+reads no `admissionregistration.k8s.io` and no Kyverno policies today:
 
-```console
+```text
+  SKETCH, NOT IMPLEMENTED
   note: 2 mutating webhooks and 1 Kyverno mutate policy can rewrite labels on
         these objects. Evidence read from live state is only as reliable as
         those allow.
@@ -562,7 +570,7 @@ the mutation chain:
           ClusterPolicy/istio-auto-inject     namespaces  (mutate: labels)
 ```
 
-That is honest without being paranoid: on a cluster whose only mutators touch `pods` and CNPG
+That would be honest without being paranoid: on a cluster whose only mutators touch `pods` and CNPG
 resources, a `helm.sh/chart` label on a Deployment is entirely trustworthy, and saying so is
 more useful than a blanket disclaimer. The rule is the same as everywhere else in this
 document — state the provenance, and let the reader judge.
@@ -596,9 +604,12 @@ helm"**. It does not mean the chart is pinned, reproducible, or safe next month.
 ## 10. Decisions borrowed rather than invented
 
 **The ratchet is golangci-lint's.** `--new-from-rev` / `--new-from-merge-base`, and
-deliberately not a baseline file. From golangci-lint's own help text: *"It's not practical to
-fix all existing issues at the moment of integration: much better to not allow issues in new
-code."* Git already knows what changed; storing a second copy of that knowledge in a checked-in
+deliberately not a baseline file. The reasoning is from golangci-lint's own help text — precisely,
+from the help for `--new`/`-n` rather than for `--new-from-rev`, whose own help is the one-liner
+*"Show only new issues created after git revision REV"*: *"It's not practical to fix all existing
+issues at the moment of integration: much better to not allow issues in new code."* The same block
+ends with the line that argues hardest for this shape — *"For CI setups, prefer
+`--new-from-rev=HEAD~`"*. Git already knows what changed; storing a second copy of that knowledge in a checked-in
 allowlist is a format to maintain and a thing to review, for no gain. The granularity differs —
 golangci-lint scopes to changed lines, `idem` scopes to changed charts, because a finding
 belongs to a rendered object rather than a source line.
@@ -629,8 +640,10 @@ exactly the terminals that cannot be tested, and because box-drawing characters 
 **The last line is a verdict, not a stat line.** `2 of 10 charts will churn under ArgoCD; 1
 could not be rendered` beats `10 charts · 7 consistent · 2 differ · 1 unevaluable`, which makes
 the reader do arithmetic to find out whether to care. Borrowed from
-[iam-policy-validator](https://github.com/boogy/iam-policy-validator), whose footer states the
-conclusion in a sentence.
+[iam-policy-validator](https://github.com/boogy/iam-policy-validator) — from its `--format
+enhanced`, to be exact. Its *default* `console` format falls back to the stat fragments
+(`✗ 2 AWS-invalid`, `⚠ 3 with findings`) that this rule moved away from, so the citation is for
+the shape one of its formats takes, not for the tool's default behaviour.
 
 **`json`** is the machine contract and the documented substitute for the rules system that was
 cut, so its shape is stable from the first release: enums marshal as names rather than

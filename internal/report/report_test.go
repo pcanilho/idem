@@ -524,6 +524,35 @@ func TestTheDiffModeCaveatStaysHedgedWhenNoManifestStatesTheMode(t *testing.T) {
 	}
 }
 
+// The definite sentence is singular - "This Application sets ServerSideDiff=true"
+// - and it is printed once, beside a pointer belonging to one object from one
+// Application. Deciding it with ANY over the whole run meant a second, unrelated
+// chart could make idem state, as a fact, the opposite of what it read from the
+// manifest the reader is about to edit.
+func TestTheDiffModeCaveatHedgesWhenOnlySomeApplicationsStateTheMode(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{
+			{
+				Name:     "alpha",
+				Findings: []check.Finding{finding("alpha/templates/s.yaml", "alpha-secret", ".stringData.key")},
+			},
+			{
+				Name:           "beta",
+				ServerSideDiff: true,
+				Findings:       []check.Finding{finding("beta/templates/s.yaml", "beta-secret", ".data.key")},
+			},
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if strings.Contains(got, "This Application sets ServerSideDiff=true") {
+		t.Errorf("Text() = %q, want no claim about a mode alpha's Application does not set", got)
+	}
+	if !strings.Contains(got, "path this install is on") {
+		t.Errorf("Text() = %q, want the hedge while the run disagrees with itself", got)
+	}
+}
+
 func suppressed(name, pointer, file string, selfHeal, respected bool) delivery.Suppressed {
 	return delivery.Suppressed{
 		Finding: finding("home/templates/s.yaml", name, ".data.key"),
@@ -929,22 +958,29 @@ func TestPotentialCapsTheWarningsShownPerChart(t *testing.T) {
 }
 
 func TestPotentialLinesStayReadablyNarrow(t *testing.T) {
-	// Column alignment pads to the widest cell, so a deeply vendored subchart
-	// path in one row stretches every other row with it.
+	// Measured in RUNES, not bytes. The report is full of —, · and … at three
+	// bytes each, so a byte count fails at about 113 visible columns and goes
+	// red for a reason that has nothing to do with column width. Its sibling
+	// TestTheProvenanceLineWrapsRatherThanRunningOn already counts runes.
 	got := text(t, Report{
 		Charts: []Chart{{
 			Name: "lab",
 			Potential: []analyze.Use{
-				potentialUse("gitea/charts/postgresql-ha/charts/common/templates/_secrets.tpl", 132, "randAlpha"),
-				potentialUse("templates/s.yaml", 3, "now"),
+				potentialUse("lab/charts/common/charts/postgresql/templates/secrets.yaml", 351, "genSelfSignedCert"),
 			},
 		}},
 		Helm: "4.2.4", Rounds: 2,
 	})
 
-	for line := range strings.SplitSeq(got, "\n") {
-		if len(line) > 120 {
-			t.Errorf("line is %d chars, want under 120:\n%s", len(line), line)
+	// Scoped to the potential block: this test is named for that section, and
+	// scanning the whole report meant unrelated prose could trip it.
+	_, block, found := strings.Cut(got, "not counted, not fatal")
+	if !found {
+		t.Fatalf("Text() = %q, want a potential section", got)
+	}
+	for line := range strings.SplitSeq(block, "\n") {
+		if n := len([]rune(line)); n > 120 {
+			t.Errorf("potential line is %d columns, want at most 120:\n%s", n, line)
 		}
 	}
 }

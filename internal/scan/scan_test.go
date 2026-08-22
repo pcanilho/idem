@@ -327,22 +327,37 @@ func TestInspectionObeysTheSameJobLimitAsRendering(t *testing.T) {
 	}
 }
 
-func TestInspectionOverlapsWithRendering(t *testing.T) {
+func TestInspectionOverlapsWithOtherChartsRendering(t *testing.T) {
 	// The whole point of moving it into the pool: a chart's source scan should
 	// run while other charts are still rendering, not in a second pass after
 	// every render has finished.
-	m := newMeeting(2)
+	//
+	// This used the newMeeting(2) counter and was VACUOUS: one chart with
+	// rounds: 2 puts two RENDERS in flight, which satisfies "two arrived" on
+	// its own, so the meeting opened whether or not an inspection was ever
+	// among them. Moving Inspect to a serial pass after wg.Wait() left it
+	// green - the exact regression its comment names.
+	//
+	// Same shape as the admission test now: "slow" blocks in its render until
+	// an inspection arrives, and only "fast" can send one. In a pass after the
+	// pool drains, neither side meets the other and both say so.
+	rv := newRendezvous()
 
-	got := Charts(context.Background(), m, []Chart{chart("only")}, 2, 8,
-		Hooks{Inspect: func(Chart) ([]analyze.Use, error) {
-			// Joins the same meeting as the renders, so this only returns if a
-			// render was genuinely in flight at the same moment.
-			_, err := m.Render(context.Background(), engine.Spec{Release: "only"})
-			return nil, err
+	got := Charts(context.Background(), &blocking{r: rv, on: "slow"}, []Chart{chart("fast"), chart("slow")}, 2, 8,
+		Hooks{Inspect: func(c Chart) ([]analyze.Use, error) {
+			if c.Name != "fast" {
+				return nil, nil
+			}
+			return nil, rv.admit()
 		}})
 
-	if got[0].Err != nil || got[0].InspectErr != nil {
-		t.Errorf("render and inspection did not overlap: %v / %v", got[0].Err, got[0].InspectErr)
+	for _, res := range got {
+		if res.Err != nil {
+			t.Errorf("%s: %v", res.Chart.Name, res.Err)
+		}
+		if res.InspectErr != nil {
+			t.Errorf("%s: %v", res.Chart.Name, res.InspectErr)
+		}
 	}
 }
 
