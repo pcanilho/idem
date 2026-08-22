@@ -329,3 +329,21 @@ func TestAClientCleanChartWithLookupIsUnknownWhereLookupResolves(t *testing.T) {
 		t.Errorf("Because = %q, want the lookup located", v.Because)
 	}
 }
+
+func TestArgoCDChurnDoesNotClaimItHappensOnEverySync(t *testing.T) {
+	// Corrected 2026-08-22 against ArgoCD's own docs: the repo-server caches
+	// generated manifests, `reposerver.repo.cache.expiration` defaulting to
+	// 24h0m0s and covering "manifest generation". So a churning chart is
+	// re-rendered on cache expiry, a hard refresh, or a change to the cache
+	// key - not on every sync. The old wording overstated the mechanism, in
+	// the one tool whose value rests on claims being checked rather than
+	// recalled.
+	because := byName(t, "argocd").Verdict(oneUse).Because
+
+	if strings.Contains(because, "every sync") {
+		t.Errorf("Because = %q, want no claim that it churns on every sync", because)
+	}
+	if !strings.Contains(because, "re-render") {
+		t.Errorf("Because = %q, want the actual trigger named", because)
+	}
+}

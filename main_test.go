@@ -434,7 +434,10 @@ func TestEngineFlagSelectsASingleEngine(t *testing.T) {
 	if !strings.Contains(stdout, "flux") {
 		t.Errorf("stdout = %q, want the flux verdict", stdout)
 	}
-	if strings.Contains(stdout, "every sync, forever") {
+	// Keyed on the argocd verdict's own reason rather than on a passing
+	// phrase: this assertion went vacuous once the wording changed, which is
+	// exactly what it was meant to catch.
+	if strings.Contains(stdout, "without cluster access") {
 		t.Errorf("stdout = %q, want no argocd row when only flux was asked for", stdout)
 	}
 }

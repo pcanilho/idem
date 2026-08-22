@@ -13,7 +13,8 @@ $ idem ./charts
 
 Why that matters: a chart that renders differently on every pass never converges under ArgoCD.
 The app sits `OutOfSync`, `selfHeal` re-applies it, and any workload carrying a `checksum/`
-annotation rolls its pods — on every sync, forever.
+annotation rolls its pods — every time the repo-server re-renders, which by default is at least
+daily.
 
 ---
 
@@ -198,7 +199,7 @@ $ idem oci://registry-1.docker.io/bitnamicharts/postgresql --engine all
   postgresql/templates/secrets.yaml
     Secret/pg-postgresql   .data.postgres-password
 
-      argocd    CHURNS     every sync, forever; workloads with a checksum/ annotation roll
+      argocd    CHURNS     on every re-render — at least daily, and without cluster access
       flux      unknown    chart uses `lookup` (common/_secrets.tpl:103) — may guard this value
       helm      unknown    same
 

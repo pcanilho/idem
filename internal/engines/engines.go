@@ -37,9 +37,17 @@ func All() []Target {
 			id:   "argocd",
 			name: "argocd",
 			// Verified: ArgoCD's repo-server shells out to `helm template`
-			// (util/helm/cmd.go) with no cluster access, and re-renders on
-			// every reconcile.
-			churn: "every sync, forever — repo-server renders without cluster access",
+			// (util/helm/cmd.go) with no cluster access.
+			//
+			// It does NOT re-render on every reconcile, and saying so
+			// overstated the mechanism: generated manifests are cached, with
+			// `reposerver.repo.cache.expiration` defaulting to 24h0m0s and
+			// documented as covering "manifest generation". A churning chart
+			// therefore produces a new value on cache expiry, on a hard
+			// refresh, or when the cache key changes - repo, revision, path or
+			// parameters. Indefinitely recurring, but daily rather than
+			// per-sync.
+			churn: "on every re-render — at least daily, and without cluster access",
 			caps:  engine.Capabilities{LookupResolves: false, RerendersOnReconcile: true},
 		},
 		{
