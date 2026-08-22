@@ -1394,3 +1394,52 @@ func TestAnExplicitDotStillChecksTheCurrentDirectory(t *testing.T) {
 		t.Errorf("stdout = %q, want the chart found", stdout)
 	}
 }
+
+// A dry run into a namespace that does not exist fails, and the bare failure
+// reads as "idem could not check this chart" when the truth is "ArgoCD would
+// have created the namespace first". The Application said so all along.
+//
+// Tested as a pure function rather than through a cluster: what this says is a
+// property of the message, and requiring a live API server to check it would
+// mean never checking it.
+func TestAFailedDryRunSaysWhenTheApplicationWouldHaveCreatedTheNamespace(t *testing.T) {
+	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
+
+	got := unaskedNote(err, "lab", true)
+
+	if !strings.Contains(got, "CreateNamespace=true") {
+		t.Errorf("unaskedNote() = %q, want it to name the option", got)
+	}
+	if !strings.Contains(got, "lab") {
+		t.Errorf("unaskedNote() = %q, want it to name the namespace", got)
+	}
+}
+
+func TestAFailedDryRunAddsNothingWhenTheApplicationDoesNotCreateTheNamespace(t *testing.T) {
+	err := errors.New(`Error from server (NotFound): namespaces "lab" not found`)
+
+	if got := unaskedNote(err, "lab", false); got != "" {
+		t.Errorf("unaskedNote() = %q, want nothing - no manifest asks for the namespace", got)
+	}
+}
+
+// CreateNamespace=true does not explain an unreachable cluster or a denied
+// request, and offering it as the reason would send the reader after the wrong
+// thing. Fails closed: no match, no sentence.
+func TestAFailedDryRunDoesNotBlameTheNamespaceForAnUnrelatedError(t *testing.T) {
+	err := errors.New("the server could not find the requested resource")
+
+	if got := unaskedNote(err, "lab", true); got != "" {
+		t.Errorf("unaskedNote() = %q, want nothing - that error is not a missing namespace", got)
+	}
+}
+
+// The namespace has to be the one that is missing. An Application creating
+// `lab` explains nothing about a dry run that failed on `prod`.
+func TestAFailedDryRunMatchesTheNamespaceThatIsActuallyMissing(t *testing.T) {
+	err := errors.New(`Error from server (NotFound): namespaces "prod" not found`)
+
+	if got := unaskedNote(err, "lab", true); got != "" {
+		t.Errorf("unaskedNote() = %q, want nothing - a different namespace is missing", got)
+	}
+}

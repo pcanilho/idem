@@ -488,6 +488,42 @@ func TestTheDiffModeCaveatAppearsOnTheOnePointerItChanges(t *testing.T) {
 	}
 }
 
+// When a manifest states the mode, hedging about it is idem declining to read
+// something in front of it. The hedge is right only while the answer is
+// genuinely unknown - and it usually is, because the mode can also be set
+// cluster-wide in argocd-cmd-params-cm, which is in no manifest idem reads.
+func TestTheDiffModeCaveatIsDefiniteWhenTheManifestStatesTheMode(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:           "home",
+			ServerSideDiff: true,
+			Findings:       []check.Finding{finding("home/templates/s.yaml", "creds", ".stringData.key")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "This Application sets ServerSideDiff=true") {
+		t.Errorf("Text() = %q, want the caveat to state what the manifest says", got)
+	}
+	if strings.Contains(got, "path this install is on") {
+		t.Errorf("Text() = %q, want no hedge about something idem can read", got)
+	}
+}
+
+func TestTheDiffModeCaveatStaysHedgedWhenNoManifestStatesTheMode(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{
+			Name:     "home",
+			Findings: []check.Finding{finding("home/templates/s.yaml", "creds", ".stringData.key")},
+		}},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "path this install is on") {
+		t.Errorf("Text() = %q, want the hedge - nothing idem read says which mode", got)
+	}
+}
+
 func suppressed(name, pointer, file string, selfHeal, respected bool) delivery.Suppressed {
 	return delivery.Suppressed{
 		Finding: finding("home/templates/s.yaml", name, ".data.key"),

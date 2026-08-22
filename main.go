@@ -320,26 +320,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if result.RewriteErr != nil {
 			fmt.Fprintf(stderr, "idem: could not ask the cluster what it would do with %s: %v\n",
 				result.Chart.Name, result.RewriteErr)
+			fmt.Fprint(stderr, unaskedNote(result.RewriteErr,
+				releases[result.Chart.Name].namespace,
+				deliveryCfg.CreatesNamespace(chartPath(root, result.Chart.Dir))))
 		}
 
 		rep.Charts = append(rep.Charts, report.Chart{
-			Name:          result.Chart.Name,
-			Dir:           result.Chart.Dir,
-			Release:       deliveredRelease(releases[result.Chart.Name], result.Chart.Name),
-			Namespace:     releases[result.Chart.Name].namespace,
-			NamespaceFrom: releases[result.Chart.Name].from,
-			Unresolved:    releases[result.Chart.Name].unresolved,
-			RepoDir:       chartPath(root, result.Chart.Dir),
-			Deps:          resolutions.of(result.Chart.Dir),
-			Changed:       gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
-			Findings:      applied.Churning,
-			ServerOnly:    serverOnly,
-			Suppressed:    applied.Suppressed,
-			Maybe:         applied.Maybe,
-			Verdicts:      verdictsFor(result, evidence),
-			Potential:     analyze.Potential(result.Uses),
-			Rewrites:      result.Rewrites,
-			Err:           result.Err,
+			Name:           result.Chart.Name,
+			Dir:            result.Chart.Dir,
+			Release:        deliveredRelease(releases[result.Chart.Name], result.Chart.Name),
+			Namespace:      releases[result.Chart.Name].namespace,
+			NamespaceFrom:  releases[result.Chart.Name].from,
+			Unresolved:     releases[result.Chart.Name].unresolved,
+			RepoDir:        chartPath(root, result.Chart.Dir),
+			Deps:           resolutions.of(result.Chart.Dir),
+			Changed:        gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
+			Findings:       applied.Churning,
+			ServerOnly:     serverOnly,
+			Suppressed:     applied.Suppressed,
+			Maybe:          applied.Maybe,
+			Verdicts:       verdictsFor(result, evidence),
+			Potential:      analyze.Potential(result.Uses),
+			Rewrites:       result.Rewrites,
+			ServerSideDiff: deliveryCfg.ServerSideDiff(chartPath(root, result.Chart.Dir)),
+			Err:            result.Err,
 		})
 	}
 
@@ -723,6 +727,26 @@ func releaseName(raw string) string {
 // missing CRD or RBAC that forbids the dry run all mean idem cannot answer
 // this particular question, not that the chart is broken. Everything measured
 // without a cluster still stands.
+// unaskedNote explains a dry run idem could not make, when the delivery config
+// already says why.
+//
+// Returns nothing unless the error really is the missing namespace this
+// Application would have created. CreateNamespace=true does not explain an
+// unreachable cluster or a denied request, and naming it as the reason would
+// send the reader after the wrong thing - so this fails closed.
+func unaskedNote(err error, namespace string, creates bool) string {
+	if !creates || namespace == "" {
+		return ""
+	}
+	// kubectl says `namespaces "lab" not found`. Matched on the quoted name so
+	// an Application that creates `lab` cannot explain a failure about `prod`.
+	msg := err.Error()
+	if !strings.Contains(msg, `"`+namespace+`"`) || !strings.Contains(msg, "not found") {
+		return ""
+	}
+	return fmt.Sprintf("      the Application sets CreateNamespace=true, so ArgoCD would create %s first\n", namespace)
+}
+
 // admission asks the API server what it would change about a chart's rendered
 // output, or nil when no cluster was asked for.
 //

@@ -103,6 +103,11 @@ type Chart struct {
 	// Rewrites are fields the API server said it would change on admission.
 	Rewrites []doctor.Rewrite
 
+	// ServerSideDiff records that a manifest claiming this chart asks for
+	// server-side diff. False means no manifest said so - NOT that the mode is
+	// off, which idem cannot know.
+	ServerSideDiff bool
+
 	// Unresolved names values the delivery config supplies through a generator
 	// idem cannot expand - one that reads the cluster rather than the
 	// repository. With Err set it means idem could not BUILD this release,
@@ -440,6 +445,17 @@ func (r Report) sourcePath(c Chart, source string) string {
 		return path
 	}
 	return source
+}
+
+// statesServerSideDiff reports whether any chart in the run was claimed by a
+// manifest asking for server-side diff.
+//
+// Any rather than all: the caveat is one sentence about one pointer, and the
+// manifest that DOES state the mode is the informative one. False keeps the
+// hedge, which is the honest default - the mode can be set cluster-wide in
+// argocd-cmd-params-cm, which is in no manifest idem reads.
+func statesServerSideDiff(charts []Chart) bool {
+	return slices.ContainsFunc(charts, func(c Chart) bool { return c.ServerSideDiff })
 }
 
 // stringDataPointer reports whether a block carries a pointer whose evaluation
@@ -980,7 +996,7 @@ func writeRemediation(b *strings.Builder, charts []Chart, show []string) {
 	// Whether ArgoCD's block printed decides whether Flux's needs its own
 	// leading blank: the ArgoCD block already ends with one, and two in a row
 	// reads as a rendering seam on the most-copied output idem has.
-	wrote := writeArgoRemediation(b, findings, show)
+	wrote := writeArgoRemediation(b, findings, show, statesServerSideDiff(charts))
 	writeFluxRemediation(b, charts, show, wrote)
 }
 
@@ -1047,7 +1063,7 @@ func churnsUnder(verdicts []engine.Verdict, name string) bool {
 	return false
 }
 
-func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []string) bool {
+func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []string, stated bool) bool {
 	if !shows(show, "argocd") {
 		return false
 	}
@@ -1076,9 +1092,18 @@ func writeArgoRemediation(b *strings.Builder, findings []check.Finding, show []s
 	// (ServerSideApply=true is a different option on a different code path and
 	// does not affect these pointers. The two are routinely conflated.)
 	if stringDataPointer(entries) {
-		b.WriteString("\n  The `/stringData` pointer works on ArgoCD's default diff. Under\n")
-		b.WriteString("  ServerSideDiff=true only `/data` is evaluated, so keep both: whichever\n")
-		b.WriteString("  path this install is on, the other pointer is a silent no-op.\n")
+		if stated {
+			// No hedge about something idem just read. Both pointers still go
+			// in: the sync path RespectIgnoreDifferences drives applies them
+			// to the raw target, where stringData is the only one that exists.
+			b.WriteString("\n  This Application sets ServerSideDiff=true, so only `/data` is evaluated\n")
+			b.WriteString("  in the diff. `/stringData` is kept because the RespectIgnoreDifferences\n")
+			b.WriteString("  sync path applies pointers to the raw target, where it is the live one.\n")
+		} else {
+			b.WriteString("\n  The `/stringData` pointer works on ArgoCD's default diff. Under\n")
+			b.WriteString("  ServerSideDiff=true only `/data` is evaluated, so keep both: whichever\n")
+			b.WriteString("  path this install is on, the other pointer is a silent no-op.\n")
+		}
 	}
 
 	// Blank line so an exit-code line printed after the report does not read

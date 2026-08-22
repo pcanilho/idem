@@ -32,6 +32,16 @@ import (
 // diff but selfHeal re-applies the object anyway.
 const respectOption = "RespectIgnoreDifferences=true"
 
+// createNamespaceOption is a syncOption; serverSideDiffOption is NOT - it lives
+// in the argocd.argoproj.io/compare-options annotation. Verified against
+// ArgoCD's own diff-strategies page, which documents the annotation and the
+// controller-level `controller.diff.server.side` and no syncOption at all.
+const (
+	createNamespaceOption = "CreateNamespace=true"
+	serverSideDiffOption  = "ServerSideDiff=true"
+	compareOptions        = "argocd.argoproj.io/compare-options"
+)
+
 // Rule is one suppression an engine has been told to apply.
 type Rule struct {
 	// Group, Kind, Namespace and Name select objects. An absent field is not
@@ -75,6 +85,21 @@ type Destination struct {
 	// Templated marks a namespace a generator substitutes per generated
 	// Application. There is no single answer, so idem uses none.
 	Templated bool
+
+	// CreateNamespace records syncOptions: [CreateNamespace=true]. A dry run
+	// into a namespace that does not exist fails, and without this the bare
+	// failure reads as "idem could not check" rather than "ArgoCD would have
+	// created it first".
+	CreateNamespace bool
+
+	// ServerSideDiff records the compare-options annotation asking for
+	// server-side diff.
+	//
+	// Only ever an upgrade from hedging to certainty. It can also be turned on
+	// cluster-wide by `controller.diff.server.side` in argocd-cmd-params-cm,
+	// which is in no manifest idem reads - so false means "no manifest says
+	// so", never "the mode is off".
+	ServerSideDiff bool
 }
 
 // Values is what a delivery manifest renders a chart WITH.
@@ -179,6 +204,47 @@ func (c Config) NamespaceFor(chartPath string) (string, string) {
 		ns, file = d.Namespace, d.File
 	}
 	return ns, file
+}
+
+// CreatesNamespace reports whether an Application claiming this chart sets
+// CreateNamespace=true.
+func (c Config) CreatesNamespace(chartPath string) bool {
+	return c.destines(chartPath, func(d Destination) bool { return d.CreateNamespace })
+}
+
+// ServerSideDiff reports whether an Application claiming this chart is
+// annotated for server-side diff. False means no manifest says so, which is not
+// the same as the mode being off - see Destination.ServerSideDiff.
+func (c Config) ServerSideDiff(chartPath string) bool {
+	return c.destines(chartPath, func(d Destination) bool { return d.ServerSideDiff })
+}
+
+// destines reports whether any destination for this chart satisfies want.
+//
+// ANY rather than all, and deliberately unlike NamespaceFor, which refuses to
+// answer when two manifests disagree. The difference is what a wrong answer
+// costs: a namespace decides every object's identity, so guessing is worse than
+// silence. These two only ever add a sentence explaining something the reader
+// is already looking at, so the manifest that does set the option is the
+// interesting one.
+func (c Config) destines(chartPath string, want func(Destination) bool) bool {
+	for _, d := range c.Destinations {
+		if !d.Templated && d.Path == chartPath && want(d) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCompareOption reads one flag out of the comma-separated compare-options
+// annotation.
+func hasCompareOption(meta metadata, option string) bool {
+	for opt := range strings.SplitSeq(meta.Annotations[compareOptions], ",") {
+		if strings.TrimSpace(opt) == option {
+			return true
+		}
+	}
+	return false
 }
 
 // Root finds the repository containing start.
@@ -319,6 +385,13 @@ type destination struct {
 	Namespace string `yaml:"namespace"`
 }
 
+// metadata is the subset idem reads. Annotations only: the compare-options
+// annotation is where ArgoCD puts a per-application diff strategy, and it is
+// NOT a syncOption, which is the easy thing to assume.
+type metadata struct {
+	Annotations map[string]string `yaml:"annotations"`
+}
+
 type appSpec struct {
 	Destination       *destination       `yaml:"destination"`
 	Source            *source            `yaml:"source"`
@@ -341,8 +414,9 @@ type gitGenerator struct {
 }
 
 type document struct {
-	Kind string `yaml:"kind"`
-	Spec struct {
+	Kind     string   `yaml:"kind"`
+	Metadata metadata `yaml:"metadata"`
+	Spec     struct {
 		appSpec `yaml:",inline"`
 
 		// GoTemplate selects Go text/template substitution. Without it ArgoCD
@@ -359,7 +433,8 @@ type document struct {
 		// only spec.ignoreDifferences would silently miss every app an
 		// ApplicationSet manages.
 		Template *struct {
-			Spec appSpec `yaml:"spec"`
+			Metadata metadata `yaml:"metadata"`
+			Spec     appSpec  `yaml:"spec"`
 		} `yaml:"template"`
 
 		DriftDetection *struct {
@@ -392,7 +467,7 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 		case "Application":
 			engines = append(engines, "argocd")
 			rules = append(rules, argoRules(doc.Spec.appSpec, file)...)
-			dests = append(dests, argoDestinations(doc.Spec.appSpec, file)...)
+			dests = append(dests, argoDestinations(doc.Spec.appSpec, doc.Metadata, file)...)
 			values = append(values, argoValues(doc.Spec.appSpec, file)...)
 		case "ApplicationSet":
 			engines = append(engines, "argocd")
@@ -408,13 +483,13 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 			// element - so they come from expansion where idem can expand.
 			elements, ok := repoElements(root, doc)
 			if !ok {
-				dests = append(dests, argoDestinations(doc.Spec.Template.Spec, file)...)
+				dests = append(dests, argoDestinations(doc.Spec.Template.Spec, doc.Spec.Template.Metadata, file)...)
 				values = append(values, argoValues(doc.Spec.Template.Spec, file)...)
 				break
 			}
 			for _, el := range elements {
 				spec, resolved := resolveSpec(doc.Spec.Template.Spec, el, doc.Spec.GoTemplate)
-				dests = append(dests, argoDestinations(spec, file)...)
+				dests = append(dests, argoDestinations(spec, doc.Spec.Template.Metadata, file)...)
 				for _, v := range argoValues(spec, file) {
 					v.Instance = el.name
 					v.Namespace = namespaceOf(spec)
@@ -927,7 +1002,7 @@ func parseValues(text string) map[string]any {
 // a separate source object, so there is no path to join a namespace to, and
 // guessing from the HelmRelease's own metadata.namespace would be inventing a
 // join idem cannot make.
-func argoDestinations(spec appSpec, file string) []Destination {
+func argoDestinations(spec appSpec, meta metadata, file string) []Destination {
 	if spec.Destination == nil || spec.Destination.Namespace == "" {
 		return nil
 	}
@@ -940,6 +1015,9 @@ func argoDestinations(spec appSpec, file string) []Destination {
 			File:      file,
 			// Either half can be templated, and either makes the join useless.
 			Templated: strings.Contains(path, "{{") || strings.Contains(spec.Destination.Namespace, "{{"),
+
+			CreateNamespace: spec.SyncPolicy != nil && slices.Contains(spec.SyncPolicy.SyncOptions, createNamespaceOption),
+			ServerSideDiff:  hasCompareOption(meta, serverSideDiffOption),
 		})
 	}
 	return out

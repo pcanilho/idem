@@ -1138,3 +1138,74 @@ func TestAMalformedPatternLeavesTheSetUnexpanded(t *testing.T) {
 		t.Errorf("ReleasesFor() = %+v, want the template reported unresolved", got)
 	}
 }
+
+const withCreateNamespace = `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+spec:
+  destination:
+    namespace: home
+  source:
+    path: charts/home
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+`
+
+// A dry run into a namespace that does not exist fails, and the bare failure
+// reads as "idem could not check this" when the truth is "ArgoCD would have
+// created it first". The option was parsed into SyncOptions all along and
+// nothing ever asked for it.
+func TestAnApplicationThatWouldCreateItsNamespaceSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withCreateNamespace)
+
+	if !load(t, dir).CreatesNamespace("charts/home") {
+		t.Error("CreatesNamespace() = false, want true - the Application sets CreateNamespace=true")
+	}
+}
+
+func TestAnApplicationWithoutCreateNamespaceDoesNotClaimIt(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	if load(t, dir).CreatesNamespace("charts/home") {
+		t.Error("CreatesNamespace() = true, want false - nothing sets the option")
+	}
+}
+
+// Absence of the annotation is not evidence the mode is off: it can also be set
+// cluster-wide by `controller.diff.server.side` in argocd-cmd-params-cm, which
+// is in no manifest idem reads. So this only ever upgrades idem from hedging to
+// certainty, never the other way.
+func TestAnApplicationAnnotatedForServerSideDiffIsRead(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+  annotations:
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+spec:
+  destination:
+    namespace: home
+  source:
+    path: charts/home
+`)
+
+	if !load(t, dir).ServerSideDiff("charts/home") {
+		t.Error("ServerSideDiff() = false, want true - the annotation says so")
+	}
+}
+
+func TestAnApplicationWithoutTheAnnotationIsNotAssumedToBeOnEitherMode(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	if load(t, dir).ServerSideDiff("charts/home") {
+		t.Error("ServerSideDiff() = true, want false - no annotation says so")
+	}
+}
