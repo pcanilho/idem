@@ -72,9 +72,10 @@ func TestTemplateArgsPassesEachSetValueSeparately(t *testing.T) {
 }
 
 func TestTemplateArgsOmitsNamespaceWhenUnset(t *testing.T) {
-	// idem has no Application to derive a namespace from, so it passes none
-	// and lets helm apply its own default. Inventing one would change what
-	// renders - .Release.Namespace appears in real templates.
+	// helm's own default is the current kube context's namespace, which is
+	// invisible local state - so the caller always supplies one now. This pins
+	// the library's half of that contract: an unset Namespace passes no flag,
+	// and it is main's job never to leave it unset.
 	args := templateArgs(engine.Spec{Release: "home", ChartRef: "./c"})
 
 	if i := indexOf(args, "--namespace"); i >= 0 {

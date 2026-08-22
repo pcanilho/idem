@@ -86,7 +86,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// established meaning. Passing --context at all is what opts in; an empty
 	// value means whichever context is current.
 	fs.StringVar(&opt.kubeContext, "context", "", "kube context to resolve lookup and capabilities against")
-	fs.StringVar(&opt.namespace, "namespace", "", "for doctor: look for post-apply drift in this namespace")
+	fs.StringVar(&opt.namespace, "namespace", "", "render into this namespace instead of the one the delivery config names\n(for doctor: look for post-apply drift in this namespace)")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -189,8 +189,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	queue := make([]scan.Chart, 0, len(charts))
+	namespaces := make(map[string][2]string, len(charts))
 	for _, c := range charts {
-		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)}
+		ns, from := releaseNamespace(deliveryCfg, opt, chartPath(root, c.ref))
+		namespaces[c.ref] = [2]string{ns, from}
+
+		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt, ns)}
 
 		// A second, independent measurement of the same chart: through the API
 		// server, where lookup resolves and the chart sees the cluster's real
@@ -252,19 +256,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 
 		rep.Charts = append(rep.Charts, report.Chart{
-			Name:       result.Chart.Name,
-			Dir:        result.Chart.Dir,
-			RepoDir:    chartPath(root, result.Chart.Dir),
-			Deps:       resolutions.of(result.Chart.Dir),
-			Changed:    gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
-			Findings:   applied.Churning,
-			ServerOnly: serverOnly.Churning,
-			Suppressed: append(applied.Suppressed, serverOnly.Suppressed...),
-			Maybe:      append(applied.Maybe, serverOnly.Maybe...),
-			Verdicts:   verdictsFor(result, evidence),
-			Potential:  analyze.Potential(result.Uses),
-			Rewrites:   result.Rewrites,
-			Err:        result.Err,
+			Name:          result.Chart.Name,
+			Dir:           result.Chart.Dir,
+			Namespace:     namespaces[result.Chart.Dir][0],
+			NamespaceFrom: namespaces[result.Chart.Dir][1],
+			RepoDir:       chartPath(root, result.Chart.Dir),
+			Deps:          resolutions.of(result.Chart.Dir),
+			Changed:       gitrev.Touches(touched, chartPath(root, result.Chart.Dir)),
+			Findings:      applied.Churning,
+			ServerOnly:    serverOnly.Churning,
+			Suppressed:    append(applied.Suppressed, serverOnly.Suppressed...),
+			Maybe:         append(applied.Maybe, serverOnly.Maybe...),
+			Verdicts:      verdictsFor(result, evidence),
+			Potential:     analyze.Potential(result.Uses),
+			Rewrites:      result.Rewrites,
+			Err:           result.Err,
 		})
 	}
 
@@ -348,15 +354,42 @@ type options struct {
 }
 
 // specFor builds the render request for one chart.
-func specFor(ref chartref.Ref, t target, opt options) engine.Spec {
+func specFor(ref chartref.Ref, t target, opt options, namespace string) engine.Spec {
 	return engine.Spec{
 		ChartRef:    t.ref,
 		Release:     t.release,
+		Namespace:   namespace,
 		Repo:        ref.Repo,
 		Version:     opt.chartVersion,
 		ValuesFiles: opt.valuesFiles,
 		SetValues:   opt.setValues,
 	}
+}
+
+// defaultNamespace is what idem renders into when nothing claims the chart.
+//
+// Explicit, and never read from the kube context. helm with no --namespace
+// takes the current context's namespace, so the same commit rendered on a
+// laptop and in CI produces different object identities and can make a
+// namespaced ignoreDifferences rule match in one place and not the other.
+// idem's own output has to be reproducible; that means saying which namespace,
+// not inheriting one.
+const defaultNamespace = "default"
+
+// releaseNamespace decides the namespace a chart renders into, and what
+// decided it.
+//
+// Precedence is user, then repository, then idem: --namespace is an
+// instruction, spec.destination.namespace is a fact the repository states, and
+// "default" is a choice idem made and says so.
+func releaseNamespace(cfg delivery.Config, opt options, chartPath string) (string, string) {
+	if opt.namespace != "" {
+		return opt.namespace, report.NamespaceFromFlag
+	}
+	if ns, file := cfg.NamespaceFor(chartPath); ns != "" {
+		return ns, file
+	}
+	return defaultNamespace, ""
 }
 
 // target is one chart to render.
@@ -413,12 +446,12 @@ func admission(ctx context.Context, opt options) scan.Admission {
 	}
 
 	c := cluster.New("", opt.kubeContext)
-	return func(_ scan.Chart, rendered []manifest.Object) ([]doctor.Rewrite, error) {
+	return func(chart scan.Chart, rendered []manifest.Object) ([]doctor.Rewrite, error) {
 		manifests, err := manifest.Encode(rendered)
 		if err != nil {
 			return nil, err
 		}
-		returned, err := c.DryRunApply(ctx, opt.namespace, manifests)
+		returned, err := c.DryRunApply(ctx, chart.Spec.Namespace, manifests)
 		if err != nil {
 			return nil, err
 		}

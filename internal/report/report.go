@@ -41,6 +41,16 @@ type Chart struct {
 	// when the chart is not inside it. Only used to place annotations.
 	RepoDir string
 
+	// Namespace is the release namespace this chart rendered into, and
+	// NamespaceFrom what decided it: the delivery manifest that claims the
+	// chart, NamespaceFromFlag when the user said, or empty when idem defaulted.
+	//
+	// Recorded because it changes the displayed identity of every object the
+	// chart produced, and because reading it off the local kube context - as
+	// idem used to - makes the same commit render differently on two machines.
+	Namespace     string
+	NamespaceFrom string
+
 	// Deps is how the chart was made renderable, when that took any work.
 	// Empty means it was renderable as it stood.
 	Deps string
@@ -236,7 +246,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s\n", r.Helm, r.Rounds, r.contextNote(), r.depsNote(), r.deliveryNote())
+	fmt.Fprintf(&b, "  helm %s · %d rounds%s%s%s%s\n",
+		r.Helm, r.Rounds, r.namespaceNote(), r.contextNote(), r.depsNote(), r.deliveryNote())
 	writeRemediation(&b, scope)
 
 	_, err := io.WriteString(w, b.String())
@@ -424,6 +435,37 @@ func (r Report) depsNote() string {
 		parts = append([]string{fmt.Sprintf("%d vendored", vendored)}, parts...)
 	}
 	return " · " + strings.Join(parts, ", ")
+}
+
+// NamespaceFromFlag marks a namespace the user gave on the command line, so
+// the provenance line credits the flag rather than inventing a file for it.
+const NamespaceFromFlag = "--namespace"
+
+// namespaceNote says which namespace the charts rendered into and who decided.
+//
+// Summarised rather than listed: one clause per namespace on a 16-chart estate
+// is a wall, and every object's own line already carries its namespace.
+func (r Report) namespaceNote() string {
+	var ns, from string
+	for _, c := range r.Charts {
+		if c.Namespace == "" {
+			continue
+		}
+		if ns != "" && ns != c.Namespace {
+			return " · namespaces from delivery config"
+		}
+		ns, from = c.Namespace, c.NamespaceFrom
+	}
+
+	switch {
+	case ns == "":
+		return ""
+	case from == "":
+		return fmt.Sprintf(" · namespace %s (idem's own, nothing claims this chart)", ns)
+	case from == NamespaceFromFlag:
+		return fmt.Sprintf(" · namespace %s (%s)", ns, NamespaceFromFlag)
+	}
+	return fmt.Sprintf(" · namespace %s (%s)", ns, from)
 }
 
 // deliveryNote acknowledges the manifests idem read outside the chart tree.

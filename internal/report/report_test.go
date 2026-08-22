@@ -1026,3 +1026,63 @@ func TestTheRatchetHidesChurnUnderLookupToo(t *testing.T) {
 		t.Errorf("Text() = %q, want the hidden finding counted", got)
 	}
 }
+
+// Which namespace a chart rendered into decides the displayed identity of
+// every object it produced, and it used to come from the local kube context -
+// invisible state that differs between a laptop and CI. Where it came from is
+// exactly the kind of fact the provenance line exists for.
+
+func namespaced(name, ns, from string) Chart {
+	c := clean(name)
+	c.Namespace, c.NamespaceFrom = ns, from
+	return c
+}
+
+func TestTheProvenanceLineSaysWhichNamespaceWasRenderedInto(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{namespaced("home", "home", "deployment/apps/home.app.argo.yaml")},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "namespace home") {
+		t.Errorf("Text() = %q, want the namespace named", got)
+	}
+	if !strings.Contains(got, "home.app.argo.yaml") {
+		t.Errorf("Text() = %q, want the manifest that decided it", got)
+	}
+}
+
+func TestTheProvenanceLineAdmitsWhenIdemChoseTheNamespaceItself(t *testing.T) {
+	// Nothing claimed the chart, so idem picked one. Silently rendering into
+	// "default" and displaying it as fact would read as something the
+	// repository said.
+	got := text(t, Report{Charts: []Chart{namespaced("home", "default", "")}, Helm: "4.2.4", Rounds: 2})
+
+	if !strings.Contains(got, "namespace default (idem's own, nothing claims this chart)") {
+		t.Errorf("Text() = %q, want the fallback owned up to", got)
+	}
+}
+
+func TestChartsInDifferentNamespacesAreSummarisedNotListed(t *testing.T) {
+	// One clause per namespace on a 16-chart estate is a wall. The namespace
+	// is on every object's own line already.
+	got := text(t, Report{
+		Charts: []Chart{
+			namespaced("home", "home", "apps/home.yaml"),
+			namespaced("lab", "lab", "apps/lab.yaml"),
+		},
+		Helm: "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "namespaces from delivery config") {
+		t.Errorf("Text() = %q, want the mixed case summarised", got)
+	}
+}
+
+func TestAnExplicitNamespaceFlagSaysItWasTheFlag(t *testing.T) {
+	got := text(t, Report{Charts: []Chart{namespaced("home", "lab", NamespaceFromFlag)}, Helm: "4.2.4", Rounds: 2})
+
+	if !strings.Contains(got, "namespace lab (--namespace)") {
+		t.Errorf("Text() = %q, want the flag credited", got)
+	}
+}

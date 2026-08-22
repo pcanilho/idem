@@ -19,6 +19,11 @@ type jsonReport struct {
 	Engines  []string `json:"engines,omitempty"`
 	Delivery []string `json:"delivery,omitempty"`
 
+	// Namespaces is which namespace each chart rendered into and what decided
+	// it, because it changes the identity of every object below and a
+	// consumer cannot tell "the repository says so" from "idem picked one".
+	Namespaces []jsonNamespace `json:"namespaces,omitempty"`
+
 	Summary     jsonSummary       `json:"summary"`
 	Findings    []jsonFinding     `json:"findings"`
 	Suppressed  []jsonSuppressed  `json:"suppressed,omitempty"`
@@ -26,6 +31,16 @@ type jsonReport struct {
 	Unevaluable []jsonUnevaluable `json:"unevaluable,omitempty"`
 	Verdicts    []jsonVerdict     `json:"verdicts,omitempty"`
 	Remediation []jsonEntry       `json:"remediation,omitempty"`
+}
+
+type jsonNamespace struct {
+	Chart     string `json:"chart"`
+	Namespace string `json:"namespace"`
+
+	// From is the manifest that decided it, "--namespace" when the user did,
+	// and absent when idem defaulted. Absent means idem chose, which is the
+	// one case a consumer must not read as a fact about the repository.
+	From string `json:"from,omitempty"`
 }
 
 type jsonSummary struct {
@@ -136,6 +151,11 @@ func (r Report) JSON(w io.Writer) error {
 
 	var all []check.Finding
 	for _, c := range r.inScope() {
+		if c.Namespace != "" {
+			out.Namespaces = append(out.Namespaces, jsonNamespace{
+				Chart: c.Name, Namespace: c.Namespace, From: c.NamespaceFrom,
+			})
+		}
 		if c.Err != nil {
 			out.Unevaluable = append(out.Unevaluable, jsonUnevaluable{Chart: c.Name, Error: c.Err.Error()})
 		}

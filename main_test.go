@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -281,6 +282,7 @@ func TestChartVersionReachesTheRenderSpec(t *testing.T) {
 		chartref.Ref{Raw: "postgresql", Kind: chartref.RepoURL, Repo: "https://charts.example.com"},
 		target{ref: "postgresql", release: "pg"},
 		options{chartVersion: "12.1.0"},
+		defaultNamespace,
 	)
 
 	if got, want := spec.Version, "12.1.0"; got != want {
@@ -299,6 +301,7 @@ func TestValuesFilesAndSetValuesReachTheRenderSpecInOrder(t *testing.T) {
 			valuesFiles: multiFlag{"base.yaml", "prod.yaml"},
 			setValues:   multiFlag{"a=1"},
 		},
+		defaultNamespace,
 	)
 
 	if got := strings.Join(spec.ValuesFiles, ","); got != "base.yaml,prod.yaml" {
@@ -778,5 +781,105 @@ func TestTheClientConditionKeepsItsOwnVerdict(t *testing.T) {
 
 	if !strings.Contains(stdout, "argocd") || !strings.Contains(stdout, "stable") {
 		t.Errorf("stdout = %q, want argocd reported stable", stdout)
+	}
+}
+
+// tree writes files into a fresh directory that looks like a repository, so
+// delivery discovery has a root to walk and stops there.
+func tree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	files[".git/HEAD"] = "ref: refs/heads/main\n"
+
+	for name, body := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+const ownedChart = `apiVersion: v2
+name: owned
+version: 0.1.0
+`
+
+const ownedTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-cm
+  namespace: {{ .Release.Namespace }}
+data:
+  where: {{ .Release.Namespace }}
+`
+
+func TestTheRenderNamespaceComesFromTheApplicationThatOwnsTheChart(t *testing.T) {
+	requireHelm(t)
+
+	// Not cosmetic: .Release.Namespace decides the identity idem reports and
+	// the identity an ignoreDifferences rule matches against. Taken from the
+	// kube context - helm's own default - it would differ between a laptop and
+	// CI for the same commit.
+	dir := tree(t, map[string]string{
+		"apps/owned.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: owned}
+spec:
+  destination: {namespace: owned-ns}
+  source: {path: charts/owned}
+`,
+		"charts/owned/Chart.yaml":               ownedChart,
+		"charts/owned/templates/configmap.yaml": ownedTemplate,
+	})
+
+	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/owned"), "-o", "json")
+
+	if !strings.Contains(stdout, "owned-ns") {
+		t.Errorf("stdout = %q, want the Application's namespace used", stdout)
+	}
+}
+
+func TestAChartNoApplicationClaimsRendersIntoAStatedDefault(t *testing.T) {
+	requireHelm(t)
+
+	// Whatever idem picks must not depend on the machine it runs on, and it
+	// has to admit that it picked.
+	dir := tree(t, map[string]string{
+		"charts/owned/Chart.yaml":               ownedChart,
+		"charts/owned/templates/configmap.yaml": ownedTemplate,
+	})
+
+	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/owned"))
+
+	if !strings.Contains(stdout, "namespace default (idem's own") {
+		t.Errorf("stdout = %q, want the fallback named and owned up to", stdout)
+	}
+}
+
+func TestTheNamespaceFlagOverridesTheApplication(t *testing.T) {
+	requireHelm(t)
+
+	dir := tree(t, map[string]string{
+		"apps/owned.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: owned}
+spec:
+  destination: {namespace: owned-ns}
+  source: {path: charts/owned}
+`,
+		"charts/owned/Chart.yaml":               ownedChart,
+		"charts/owned/templates/configmap.yaml": ownedTemplate,
+	})
+
+	_, stdout, _ := invoke(t, filepath.Join(dir, "charts/owned"), "--namespace", "elsewhere")
+
+	if !strings.Contains(stdout, "namespace elsewhere (--namespace)") {
+		t.Errorf("stdout = %q, want the flag to win and be credited", stdout)
 	}
 }

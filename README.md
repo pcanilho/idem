@@ -221,6 +221,8 @@ That is the whole surface:
       --helm        helm binary to render with   (default: first on PATH)
       --context     kube context to resolve lookup and capabilities against
                     (pass it empty, --context=, for the current one)
+      --namespace   render into this namespace instead of the one the
+                    delivery config names
       --jobs        renders to run at once        (default: number of CPUs)
       --dependency-update  resolve missing deps in place, not a temp dir
       --no-deps     never fetch dependencies      (airgapped / reproducible CI)
@@ -330,6 +332,26 @@ go in the summary comment instead:
 Use both together: annotations for what has a line, one comment for the rest. GitHub also caps
 how many annotations it will render per run, so `-o github` prints the cap it hit rather than
 letting findings disappear silently.
+
+### Which namespace a chart renders into
+
+`.Release.Namespace` is not cosmetic: it appears in object names, in labels, in `lookup` calls,
+and it decides the identity `idem` reports and the identity an `ignoreDifferences` rule matches
+against. `helm template` with no `--namespace` takes the current kube context's namespace, so the
+same commit renders one way on your laptop and another in CI. `idem` never does that.
+
+In order of precedence:
+
+1. `--namespace`, when you pass it.
+2. `spec.destination.namespace` from the Application or ApplicationSet whose `source.path` is
+   this chart. Two manifests claiming one chart with *different* namespaces means neither is
+   used — the same chart in staging and production is exactly that shape, and `idem` has no
+   Application of its own to pick between them. A templated namespace is not guessed at either.
+3. The literal `default`, and the provenance line says so: `namespace default (idem's own,
+   nothing claims this chart)`.
+
+A Flux `HelmRelease` names no chart path, so nothing joins its `targetNamespace` to a directory;
+those charts fall through to rule 3.
 
 **There is no rules file and no exceptions file, deliberately.** Suppression is something you
 need *after* you have run a tool and disagreed with it — nobody has exceptions on day one. If

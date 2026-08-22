@@ -457,3 +457,131 @@ func TestAJQRuleDoesNotEvenMaybeCoverAnUnrelatedObject(t *testing.T) {
 		t.Error("MayCover() = true, want false")
 	}
 }
+
+// The namespace a chart's objects land in is a fact the Application states.
+// Without reading it, idem renders with whatever the local kube context points
+// at - which differs between a laptop and CI, changes the displayed identity
+// of every object, and can make a namespaced ignoreDifferences rule match in
+// one place and silently not in the other.
+
+const withDestination = `
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: home-app
+spec:
+  destination:
+    name: in-cluster
+    namespace: home
+  source:
+    path: charts/home
+`
+
+func TestTheNamespaceComesFromTheApplicationThatDeploysTheChart(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	ns, file := load(t, dir).NamespaceFor("charts/home")
+
+	if ns != "home" {
+		t.Errorf("NamespaceFor() = %q, want home", ns)
+	}
+	if file != "apps/home.yaml" {
+		t.Errorf("file = %q, want the manifest it came from", file)
+	}
+}
+
+func TestAChartNoManifestClaimsHasNoNamespace(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/home.yaml", withDestination)
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/other"); ns != "" {
+		t.Errorf("NamespaceFor() = %q, want empty - nothing claims that chart", ns)
+	}
+}
+
+func TestATemplatedDestinationNamespaceIsNotGuessedAt(t *testing.T) {
+	// An ApplicationSet substitutes this per generated Application. There is
+	// no single answer, and inventing one would render every object into a
+	// namespace no Application ever names.
+	dir := t.TempDir()
+	write(t, dir, "apps/set.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform
+spec:
+  template:
+    spec:
+      destination:
+        namespace: '{{ .name }}-system'
+      source:
+        path: charts/platform
+`)
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/platform"); ns != "" {
+		t.Errorf("NamespaceFor() = %q, want empty for a templated namespace", ns)
+	}
+}
+
+func TestAnApplicationSetsDestinationIsReadThroughItsTemplate(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/set.yaml", `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform
+spec:
+  template:
+    spec:
+      destination:
+        namespace: tekton-pipelines
+      source:
+        path: charts/platform/tekton-bootstrap
+`)
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/platform/tekton-bootstrap"); ns != "tekton-pipelines" {
+		t.Errorf("NamespaceFor() = %q, want tekton-pipelines", ns)
+	}
+}
+
+func TestTwoApplicationsDisagreeingAboutTheNamespaceIsUnknown(t *testing.T) {
+	// Two Applications claiming one chart path is a real shape - the same
+	// chart deployed to staging and production. idem has no Application of its
+	// own to pick between them, so it picks neither.
+	dir := t.TempDir()
+	write(t, dir, "apps/staging.yaml", withDestination)
+	write(t, dir, "apps/prod.yaml", strings.Replace(withDestination, "namespace: home", "namespace: home-prod", 1))
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/home"); ns != "" {
+		t.Errorf("NamespaceFor() = %q, want empty - two manifests disagree", ns)
+	}
+}
+
+func TestTwoApplicationsAgreeingAboutTheNamespaceIsNotAConflict(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "apps/one.yaml", withDestination)
+	write(t, dir, "apps/two.yaml", withDestination)
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/home"); ns != "home" {
+		t.Errorf("NamespaceFor() = %q, want home", ns)
+	}
+}
+
+func TestAHelmReleaseNamesNoChartPathToAttachANamespaceTo(t *testing.T) {
+	// The chart reaches Flux through a separate source object, so there is
+	// nothing to join a namespace to. Stated, not silently half-supported.
+	dir := t.TempDir()
+	write(t, dir, "releases/home.yaml", `
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata: {name: home, namespace: home}
+spec:
+  targetNamespace: home
+  driftDetection: {mode: enabled}
+`)
+
+	if ns, _ := load(t, dir).NamespaceFor("charts/home"); ns != "" {
+		t.Errorf("NamespaceFor() = %q, want empty", ns)
+	}
+}

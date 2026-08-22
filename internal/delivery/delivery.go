@@ -56,12 +56,51 @@ type Rule struct {
 	Engine    string
 }
 
+// Destination is where a delivery manifest says one chart's objects go.
+//
+// Separate from Rule because a chart can have a destination and no
+// ignoreDifferences at all, which is the common case - and the namespace
+// matters even when nothing is suppressed.
+type Destination struct {
+	// Path is spec.source.path, the same join key rules use.
+	Path      string
+	Namespace string
+	File      string
+
+	// Templated marks a namespace a generator substitutes per generated
+	// Application. There is no single answer, so idem uses none.
+	Templated bool
+}
+
 // Config is what the delivery manifests in a tree say.
 type Config struct {
-	Root    string
-	Engines []string
-	Rules   []Rule
-	Files   []string
+	Root         string
+	Engines      []string
+	Rules        []Rule
+	Destinations []Destination
+	Files        []string
+}
+
+// NamespaceFor is the namespace the delivery config says this chart deploys
+// into, and the manifest that said so. Empty when nothing does.
+//
+// Two manifests disagreeing means the same chart goes to two namespaces - the
+// same chart in staging and production is exactly this shape - and idem has no
+// Application of its own to pick between them. It picks neither: a namespace
+// stated with confidence and wrong is worse than none at all, because every
+// object identity and every namespaced suppression rule turns on it.
+func (c Config) NamespaceFor(chartPath string) (string, string) {
+	var ns, file string
+	for _, d := range c.Destinations {
+		if d.Templated || d.Path == "" || d.Path != chartPath || d.Namespace == "" {
+			continue
+		}
+		if ns != "" && ns != d.Namespace {
+			return "", ""
+		}
+		ns, file = d.Namespace, d.File
+	}
+	return ns, file
 }
 
 // Root finds the repository containing start.
@@ -119,7 +158,7 @@ func Load(root string) (Config, error) {
 			rel = path
 		}
 
-		rules, found := parse(body, rel)
+		rules, dests, found := parse(body, rel)
 		if len(found) == 0 {
 			return nil
 		}
@@ -127,6 +166,7 @@ func Load(root string) (Config, error) {
 			engines[engine] = struct{}{}
 		}
 		cfg.Rules = append(cfg.Rules, rules...)
+		cfg.Destinations = append(cfg.Destinations, dests...)
 		cfg.Files = append(cfg.Files, rel)
 		return nil
 	})
@@ -183,7 +223,12 @@ type syncPolicy struct {
 	SyncOptions []string `yaml:"syncOptions"`
 }
 
+type destination struct {
+	Namespace string `yaml:"namespace"`
+}
+
 type appSpec struct {
+	Destination       *destination       `yaml:"destination"`
 	Source            *source            `yaml:"source"`
 	Sources           []source           `yaml:"sources"`
 	IgnoreDifferences []ignoreDifference `yaml:"ignoreDifferences"`
@@ -215,8 +260,9 @@ type document struct {
 //
 // A document that will not decode is skipped rather than reported: most YAML
 // in a chart repository is Go template source and was never meant to parse.
-func parse(body []byte, file string) ([]Rule, []string) {
+func parse(body []byte, file string) ([]Rule, []Destination, []string) {
 	var rules []Rule
+	var dests []Destination
 	var engines []string
 
 	decoder := yaml.NewDecoder(strings.NewReader(string(body)))
@@ -230,17 +276,44 @@ func parse(body []byte, file string) ([]Rule, []string) {
 		case "Application":
 			engines = append(engines, "argocd")
 			rules = append(rules, argoRules(doc.Spec.appSpec, file)...)
+			dests = append(dests, argoDestinations(doc.Spec.appSpec, file)...)
 		case "ApplicationSet":
 			engines = append(engines, "argocd")
 			if doc.Spec.Template != nil {
 				rules = append(rules, argoRules(doc.Spec.Template.Spec, file)...)
+				dests = append(dests, argoDestinations(doc.Spec.Template.Spec, file)...)
 			}
 		case "HelmRelease":
 			engines = append(engines, "flux")
 			rules = append(rules, fluxRules(doc, file)...)
 		}
 	}
-	return rules, engines
+	return rules, dests, engines
+}
+
+// argoDestinations reads spec.destination.namespace against every chart path
+// the manifest claims.
+//
+// A HelmRelease deliberately has no equivalent: the chart reaches Flux through
+// a separate source object, so there is no path to join a namespace to, and
+// guessing from the HelmRelease's own metadata.namespace would be inventing a
+// join idem cannot make.
+func argoDestinations(spec appSpec, file string) []Destination {
+	if spec.Destination == nil || spec.Destination.Namespace == "" {
+		return nil
+	}
+
+	var out []Destination
+	for _, path := range chartPaths(spec) {
+		out = append(out, Destination{
+			Path:      path,
+			Namespace: spec.Destination.Namespace,
+			File:      file,
+			// Either half can be templated, and either makes the join useless.
+			Templated: strings.Contains(path, "{{") || strings.Contains(spec.Destination.Namespace, "{{"),
+		})
+	}
+	return out
 }
 
 func argoRules(spec appSpec, file string) []Rule {
