@@ -29,6 +29,16 @@ question:
   — but `-o json` output is still derived from your rendered manifests, so treat it with the same
   care as the manifests themselves.
 
+## Fixed
+
+- **Argument injection into `git` via `--new-from-rev`** (2026-08-22, pre-release, never
+  published). `git diff --name-only <rev>` let a value beginning with `-` be read by git as an
+  option, and `git diff --output=FILE` truncates FILE — so
+  `idem --new-from-rev=--output=/path/to/anything` destroyed that file while printing an ordinary
+  report and exiting 0. A value naming a *path* also silently disabled the ratchet, hiding every
+  finding behind "No charts changed since …" and exit 0. Revisions are now validated with
+  `git rev-parse --verify` and every git invocation passes `--end-of-options`.
+
 ## Supported versions
 
 Pre-1.0 and unreleased. Fixes land on `main`; there are no backports yet.

@@ -20,7 +20,19 @@ import (
 // Untracked files are included: a chart added in this branch is exactly what
 // the flag exists to catch, and it has no committed state to diff against.
 func Changed(ctx context.Context, root, rev string) ([]string, error) {
-	diff, err := git(ctx, root, "diff", "--name-only", rev)
+	if err := verify(ctx, root, rev); err != nil {
+		return nil, err
+	}
+
+	// --end-of-options, and the trailing --, because rev is user data.
+	//
+	// Without them git reads any value starting with `-` as one of its own
+	// options, and `git diff --output=FILE` TRUNCATES FILE. So
+	// `--new-from-rev=--output=/anything` destroyed that file while idem
+	// printed an ordinary report and exited 0. The -- also stops a rev that
+	// names a path being taken as a pathspec, which silently disabled the
+	// ratchet rather than failing.
+	diff, err := git(ctx, root, "diff", "--name-only", "--end-of-options", rev, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -33,12 +45,28 @@ func Changed(ctx context.Context, root, rev string) ([]string, error) {
 	return lines(diff + "\n" + untracked), nil
 }
 
+// verify refuses anything git will not resolve as a commit.
+//
+// --end-of-options alone stops the value being read as a flag, but a value that
+// is a PATH still diffs cleanly against nothing and reports no changes: the
+// ratchet then hides every finding and exits 0, which is the failure mode it
+// exists to prevent. rev-parse is git's own answer to "is this a revision".
+func verify(ctx context.Context, root, rev string) error {
+	if _, err := git(ctx, root, "rev-parse", "--verify", "--end-of-options", rev+"^{commit}"); err != nil {
+		return fmt.Errorf("%q is not a revision in this repository", rev)
+	}
+	return nil
+}
+
 // MergeBase resolves where ref and HEAD diverged.
 //
 // Diffing against the branch tip would blame this branch for everything that
 // landed on the base since it was cut.
 func MergeBase(ctx context.Context, root, ref string) (string, error) {
-	out, err := git(ctx, root, "merge-base", ref, "HEAD")
+	if err := verify(ctx, root, ref); err != nil {
+		return "", err
+	}
+	out, err := git(ctx, root, "merge-base", "--end-of-options", ref, "HEAD")
 	if err != nil {
 		return "", err
 	}

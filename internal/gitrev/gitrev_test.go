@@ -185,3 +185,45 @@ func TestTouchesWithNoDirectoryMatchesNothing(t *testing.T) {
 		t.Error("Touches() = true for an empty directory")
 	}
 }
+
+// A revision is DATA, and git must be told so.
+//
+// `git diff --name-only <rev>` lets any value starting with `-` be read by git
+// as an option, and `git diff --output=FILE` truncates FILE. So
+// `--new-from-rev=--output=/path/to/anything` silently destroyed that file
+// while idem printed an ordinary report and exit 0 - verified: a sentinel file
+// went to zero bytes.
+//
+// Two guards, because either alone is insufficient: --end-of-options stops git
+// reading the value as a flag, and rev-parse --verify stops a value that is a
+// PATH from silently disabling the whole gate ("No charts changed since
+// charts.", exit 0, ratchet off).
+func TestARevisionIsNeverReadAsAGitOption(t *testing.T) {
+	root := repo(t)
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("SENTINEL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Changed(context.Background(), root, "--output="+victim); err == nil {
+		t.Error("Changed() accepted an option-shaped revision, want it refused")
+	}
+
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("victim file is gone: %v", err)
+	}
+	if string(body) != "SENTINEL" {
+		t.Errorf("victim file = %q, want it untouched - git wrote through the revision argument", body)
+	}
+}
+
+// A path is not a revision. Accepting one turned the ratchet off silently:
+// "No charts changed since charts." with every finding hidden and exit 0.
+func TestAPathIsNotAcceptedAsARevision(t *testing.T) {
+	root := repo(t)
+
+	if _, err := Changed(context.Background(), root, "charts"); err == nil {
+		t.Error("Changed() accepted a path as a revision, want it refused")
+	}
+}

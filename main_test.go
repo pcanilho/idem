@@ -1555,3 +1555,27 @@ func TestTheDefaultComparesMoreThanTwoRenders(t *testing.T) {
 		t.Errorf("--rounds default is not 3; --help says:\n%s", help)
 	}
 }
+
+// One error, once. flag.Parse writes to the FlagSet's own output and idem then
+// formats the same error itself, so a bad flag printed twice.
+func TestABadFlagIsReportedOnce(t *testing.T) {
+	_, _, stderr := invoke(t, "--nope", "./chart")
+
+	if n := strings.Count(stderr, "not defined: -nope"); n != 1 {
+		t.Errorf("stderr reports the bad flag %d times, want 1:\n%s", n, stderr)
+	}
+}
+
+// --rounds has a carefully worded lower bound and had no upper one, so
+// `--rounds 2147483647` allocated ~4.2GB, printed nothing at all, and span
+// forever attempting 2.1 billion helm invocations.
+func TestAnImplausibleRoundCountIsRefused(t *testing.T) {
+	code, _, stderr := invoke(t, "--rounds", "2147483647", "./chart")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "--rounds") {
+		t.Errorf("stderr = %q, want the flag named", stderr)
+	}
+}

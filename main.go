@@ -44,6 +44,9 @@ import (
 // Exit codes. Findings are informative by default: a chart using `lookup` is
 // correct Helm, so failing the build by default would often simply be wrong.
 // Exit 2 is the exception and is never negotiable.
+// maxRounds caps --rounds. See the note at its use.
+const maxRounds = 20
+
 const (
 	exitOK      = 0
 	exitFinding = 1
@@ -63,7 +66,9 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("idem", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	// Discarded, not stderr: the flag package writes the parse error itself,
+	// and idem formats the same error below, so a bad flag printed twice.
+	fs.SetOutput(io.Discard)
 	// Suppressed, because the flag package calls this for BOTH a help request
 	// and a usage error, and those are opposite outcomes: one is a question
 	// answered on stdout, the other a mistake reported on stderr. Handled
@@ -144,6 +149,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	if opt.rounds < 2 {
 		fmt.Fprintf(stderr, "idem: --rounds is %d: at least 2 renders are needed, because a single render cannot be compared to anything\n", opt.rounds)
+		return exitFatal
+	}
+	// An upper bound as well, because the lower one taught the wrong lesson:
+	// `--rounds 2147483647` allocated gigabytes, printed nothing, and span
+	// forever. Past a handful the false-negative rate is already floored - the
+	// measurement behind the default of 3 is in docs/design.md §9 - so a large
+	// value is always a typo.
+	if opt.rounds > maxRounds {
+		fmt.Fprintf(stderr, "idem: --rounds is %d: more than %d renders finds nothing %d does not, and costs a render per chart each\n",
+			opt.rounds, maxRounds, maxRounds)
 		return exitFatal
 	}
 
