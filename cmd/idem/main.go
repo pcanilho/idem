@@ -76,6 +76,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&opt.noDeps, "no-deps", false, "never fetch dependencies")
 	fs.StringVar(&opt.newFromRev, "new-from-rev", "", "report only findings in charts changed since REV")
 	fs.StringVar(&opt.newFromMergeBase, "new-from-merge-base", "", "same, against the merge base with REF")
+	fs.BoolVar(&opt.cluster, "cluster", false, "resolve lookup and capabilities against the current kube context")
+	fs.StringVar(&opt.kubeContext, "kube-context", "", "which context to use")
 	// helm spells this --version, but idem is the thing being invoked here, so
 	// --version has to mean idem's own version - it is the one flag every CLI
 	// has. The chart version keeps the capability under a name that says which
@@ -110,6 +112,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	mode, err := dependencyMode(opt)
 	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
+		return exitFatal
+	}
+
+	// A context with nothing to use it for is a flag the user believes did
+	// something. Say so rather than ignoring it.
+	if opt.kubeContext != "" && !opt.cluster {
+		fmt.Fprintf(stderr, "idem: --kube-context selects a cluster, but nothing here reads one; add --cluster\n")
 		return exitFatal
 	}
 
@@ -169,7 +178,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	queue := make([]scan.Chart, 0, len(charts))
 	for _, c := range charts {
-		queue = append(queue, scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)})
+		chart := scan.Chart{Name: c.release, Dir: c.ref, Spec: specFor(ref, c, opt)}
+
+		// A second, independent measurement of the same chart: through the API
+		// server, where lookup resolves and the chart sees the cluster's real
+		// capabilities. Read-only - a server dry run renders, never applies.
+		if opt.cluster {
+			server := chart.Spec
+			server.Cluster = true
+			server.KubeContext = opt.kubeContext
+			chart.Server = &server
+		}
+		queue = append(queue, chart)
 	}
 
 	prepare, resolutions := preparer(ctx, mode, h)
@@ -184,6 +204,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		evidence := engines.Evidence{
 			Uses: analyze.Of(result.Uses, analyze.Lookup),
 			Err:  result.InspectErr,
+		}
+
+		if result.ServerRendered {
+			stable := len(result.ServerFindings) == 0
+			evidence.Cluster = &stable
 		}
 
 		rep.Charts = append(rep.Charts, report.Chart{
@@ -274,6 +299,9 @@ type options struct {
 
 	newFromRev       string
 	newFromMergeBase string
+
+	cluster     bool
+	kubeContext string
 }
 
 // specFor builds the render request for one chart.

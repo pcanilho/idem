@@ -146,6 +146,21 @@ func templateArgs(spec engine.Spec) []string {
 	if spec.Version != "" {
 		args = append(args, "--version", spec.Version)
 	}
+	// A server dry run makes lookup resolve and hands the chart the cluster's
+	// own KubeVersion and APIVersions - which are nothing like helm's
+	// defaults: helm 4 assumes v1.36.0 where a real cluster may be on v1.26.
+	// Nothing is applied; this is a render-time query.
+	if spec.Cluster {
+		args = append(args, "--dry-run=server")
+		if spec.KubeContext != "" {
+			args = append(args, "--kube-context", spec.KubeContext)
+		}
+		// Deliberately no --kube-version or --api-versions here: the server
+		// already supplied the real ones, and overriding them would put back
+		// exactly the guesses this flag exists to escape.
+		return args
+	}
+
 	if spec.KubeVersion != "" {
 		args = append(args, "--kube-version", spec.KubeVersion)
 	}

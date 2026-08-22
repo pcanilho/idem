@@ -317,3 +317,49 @@ func TestStripPullPreambleLeavesAnUnrecognisedPreambleForTheParserToReject(t *te
 		t.Errorf("stripPullPreamble() = %q, want unknown chatter left in place", got)
 	}
 }
+
+func TestTemplateArgsAsksTheServerWhenClusterIsSet(t *testing.T) {
+	// `helm template` defaults to a client-side render, which resolves lookup
+	// to {} and uses helm's own default capabilities. --dry-run=server is what
+	// makes lookup resolve and hands the chart the cluster's real
+	// KubeVersion and APIVersions.
+	args := templateArgs(engine.Spec{Release: "h", ChartRef: "./c", Cluster: true})
+
+	if !slices.Contains(args, "--dry-run=server") {
+		t.Errorf("templateArgs() = %v, want --dry-run=server", args)
+	}
+}
+
+func TestTemplateArgsStaysClientSideByDefault(t *testing.T) {
+	// The default has to reproduce ArgoCD's repo-server, which renders with no
+	// cluster access at all.
+	args := templateArgs(engine.Spec{Release: "h", ChartRef: "./c"})
+
+	for _, unwanted := range []string{"--dry-run=server", "--kube-context"} {
+		if slices.Contains(args, unwanted) {
+			t.Errorf("templateArgs() = %v, want no %s", args, unwanted)
+		}
+	}
+}
+
+func TestTemplateArgsPassesTheKubeContext(t *testing.T) {
+	args := templateArgs(engine.Spec{Release: "h", ChartRef: "./c", Cluster: true, KubeContext: "prod"})
+
+	i := indexOf(args, "--kube-context")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "prod" {
+		t.Errorf("templateArgs() = %v, want --kube-context prod", args)
+	}
+}
+
+func TestCapabilitiesAreNotOverriddenWhenAskingTheServer(t *testing.T) {
+	// --dry-run=server already hands the chart the cluster's own KubeVersion
+	// and APIVersions. Passing helm's defaults alongside would override the
+	// real ones with the guesses idem was trying to escape.
+	args := templateArgs(engine.Spec{Release: "h", ChartRef: "./c", Cluster: true})
+
+	for _, unwanted := range []string{"--kube-version", "--api-versions"} {
+		if slices.Contains(args, unwanted) {
+			t.Errorf("templateArgs() = %v, want no %s alongside --dry-run=server", args, unwanted)
+		}
+	}
+}

@@ -36,9 +36,10 @@ type counting struct {
 	calls     map[string]int
 	inspected int
 
-	body  string
-	delay time.Duration
-	fail  map[string]error
+	body        string
+	delay       time.Duration
+	fail        map[string]error
+	failCluster error
 }
 
 func (c *counting) Render(_ context.Context, spec engine.Spec) ([]manifest.Object, error) {
@@ -51,6 +52,9 @@ func (c *counting) Render(_ context.Context, spec engine.Spec) ([]manifest.Objec
 	c.calls[spec.ChartRef]++
 	nth := c.calls[spec.ChartRef]
 	err := c.fail[spec.ChartRef]
+	if err == nil && spec.Cluster {
+		err = c.failCluster
+	}
 	c.mu.Unlock()
 
 	time.Sleep(c.delay)
@@ -415,5 +419,78 @@ func TestAChartThatCannotBePreparedIsUnevaluable(t *testing.T) {
 
 	if !errors.Is(got[0].Err, boom) {
 		t.Errorf("Err = %v, want the preparation failure", got[0].Err)
+	}
+}
+
+func serverChart(name string) Chart {
+	c := chart(name)
+	server := c.Spec
+	server.Cluster = true
+	c.Server = &server
+	return c
+}
+
+func TestTheClusterConditionIsMeasuredSeparately(t *testing.T) {
+	// Two independent measurements of the same chart: without cluster access
+	// (what ArgoCD's repo-server does) and with it (what Flux and Helm do).
+	r := &counting{body: "fixed"}
+
+	got := Charts(context.Background(), r, []Chart{serverChart("home")}, 2, 8, nil, nil)
+
+	if !got[0].ServerRendered {
+		t.Fatalf("ServerRendered = false, want the cluster condition measured (err: %v)", got[0].ServerErr)
+	}
+	if r.calls["./home"] != 4 {
+		t.Errorf("rendered %d times, want 4 - two rounds under each condition", r.calls["./home"])
+	}
+}
+
+func TestWithoutAServerSpecNothingExtraIsRendered(t *testing.T) {
+	r := &counting{}
+
+	got := Charts(context.Background(), r, []Chart{chart("home")}, 2, 8, nil, nil)
+
+	if got[0].ServerRendered {
+		t.Error("ServerRendered = true, want no cluster measurement")
+	}
+	if r.calls["./home"] != 2 {
+		t.Errorf("rendered %d times, want 2", r.calls["./home"])
+	}
+}
+
+func TestAnUnreachableClusterLeavesTheChartUsable(t *testing.T) {
+	// The chart renders perfectly well without a cluster, and the client-side
+	// answer does not depend on one. A refused dry run is an unknown verdict,
+	// not a failed chart.
+	boom := errors.New("Kubernetes cluster unreachable")
+	r := &counting{failCluster: boom}
+
+	got := Charts(context.Background(), r, []Chart{serverChart("home")}, 2, 8, nil, nil)
+
+	if got[0].Err != nil {
+		t.Errorf("Err = %v, want the chart still checked", got[0].Err)
+	}
+	if got[0].ServerRendered {
+		t.Error("ServerRendered = true, want the cluster condition unmeasured")
+	}
+	if got[0].ServerErr == nil {
+		t.Error("ServerErr = nil, want the reason kept")
+	}
+}
+
+func TestTheClusterRoundsRenderThePreparedChart(t *testing.T) {
+	// Dependency resolution can move the chart to a temp copy; both conditions
+	// must measure the same thing.
+	r := &counting{}
+
+	Charts(context.Background(), r, []Chart{serverChart("home")}, 2, 8, nil,
+		func(c Chart) (engine.Spec, func(), error) {
+			s := c.Spec
+			s.ChartRef = "/tmp/copy/home"
+			return s, nil, nil
+		})
+
+	if r.calls["/tmp/copy/home"] != 4 {
+		t.Errorf("rendered %v, want all four rounds against the prepared copy", r.calls)
 	}
 }

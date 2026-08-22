@@ -631,3 +631,60 @@ func TestAnUnknownRevisionIsReportedRatherThanIgnored(t *testing.T) {
 		t.Errorf("stderr = %q, want the bad revision named", stderr)
 	}
 }
+
+func requireCluster(t *testing.T) {
+	t.Helper()
+	requireHelm(t)
+	if err := exec.Command("kubectl", "cluster-info").Run(); err != nil {
+		t.Skip("no reachable cluster")
+	}
+}
+
+func TestAKubeContextWithNothingToUseItForIsRejected(t *testing.T) {
+	// A flag the user believes did something, silently ignored, is worse than
+	// an error.
+	code, _, stderr := invoke(t, "testdata/clean", "--kube-context", "prod")
+
+	if code != exitFatal {
+		t.Errorf("exit = %d, want %d", code, exitFatal)
+	}
+	if !strings.Contains(stderr, "--cluster") {
+		t.Errorf("stderr = %q, want it to say what is missing", stderr)
+	}
+}
+
+func TestClusterTurnsAnUnknownVerdictIntoAMeasurement(t *testing.T) {
+	requireCluster(t)
+
+	// Without a cluster, a chart calling lookup leaves Flux and Helm unknown:
+	// idem will not guess whether that lookup guards this value. With one, it
+	// watches and reports what happened.
+	_, without, _ := invoke(t, "testdata/guarded")
+	if !strings.Contains(without, "unknown") {
+		t.Fatalf("stdout = %q, want unknown without a cluster", without)
+	}
+
+	_, with, stderr := invoke(t, "testdata/guarded", "--cluster")
+	if strings.Contains(with, "unknown") {
+		t.Errorf("stdout = %q, want no unknown once measured (stderr: %s)", with, stderr)
+	}
+	if !strings.Contains(with, "observed") {
+		t.Errorf("stdout = %q, want the verdict marked as observed", with)
+	}
+}
+
+func TestAnUnreachableClusterDoesNotFailTheRun(t *testing.T) {
+	requireHelm(t)
+
+	// The chart renders perfectly well without a cluster, and the client-side
+	// answer does not depend on one, so a context that does not exist leaves
+	// the Flux and Helm verdicts unknown rather than failing everything.
+	code, stdout, _ := invoke(t, "testdata/guarded", "--cluster", "--kube-context", "no-such-context-xyz")
+
+	if code == exitFatal {
+		t.Errorf("exit = %d, want the run to survive an unreachable cluster", code)
+	}
+	if !strings.Contains(stdout, "unknown") {
+		t.Errorf("stdout = %q, want the verdict left unknown", stdout)
+	}
+}

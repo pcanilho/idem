@@ -30,6 +30,12 @@ type Chart struct {
 	Name string
 	Dir  string
 	Spec engine.Spec
+
+	// Server, when set, is a second render condition to measure alongside:
+	// the same chart through the API server, where lookup resolves. That is
+	// what turns the Flux and Helm verdicts from `unknown` into an
+	// observation. Nil means no cluster was asked for.
+	Server *engine.Spec
 }
 
 // Inspect examines a chart's source. Optional; nil skips it.
@@ -59,6 +65,14 @@ type Result struct {
 	// a reason to call the chart unrenderable.
 	Uses       []analyze.Use
 	InspectErr error
+
+	// ServerRendered reports whether the API-server condition was measured,
+	// ServerFindings what differed under it, and ServerErr why it could not be.
+	// A cluster that cannot be reached degrades the verdict to unknown; it is
+	// never a reason to fail the chart, which renders perfectly well without.
+	ServerRendered bool
+	ServerFindings []check.Finding
+	ServerErr      error
 }
 
 // Charts checks every chart, running at most jobs renders at once.
@@ -109,6 +123,9 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 	renders := make([][]manifest.Object, rounds)
 	errs := make([]error, rounds)
 
+	serverRenders := make([][]manifest.Object, rounds)
+	serverErrs := make([]error, rounds)
+
 	var uses []analyze.Use
 	var inspectErr error
 
@@ -121,6 +138,22 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 
 			renders[round], errs[round] = r.Render(ctx, spec)
 		})
+	}
+
+	// The API-server condition is an independent measurement of the same
+	// chart, so its rounds run alongside the client ones under the same limit.
+	if c.Server != nil {
+		serverSpec := *c.Server
+		serverSpec.ChartRef = spec.ChartRef
+
+		for round := range rounds {
+			wg.Go(func() {
+				gate <- struct{}{}
+				defer func() { <-gate }()
+
+				serverRenders[round], serverErrs[round] = r.Render(ctx, serverSpec)
+			})
+		}
 	}
 
 	// Reading the chart source does not depend on rendering it, so it runs
@@ -154,7 +187,31 @@ func one(ctx context.Context, r Renderer, c Chart, rounds int, gate chan struct{
 			Err: fmt.Errorf("checking %s: %w", c.Name, err),
 		}
 	}
-	return Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr}
+
+	out := Result{Chart: c, Findings: result.Findings, Uses: uses, InspectErr: inspectErr}
+	if c.Server != nil {
+		out.ServerFindings, out.ServerRendered, out.ServerErr = compareServer(c, serverRenders, serverErrs)
+	}
+	return out
+}
+
+// compareServer folds the API-server rounds into an answer.
+//
+// A cluster that cannot be reached, or that refuses the dry run, leaves the
+// verdict unknown rather than failing the chart: the chart renders perfectly
+// well without a cluster, and the client-side answer is unaffected.
+func compareServer(c Chart, renders [][]manifest.Object, errs []error) ([]check.Finding, bool, error) {
+	for round, err := range errs {
+		if err != nil {
+			return nil, false, fmt.Errorf("rendering %s against the cluster (round %d): %w", c.Name, round+1, err)
+		}
+	}
+
+	result, err := check.Compare(renders)
+	if err != nil {
+		return nil, false, fmt.Errorf("comparing cluster renders of %s: %w", c.Name, err)
+	}
+	return result.Findings, true, nil
 }
 
 // resolveJobs turns the flag value into a worker count.

@@ -104,6 +104,14 @@ type Spec struct {
 	// being able to pass them too.
 	KubeVersion string   `json:"kubeVersion,omitempty"`
 	APIVersions []string `json:"apiVersions,omitempty"`
+
+	// Cluster asks the API server to render, so `lookup` resolves and the
+	// chart sees the cluster's real capabilities rather than helm's defaults.
+	// Read-only: a server dry run is a render-time query, never an apply.
+	Cluster bool `json:"cluster,omitempty"`
+
+	// KubeContext selects which cluster, when Cluster is set.
+	KubeContext string `json:"kubeContext,omitempty"`
 }
 
 // Engine is any target idem can say something true about.

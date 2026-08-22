@@ -193,3 +193,56 @@ func TestAFailedScanIsUnknownRatherThanClean(t *testing.T) {
 		t.Errorf("argocd Result = %v, want churns - lookup is irrelevant there", got)
 	}
 }
+
+func observed(stable bool) Evidence { return Evidence{Uses: oneUse.Uses, Cluster: &stable} }
+
+func TestAMeasuredClusterRenderBeatsGuessing(t *testing.T) {
+	// The whole point of --cluster: `unknown` becomes a fact. helm's server
+	// dry run resolves lookup and uses the cluster's real capabilities, which
+	// is what an engine doing a real install sees.
+	for _, name := range []string{"flux", "helm"} {
+		v := byName(t, name).Verdict(observed(true))
+
+		if v.Result != engine.Stable {
+			t.Errorf("%s Result = %v, want stable", name, v.Result)
+		}
+		if !v.Observed {
+			t.Errorf("%s Observed = false, want true - this was measured", name)
+		}
+	}
+}
+
+func TestAChartThatChurnsEvenWithLookupResolvedIsAFact(t *testing.T) {
+	// The lookup is present but does not guard this value. Without --cluster
+	// idem could only say unknown; with it, this is settled.
+	v := byName(t, "flux").Verdict(observed(false))
+
+	if v.Result != engine.Churns {
+		t.Errorf("Result = %v, want churns", v.Result)
+	}
+	if !v.Observed {
+		t.Error("Observed = false, want true")
+	}
+	if !strings.Contains(v.Because, "observed") {
+		t.Errorf("Because = %q, want it to say the answer was measured", v.Because)
+	}
+}
+
+func TestArgoCDIsUnaffectedByWhatTheClusterSays(t *testing.T) {
+	// ArgoCD's repo-server has no cluster access whatever idem can reach, so a
+	// measurement taken WITH access says nothing about it.
+	if got := byName(t, "argocd").Verdict(observed(true)).Result; got != engine.Churns {
+		t.Errorf("argocd Result = %v, want churns regardless", got)
+	}
+}
+
+func TestAMeasurementOutranksAFailedScan(t *testing.T) {
+	// If idem watched the chart render identically with lookup resolving, not
+	// having been able to read the source no longer matters.
+	stable := true
+	ev := Evidence{Err: errors.New("scanning charts/x.tgz: unexpected EOF"), Cluster: &stable}
+
+	if got := byName(t, "flux").Verdict(ev).Result; got != engine.Stable {
+		t.Errorf("Result = %v, want the observation to win", got)
+	}
+}

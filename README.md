@@ -81,7 +81,11 @@ Dependency resolution works as described below, without ever writing to your rep
 
 The `--new-from-rev` / `--new-from-merge-base` ratchet works too.
 
-Not yet built: `--cluster` and `doctor`. Engine
+`--cluster` turns the Flux and Helm `unknown` verdicts into measured facts, and hands the chart
+the cluster's real capabilities. Not yet built from that section: the apply-side and post-apply
+drift checks, which need to read live objects.
+
+Not yet built: `doctor`. Engine
 auto-detection is not built either, so `--engine` shows all three unless you narrow it, and a
 chart rendered straight from a registry cannot be scanned for `lookup` yet — that reports
 `unknown` and says so. `action.yml` downloads a release that does not exist yet. So most of

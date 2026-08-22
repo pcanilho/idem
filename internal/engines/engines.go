@@ -90,6 +90,12 @@ type Evidence struct {
 	// these verdicts.
 	Uses []analyze.Use
 	Err  error
+
+	// Cluster is what the API-server condition observed, when idem was allowed
+	// to look: true means the chart rendered identically with lookup
+	// resolving. Nil means it was not measured, which is the whole difference
+	// between an observation and an argument.
+	Cluster *bool
 }
 
 // Verdict says what this engine does with a chart that rendered inconsistently
@@ -105,6 +111,27 @@ func (t Target) Verdict(ev Evidence) engine.Verdict {
 	// measured there, and no lookup in the chart can change it.
 	if !t.caps.LookupResolves {
 		return engine.Verdict{Engine: t.name, Result: engine.Churns, Because: t.churn, Observed: true}
+	}
+
+	// Measured. `helm template --dry-run=server` resolves lookup and hands the
+	// chart the cluster's real capabilities, which is exactly what an engine
+	// doing a real install sees - so this is an observation about that engine
+	// rather than an argument about it, and it outranks everything below.
+	if ev.Cluster != nil {
+		if *ev.Cluster {
+			return engine.Verdict{
+				Engine:   t.name,
+				Result:   engine.Stable,
+				Because:  "lookup resolves; identical across renders (observed)",
+				Observed: true,
+			}
+		}
+		return engine.Verdict{
+			Engine:   t.name,
+			Result:   engine.Churns,
+			Because:  t.churn + " — differs even with lookup resolved (observed)",
+			Observed: true,
+		}
 	}
 
 	// The scan failed, so whether a lookup could stabilise this value is not
