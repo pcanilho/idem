@@ -138,7 +138,7 @@ they will in your cluster rather than against Helm's defaults.
 ## 4. Render-side churn is an ArgoCD problem, and it is worth being precise
 
 Scoped deliberately: **render-side** churn. Flux is exposed to the other two causes in
-[§8](#8-three-causes-of-permanent-outofsync) just as much, and is quieter about it. What
+[§8](#8-five-causes-in-pipeline-order) just as much, and is quieter about it. What
 follows is only about the first.
 
 For render-side churn Flux is **not** affected the same way, and you should not believe anyone
@@ -645,3 +645,50 @@ before comparison, in a tool whose claim is "the output is stable", is a soundne
 output — those come from the separate lexical scan of the chart's templates. `argocd app
 manifests` output has been through the repo-server's decoding and has lost the comments
 entirely, so findings from that path group under `(source unknown)`.
+
+---
+
+## 13. Decisions the README used to argue for
+
+These were in `README.md`, where they read as pre-emptive defences against feature requests from
+users who did not exist yet — the effect on a stranger being "this author will argue with me".
+They are arguments about design, so they belong here.
+
+### No rules file, and no exceptions file
+
+Suppression is something you need *after* you have run a tool and disagreed with it; nobody has
+exceptions on day one. Shipping the mechanism first invites a config file that outlives the
+reason for every line in it.
+
+`-o json` is the seam instead, and OPA is the policy engine:
+
+```sh
+idem ./charts -o json | jq '.findings[] | select(.consequence == "rolls")'
+idem ./charts -o json | conftest test -
+```
+
+The one exception proves the rule: `idem` *reads* the suppression config you already keep for
+ArgoCD and Flux, because that is a fact about your estate rather than a second place to
+configure `idem`.
+
+### No `--type` flag, ever
+
+If the user has to tell the tool what it is looking at, the tool should have looked.
+`chartref.Classify` decides between a local path, an OCI reference, `--repo` and a repository
+alias by inspecting the reference and the disk. A directory named `doctor` is a chart, not the
+verb, for the same reason.
+
+### No HTML, CSV or SARIF output
+
+`text` for people, `json` for machines, `markdown` for a pull-request comment, `github` for
+inline annotations. Each of those has a reader who cannot use any of the others. A fifth format
+would be a format with no reader — and SARIF in particular implies a line number `idem`
+deliberately refuses to guess (§9).
+
+### Why the `ignoreDifferences` block carries a caveat
+
+The pointers are computed for ArgoCD's default diff. Under `ServerSideDiff=true` the ignore
+normalizer never sees the rendered config at all: pointers must then describe the API server's
+dry-run output, which two `helm template` runs cannot observe. Saying so beats implying the block
+works everywhere. (`ServerSideApply=true` is a different option on a different code path and does
+not affect these pointers — the two are routinely conflated.)

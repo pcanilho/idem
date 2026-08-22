@@ -1,20 +1,23 @@
 # idem
 
+[![CI](https://github.com/pcanilho/idem/actions/workflows/ci.yml/badge.svg)](https://github.com/pcanilho/idem/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/pcanilho/idem.svg)](https://pkg.go.dev/github.com/pcanilho/idem)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Check your Helm charts against the GitOps engine you actually run.**
 
-`idem` is a command-line tool. It renders your chart more than once, compares the results
-structurally, and tells you which objects will never settle — under ArgoCD, under Flux, under
-plain Helm — along with the exact config to fix it.
+`idem` renders your chart more than once, compares the results, and tells you which objects will
+never settle — under ArgoCD, under Flux, under plain Helm — along with the config that fixes it.
 
 ```console
-$ idem ./charts
-✓ 10 charts render consistently   ·   helm 4.2.4, 2 rounds
+$ idem ./examples/stable-chart
+✓ stable-chart renders consistently under ArgoCD.
+  helm 4.2.4 · 2 rounds
 ```
 
-Why that matters: a chart that renders differently on every pass never converges under ArgoCD.
-The app sits `OutOfSync`, `selfHeal` re-applies it, and any workload carrying a `checksum/`
-annotation rolls its pods — every time the repo-server re-renders, which by default is at least
-daily.
+Why that matters: a chart that renders differently every time never converges. The app sits
+`OutOfSync`, `selfHeal` re-applies it, and any workload with a `checksum/` annotation rolls its
+pods — again and again, for as long as it is deployed.
 
 ---
 
@@ -29,9 +32,9 @@ password: {{ .Values.auth.password
              | default (randAlphaNum 32) }}
 ```
 
-Under `helm install`, `lookup` finds the existing Secret and the password is stable.
-Under ArgoCD, `lookup` returns `{}` — repo-server has no cluster access — so the third branch
-fires on **every render**. A new password, every sync.
+Under `helm install`, `lookup` finds the existing Secret and the password is stable. Under
+ArgoCD, `lookup` returns `{}` — the repo-server has no cluster access — so the third branch
+fires and a new password is generated. Every time the manifests are rendered again.
 
 The same chart also rewrote a Postgres superuser password until it no longer matched the
 database. That `StatefulSet` had no `checksum/` annotation, so **nothing restarted and nothing
@@ -44,7 +47,7 @@ You cannot catch this with `argocd app diff` either —
 
 The objects where this bug lives are exactly the ones ArgoCD will not show you.
 
-**Verify it yourself in ten seconds**, on the most-pulled chart in the ecosystem:
+**See it for yourself in ten seconds**, on the most-pulled chart in the ecosystem:
 
 ```sh
 helm template pg oci://registry-1.docker.io/bitnamicharts/postgresql | grep postgres-password
@@ -55,755 +58,229 @@ Two different values. Five renders give five passwords.
 
 ---
 
-## Status
-
-**Early, and not yet released** — but the release itself is now wired: `goreleaser` builds
-linux and darwin on amd64 and arm64, publishes a Homebrew cask to `pcanilho/tap`, and produces
-exactly the archive names `action.yml` downloads. The comparison engine, manifest parsing, path addressing and
-chart-reference handling are built and tested — and so is a working CLI: `idem <path>` discovers
-charts, renders each of them more than once, compares the results and prints the verdict, with
-the exit codes below.
-
-Three-engine verdicts work: `idem` reports what a finding means under ArgoCD, Flux and Helm,
-and tells you whether you are looking at a chart defect or an ArgoCD limitation.
-
-The `ignoreDifferences` emitter works too: one pasteable block per run, carrying every
-differing field even where the display above it elides some.
-
-`idem` also reads your ArgoCD `Application` / `ApplicationSet` and Flux `HelmRelease`, so a
-finding you have already covered with an `ignoreDifferences` block is reported as handled rather
-than shouted about again — and it will not re-emit config you already have.
-
-The static analyzer works too: a chart that calls a non-deterministic function but rendered
-identically is reported as a **potential** finding — its own section, never counted, never
-fatal — because the failure that motivated `idem` was a pin that silently stopped applying.
-
-All four output formats work: `text`, `json`, `markdown` and `github`.
-
-Dependency resolution works as described below, without ever writing to your repository.
-
-The `--new-from-rev` / `--new-from-merge-base` ratchet works too.
-
-`--context` turns the Flux and Helm `unknown` verdicts into measured facts, hands the chart the
-cluster's real capabilities, and reports what the API server would rewrite on admission.
-
-`idem doctor` works: it ranks workloads by how often they roll, names the Application or
-HelmRelease that owns each, and resolves that to the chart path so the closing line is a command
-you can run. `idem doctor --namespace <ns>` finds what is being written *after* apply and names
-the controller doing it.
-
-A chart rendered from a registry is fetched to a temp directory and scanned for `lookup` like any
-other, so a remote chart gets a real verdict rather than an `unknown`.
-
-Engine auto-detection is not built, so `--engine` shows all three unless you narrow it, and
-`action.yml` downloads a release that does not exist yet.
-
-Three-engine verdicts (ArgoCD, Flux, Helm) are v1 scope, not a later addition. They are the
-reason the tool exists.
-
 ## Install
 
-Once released:
-
-```sh
-brew install pcanilho/tap/idem
-```
-
-That pulls in `helm`, which `idem` cannot render without. To build it yourself:
+Pre-1.0 and unreleased, so build it from source. Needs **Go 1.26** or newer:
 
 ```sh
 go install github.com/pcanilho/idem@latest
 ```
 
-Or take a binary straight from the
-[releases page](https://github.com/pcanilho/idem/releases) — linux and darwin, amd64 and arm64.
-
-`idem` shells out to whichever `helm` is on your `PATH`, and prints which one it used —
-results can depend on it. `idem doctor` and `--context` additionally need `kubectl`; everything
-else works with no cluster at all.
+`idem` shells out to whatever `helm` is on your `PATH`, the same way ArgoCD's repo-server does.
+`idem doctor` and `--context` additionally need `kubectl`. Nothing else.
 
 ---
 
-## Usage
+## Try it
 
-One command, and the verb is optional:
+Point it at a chart, a directory of charts, or a registry:
 
 ```sh
-idem ./charts                 # check (default)
-idem diff a.yaml b.yaml       # compare two renders you produced yourself
+idem ./charts                  # every chart under a directory
+idem ./charts/my-app           # one chart
+idem myapp --repo https://charts.example.com
+idem oci://registry.example.com/charts/myapp
 ```
 
-### The common case
-
-Most runs find nothing, because you fix a chart once and it stays fixed:
+Here is a chart that churns, and everything `idem` says about it:
 
 ```console
-$ idem ./charts
-✓ All 10 charts render consistently under ArgoCD.
+$ idem ./examples/churning-chart
+
+  examples/churning-chart/templates/main.yaml
+    Secret/churning-chart-secret   .data.password   silent — no checksum
+
+      argocd   CHURNS   on every re-render — at least daily, and without cluster access
+      flux     CHURNS   on every chart or values change
+      helm     CHURNS   on every `helm upgrade`
+
+      No `lookup` anywhere in this chart, so nothing can stabilise this value.
+      That is a chart defect rather than an ArgoCD limitation — worth reporting
+      upstream, and pinning the value meanwhile.
+
+  — potential · not counted, not fatal —
+
+    churning-chart
+      randAlphaNum   random   templates/main.yaml:7
+
+  1 of 1 chart will churn under ArgoCD.
   helm 4.2.4 · 2 rounds
-```
-
-It names the helm binary and round count on purpose. A silent pass that does not say what it
-checked is a pass you cannot trust — and ArgoCD 3.5 swapped Helm 3.19 for 4.2 underneath
-everybody.
-
-### When something is wrong
-
-One line per finding, grouped by the template that produced it, and **one** remediation block
-at the end — so you paste once, not N times:
-
-```console
-$ idem ./charts
-
-  home/templates/secrets.yaml
-    Secret/home-ollama-secrets   .data.WEBUI_SECRET_KEY   rolls 2 Deployments
-
-  lab/templates/database.yaml
-    Secret/lab-harbor-postgres   .data.password           silent — no checksum
-    Secret/lab-harbor-postgres   .data.registry-token     silent — no checksum
-
-  2 of 10 charts will churn under ArgoCD; 1 could not be rendered.
-  helm 4.2.4 · 2 rounds · run with --strict to gate on this
 
   Add to your ArgoCD Application to stop the churn:
 
     spec:
       ignoreDifferences:
         - kind: Secret
-          name: home-ollama-secrets
-          jsonPointers: [/data/WEBUI_SECRET_KEY]
-        - kind: Secret
-          name: lab-harbor-postgres
-          jsonPointers:
-            - /data/password
-            - /data/registry-token
+          name: churning-chart-secret
+          jsonPointers: [/data/password]
       syncPolicy:
         syncOptions: [RespectIgnoreDifferences=true]
-
-  exit 2 — a chart could not be rendered
 ```
 
-The right-hand column is the whole product in three words. `rolls 2 Deployments` and
-`silent — no checksum` are the difference between an annoyance and a credential that has been
-drifting from your database for two years.
+Read it in three parts:
 
-Grouping is free and exact: `helm template` marks every document with a `# Source:` comment.
-Input without one — `argocd app manifests` output has lost them — groups under
-`(source unknown)`. Absent is reported as absent, never guessed.
+- **what differs** — the object, the field, and what it costs you. `silent — no checksum` means
+  nothing will restart and nothing will alert; you would never have noticed.
+- **what it means for your engine** — the same chart gets three different answers, because the
+  three engines render it under different conditions.
+- **what to do about it** — a block you can paste. For Flux, `idem` emits
+  `spec.driftDetection.ignore` instead; the paths differ, because the two engines evaluate them
+  against different shapes.
 
-### Before you adopt someone else's chart
+---
 
-```console
-$ idem oci://registry-1.docker.io/bitnamicharts/postgresql --engine all
+## Three engines, three different answers
 
-  postgresql/templates/secrets.yaml
-    Secret/pg-postgresql   .data.postgres-password
+This is the part other tools do not do, and it is the reason `idem` exists.
 
-      argocd    CHURNS     on every re-render — at least daily, and without cluster access
-      flux      unknown    chart uses `lookup` (common/_secrets.tpl:103) — may guard this value
-      helm      unknown    same
+| Engine | Does `lookup` resolve? | So a `lookup`-guarded value is… |
+|---|---|---|
+| **ArgoCD** | **No** — the repo-server runs `helm template` with no cluster access | **churning** |
+| **Flux** | Yes — helm-controller does a real install | stable |
+| **Helm** | Yes — `helm upgrade` talks to the cluster | stable |
 
-  This chart will churn under ArgoCD. Under Flux and Helm: unknown.
-  helm 4.2.4 · 2 rounds
+So "is this chart broken?" has no single answer. A chart using `lookup` is *correct Helm*; it
+just cannot work under ArgoCD. `idem` tells you which situation you are in, and whether the fix
+belongs in your Application or upstream in the chart.
+
+Without a cluster, `idem` says `unknown` for Flux and Helm rather than guessing. Give it one and
+those become measured facts:
+
+```sh
+idem ./charts --context=              # your current kube context
+idem ./charts --context=prod          # a named one
 ```
 
-Add `--context` and those `unknown`s become measured facts — see
-[Three engines](#three-engines-three-different-answers).
+`--context` is opt-in and read-only. It renders through the API server (`--dry-run=server`), so
+`lookup` resolves and your real cluster capabilities are used. It never applies anything.
 
-### Flags
+---
 
-That is the whole surface:
+## In CI
 
-```
-  -f, --values      values file, repeatable                     (as helm)
-      --set         set a value, repeatable                     (as helm)
-      --rounds      renders to compare                        (default 2)
-      --engine      argocd, flux, helm, all, or auto
-                    (default: auto-detected; all three when undetectable)
-      --strict      exit non-zero on findings         (default: report only)
-      --helm        helm binary to render with   (default: first on PATH)
-      --context     kube context to resolve lookup and capabilities against
-                    (pass it empty, --context=, for the current one)
-      --namespace   render into this namespace instead of the one the
-                    delivery config names
-      --jobs        renders to run at once        (default: number of CPUs)
-      --dependency-update  resolve missing deps in place, not a temp dir
-      --no-deps     never fetch dependencies      (airgapped / reproducible CI)
-      --new-from-rev REV          report only findings in charts changed since REV
-      --new-from-merge-base REF   same, against the merge base with REF
-      --repo        chart repository URL, as helm's --repo
-      --chart-version  chart version, as helm's --version
-  -o                text, json, markdown or github        (default text)
-  -v                expand every finding
-      --version     print idem's version
-```
-
-The chart version is `--chart-version`, not `--version`, which is the one place `idem`
-deliberately does not mirror helm. `idem --version` is the flag every command-line tool has, and
-answering it with a chart's version would be a surprise in the one place nobody expects one.
-
-### Output formats
-
-`-o text` is the default above. `-o json` is the machine-readable contract, and `-o markdown`
-is shaped for a pull-request comment:
-
-````console
-$ idem ./charts -o markdown
-````
-
-```markdown
-### idem — 2 of 10 charts will churn under ArgoCD
-
-| chart | object | field | consequence |
-|---|---|---|---|
-| `home` | `Secret/home-ollama-secrets` | `.data.WEBUI_SECRET_KEY` | rolls 2 Deployments |
-| `lab` | `Secret/lab-harbor-postgres` | `.data.password` | silent — no checksum |
-| `lab` | `Secret/lab-harbor-postgres` | `.data.registry-token` | silent — no checksum |
-
-<details>
-<summary>Fix — add to your ArgoCD Application</summary>
-
-    spec:
-      ignoreDifferences:
-        - kind: Secret
-          name: home-ollama-secrets
-          jsonPointers: [/data/WEBUI_SECRET_KEY]
-      syncPolicy:
-        syncOptions: [RespectIgnoreDifferences=true]
-
-</details>
-
-<sub>helm 4.2.4 · 2 rounds · 1 chart could not be rendered</sub>
-```
-
-The fix is collapsed because it is long and only some readers need it, and the table survives
-GitHub's renderer without alignment tricks. Piping that into `gh pr comment --body-file -` is
-the whole CI integration:
-
-```yaml
-- run: idem ./charts --new-from-merge-base ${{ github.base_ref }} -o markdown > /tmp/idem.md
-- run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
-  if: ${{ hashFiles('/tmp/idem.md') != '' }}
-```
-
-**No HTML, CSV or SARIF in v1.** JSON covers every machine consumer, markdown covers the human
-one that matters, and each additional format is a rendering to maintain forever.
-
-### GitHub Actions
-
-`idem` ships an action, and it is thin on purpose — the tool knows how to emit annotations, the
-action only installs and runs it:
+Findings are informative by default. `--strict` turns them into a failing build:
 
 ```yaml
 - uses: pcanilho/idem@v1
   with:
-    args: ./charts --new-from-merge-base ${{ github.base_ref }}
-    helm-version: 4.2.1       # match whatever your ArgoCD runs
+    args: ./charts --strict
 ```
 
-The action lives in this repo rather than a separate one, is composite rather than Docker (no
-image pull), and pins nothing for you: `version: latest` resolves at run time and says so in the
-log, because a new release silently changing your CI result is the same class of surprise this
-tool exists to report.
-
-`-o github` emits workflow commands (`::error file=…,line=…::`), so findings appear **inline on
-the diff** in Files Changed — no token, no API calls, no `pull-requests: write` permission.
-
-**Which findings can be pinned to a line, and which cannot.** This is worth stating plainly,
-because a tool that annotates the wrong line is worse than one that annotates nothing:
-
-| Finding | Repo location | Annotation |
-|---|---|---|
-| Floating dependency | `Chart.yaml`, the dependency's own line | **exact line** |
-| Potential (static scan) | the template, at the function call | **exact line** |
-| Observed, local chart | the template, from `# Source:` — no line | **file-level** |
-| Observed, remote chart | nothing in the repo | **summary only** |
-
-`helm template` marks each document with the template that produced it but carries no line
-numbers, and connecting a rendered field back to the template line that emitted it is the
-attribution problem `idem` deliberately does not attempt. So an observed finding annotates the
-file, not a guessed line.
-
-Findings with no repo location — anything from an OCI or `--repo` chart — are not dropped; they
-go in the summary comment instead:
+`-o github` emits workflow commands, so findings appear **inline on the diff** in Files Changed —
+no token, no API calls, no extra permissions. To post one summary comment instead:
 
 ```yaml
 - run: idem ./charts -o markdown > /tmp/idem.md
 - run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
 ```
 
-Use both together: annotations for what has a line, one comment for the rest. GitHub also caps
-how many annotations it will render per run, so `-o github` prints the cap it hit rather than
-letting findings disappear silently.
+Adopting `idem` on an estate that already has problems? Report only what your branch changed:
 
-### What a chart is rendered with
-
-`idem`'s unit of analysis is a **release** — chart plus values plus engine — so rendering a chart
-with no values at all analyses a release nobody deploys. When an `Application` or
-`ApplicationSet` claims the chart, `idem` renders it the way that manifest says:
-`spec.source.helm.releaseName`, `valueFiles` (a leading slash is repo-root relative),
-`values`, `valuesObject` and `parameters`, with your own `-f` and `--set` last so a flag typed at
-the terminal still wins.
-
-**ApplicationSets are expanded where their input is the repository.** A `git.files` or
-`git.directories` generator enumerates files `idem` already has, so each matched element becomes
-its own release — its own values, namespace and release name — and each is checked separately:
-
-```console
-$ idem ./charts
-
-  clusters (config/tenants/alpha.yaml)   …
-  clusters (config/tenants/beta.yaml)    …
+```sh
+idem ./charts --new-from-merge-base main
 ```
 
-Every other generator — `clusters`, `list`, `matrix`, `scmProvider` — reads state that is not in
-the repository. `idem` does not invent an element for it. If the chart still renders, the
-findings are reported with a note that this is not the release you deploy; if the chart's own
-`required` guards fire, that is **not** a broken chart and **not** exit 2:
+A permanently red pipeline gets switched off, so the ratchet exists to keep it green from day
+one. It filters *findings* only — a chart that will not render at all is still reported, because
+that is a gap in what was checked rather than a finding about it.
 
-```console
-  could not be built — values come from a generator idem cannot expand
+---
 
-    flux-bootstrap      needs cluster, webRoute.enabled
-    storage-bootstrap   needs cluster
+## Already fixed it? `idem` knows
 
-      The chart is not at fault: its guards fired because idem withheld a value.
+`idem` reads the ArgoCD `Application` / `ApplicationSet` and Flux `HelmRelease` in your
+repository. That tells it three things:
+
+- **what you already suppress** — a finding covered by your own `ignoreDifferences` is shown as
+  handled, not shouted about again, and it does not fail `--strict`.
+- **what your chart is rendered with** — values, release name, and namespace come from the
+  manifest that deploys it, because a chart rendered with no values is a release nobody runs.
+  ApplicationSet generators that read the repository are expanded, one release per element.
+- **which engines you use** — so you only see verdicts and fix blocks for engines you run.
+
+One case is worth calling out: an `ignoreDifferences` block with `selfHeal: true` and no
+`RespectIgnoreDifferences=true` hides the diff while re-applying the object anyway. `idem`
+reports that as a trap rather than as handled, because you believe it is fixed and it is not.
+
+---
+
+## Find it in a cluster you already run
+
+Everything above predicts churn. `idem doctor` finds churn that has already happened — no chart
+needed:
+
+```sh
+idem doctor                      # what keeps rolling, and who owns it
+idem doctor --namespace lab      # what is being written after apply
 ```
 
-It is counted (`summary.unconstructed` in `-o json`) so the gap cannot pass unnoticed, and it
-never fails the run: `idem` could not construct the release, which is a limit of `idem` rather
-than a defect in your chart.
+It ranks workloads by how often they roll, names the Application or HelmRelease that owns each,
+and resolves that to a chart path — so the last line is a command you can run.
 
-**Both substitution modes are supported**, because they are genuinely different engines and
-`goTemplate: false` is still the schema default. With `goTemplate: true` the element is a nested
-structure and templates are Go templates (`{{ .tenant }}`, `{{ .path.filename }}`). Without it,
-ArgoCD flattens the matched file into dotted keys and substitutes with `fasttemplate`
-(`{{tenant}}`, `{{cluster.name}}`, `{{path.basenameNormalized}}`, `{{path[1]}}`) — and writes the
-tag back **verbatim** when it names nothing, or when the value is not a string. `idem` reproduces
-that, including `SanitizeName` for the `Normalized` keys, and treats anything still carrying
-`{{ }}` as a value it could not resolve rather than one to invent. A namespace of `{{tenant}}-system`
-with no `tenant` key is reported unresolved, never rendered into `-system`.
+---
 
-### Which namespace a chart renders into
+## Compare two renders yourself
 
-`.Release.Namespace` is not cosmetic: it appears in object names, in labels, in `lookup` calls,
-and it decides the identity `idem` reports and the identity an `ignoreDifferences` rule matches
-against. `helm template` with no `--namespace` takes the current kube context's namespace, so the
-same commit renders one way on your laptop and another in CI. `idem` never does that.
-
-In order of precedence:
-
-1. `--namespace`, when you pass it.
-2. `spec.destination.namespace` from the Application or ApplicationSet whose `source.path` is
-   this chart. Two manifests claiming one chart with *different* namespaces means neither is
-   used — the same chart in staging and production is exactly that shape, and `idem` has no
-   Application of its own to pick between them. A templated namespace is not guessed at either.
-3. The literal `default`, and the provenance line says so: `namespace default (idem's own,
-   nothing claims this chart)`.
-
-A Flux `HelmRelease` names no chart path, so nothing joins its `targetNamespace` to a directory;
-those charts fall through to rule 3.
-
-### The fix block, per engine
-
-The two engines suppress the same churn with different config, and the difference is not
-cosmetic — the paths are evaluated against a **different shape**, so a pointer that works in one
-is inert in the other. `idem` emits whichever applies, and only where that engine actually churns:
-
-```yaml
-spec:
-  driftDetection:
-    mode: enabled
-    ignore:
-      - paths: [/data/password]
-        target:
-          version: v1
-          kind: Secret
-          name: churn-secret
+```sh
+idem diff a.yaml b.yaml
 ```
 
-Verified against `fluxcd/pkg` `ssa/jsondiff`: Flux **server-side apply dry-runs the desired
-object before diffing**, so a Secret's write-only `stringData` has already been folded into
-`data` — the path is `/data/KEY`, and emitting `/stringData/KEY` as well (which ArgoCD needs,
-for a second code path Flux does not have) would be pure noise. The paths are then applied as
-JSON Patch **remove** operations with `AllowMissingPathOnRemove: true`, so a path addressing
-nothing fails **silently**, exactly the way a wrong ArgoCD pointer does.
+The comparison engine on its own: no helm, no network, no cluster. This is also how you point
+`idem` at kustomize:
 
-`target` fields are anchored regular expressions (`^(?:value)$`), so a name containing a dot is
-escaped — unescaped, it would match any character there and suppress drift on an object you
-never named. And the block carries `mode`, because `driftDetection.ignore` does nothing at all
-while drift detection is off.
+```sh
+kustomize build overlays/prod > a.yaml
+kustomize build overlays/prod > b.yaml
+idem diff a.yaml b.yaml
+```
 
-A chart whose value a `lookup` stabilises gets **no** Flux block: there is no Flux drift to
-suppress, and handing you config for a problem you do not have is how a fix block stops being
-trusted.
+---
 
-**There is no rules file and no exceptions file, deliberately.** Suppression is something you
-need *after* you have run a tool and disagreed with it — nobody has exceptions on day one. If
-you need to filter or gate programmatically, `-o json` is the seam:
+## Commands and flags
+
+```
+idem [chart] [flags]     check a chart, or every chart under a directory
+idem diff a.yaml b.yaml  compare two renders you produced yourself
+idem doctor [flags]      ask a cluster you already run what keeps rolling
+```
+
+| Flag | What it does |
+|---|---|
+| `-f`, `--values` | values file, repeatable |
+| `--set` | set a value, repeatable |
+| `--rounds` | how many renders to compare (default 2) |
+| `--strict` | exit 1 when something will churn |
+| `-v` | expand every finding instead of capping each at five fields |
+| `-o` | `text`, `json`, `markdown` or `github` |
+| `--engine` | `argocd`, `flux`, `helm`, `all`, or `auto` (default) |
+| `--context` | resolve `lookup` and capabilities against a cluster |
+| `--namespace` | render into this namespace instead of the one your config names |
+| `--repo` | chart repository URL, as helm's `--repo` |
+| `--chart-version` | chart version to fetch, as helm's `--version` |
+| `--jobs` | renders to run at once |
+| `--new-from-rev`, `--new-from-merge-base` | report only what changed |
+| `--dependency-update`, `--no-deps` | how to handle missing subcharts |
+| `--helm` | which helm binary to render with |
+| `--version` | print idem's version |
+
+Flags may come before or after the chart path.
+
+`-o json` is the machine-readable contract, so you can gate on it however you like:
 
 ```sh
 idem ./charts -o json | jq '.findings[] | select(.consequence == "rolls")'
-idem ./charts -o json | jq '.findings[] | select(.condition == "cluster")'   # needs --context
 idem ./charts -o json | conftest test -
 ```
-
-Let OPA be the policy engine. `idem` reports facts.
-
----
-
-## Dependencies
-
-A chart with unresolved subchart dependencies cannot render. `idem` handles that without
-failing and without touching your working tree:
-
-1. **Render as-is first.** If your repo vendors its `charts/*.tgz` — as a GitOps monorepo
-   usually does — this is the whole story and costs nothing.
-2. **Otherwise resolve in a temp directory.** Copy the chart out, `helm dependency build`
-   there, render, discard. Chart source is small (Bitnami's postgresql is ~250K of templates),
-   so this is cheap.
-3. `--dependency-update` resolves **in place** instead, if you would rather populate helm's
-   cache and your own `charts/` directory.
-4. `--no-deps` never fetches. Charts with missing dependencies become `unevaluable` and exit
-   `2`, with the `helm dependency build` command you need. For airgapped builds, or when you
-   want a run to be byte-reproducible.
-
-```console
-$ idem ./charts
-✓ All 10 charts render consistently under ArgoCD.
-  helm 4.2.4 · 2 rounds · 8 vendored, 2 resolved in a temp dir
-```
-
-`idem` never writes to your repository unless you pass `--dependency-update`. A linter that
-leaves your `git status` dirty is a linter people stop running.
-
----
-
-## CI: only fail on what you just changed
-
-Adding any linter to an existing estate finds a pile of pre-existing issues, and a permanently
-red pipeline gets deleted rather than fixed. `idem` borrows golangci-lint's answer — git
-revisions, not a baseline file:
-
-```yaml
-- run: idem ./charts --new-from-merge-base ${{ github.base_ref }} --strict
-```
-
-```console
-$ idem ./charts --new-from-merge-base main --strict
-
-  home/templates/secrets.yaml
-    Secret/home-ollama-secrets   .data.WEBUI_SECRET_KEY   rolls 2 Deployments
-
-  1 of the 2 charts changed since main will churn under ArgoCD.
-  7 pre-existing findings not shown — drop the flag to see them.
-  exit 1
-```
-
-Nothing is stored and nothing is suppressed: there is no baseline file to maintain, no
-generated allowlist to review, and dropping the flag always shows you everything. The
-granularity is a **chart**, not a line — a finding belongs to a rendered object, not to a
-source line — so a chart with any changed file is fully re-examined.
-
----
-
-## Your git may not describe what is running
-
-A `Chart.yaml` dependency can declare a range. Rendering resolves it against the repository
-index *at render time*, so nothing in git records which version was actually used:
-
-```yaml
-dependencies:
-  - name: romm
-    version: "=>9.2.9"
-```
-
-Helm stamps the resolved version on every object it renders (`helm.sh/chart: romm-19.4.0`), so
-`idem` can compare what you declared against what you are running — a label read, no rendering:
-
-```console
-$ idem ./charts/home --context=
-
-  — floating dependencies · not counted, not fatal —
-
-  19 of 19 dependencies are running above their declared floor:
-
-    romm            =>9.2.9     running 19.4.0     10 major versions above
-    lidarr          =>23.0.2    running 29.7.3
-    jackett         =>22.0.1    running 27.7.25
-    …
-
-  Git does not record these versions. A rebuild, a repo-server cache expiry, or any
-  re-resolve deploys whatever is newest at that moment — which need not be what is
-  running now.
-```
-
-**This is reported, never judged.** Floating ranges are how you get auto-update, and plenty of
-people choose them deliberately — gitignoring the lock file precisely so resolution is not
-frozen. `idem` cannot know whether that is your intent, so the finding is informational: it does
-not count toward the totals and never affects the exit code, exactly like a potential finding.
-
-If you *do* want to enforce pinning, that is a policy question rather than a correctness one:
-`idem -o json | conftest test -`.
-
-## `idem doctor` — find it in a cluster you already run
-
-Everything else predicts *"this will churn"*. `doctor` finds *"this has been churning for two
-years"*. No chart, no git, no rendering — two cluster queries:
-
-```console
-$ idem doctor
-
-  Scanning 56 workloads for sync churn…
-
-   rev   per day   age    workload
-   660      0.89   743d   lab/lab-harbor-registry     checksum/secret + 3 more
-   660      0.89   743d   lab/lab-harbor-jobservice   checksum/secret + 3 more
-   660      0.89   743d   lab/lab-harbor-core         checksum/secret + 2 more
-   594      0.74   803d   home/home-ollama            checksum/secrets + 8 more
-   345      0.50   693d   home/home-romm              checksum/secrets + 8 more
-
-  Cluster median is 0.14 rollouts/day. These 5 carry a checksum/ annotation and
-  roll far more often than their images change — consistent with a Secret that
-  is regenerated on every sync.
-
-  Confirm the cause:   idem <their chart> --context=
-```
-
-It also reads the delivery chain and attributes divergence that the engines report but do not
-explain:
-
-```console
-$ idem doctor --namespace lab
-
-  ArgoCD says lab-app has 1 resource OutOfSync:
-
-    Secret/lab-gitea-mirror
-      applied with 0 data keys; live has 4
-        BETTER_AUTH_SECRET  ENCRYPTION_SECRET  GITEA_TOKEN  GITHUB_TOKEN
-      written after apply by external-secrets
-        (label reconcile.external-secrets.io/managed)
-
-      Not a chart problem and not an ArgoCD problem: two owners for one object.
-      Stop ArgoCD managing the data:
-        ignoreDifferences:
-          - kind: Secret
-            name: lab-gitea-mirror
-            jsonPointers: [/data]
-```
-
-`argocd app diff` will not show you that one — it ignores Secrets, which is where this class of
-problem lives. `idem` reads the object's own record of what was applied and compares it to what
-is there now, so the answer needs no chart, no rendering and no dry-run.
-
-**This is triage, not proof.** A high revision count also comes from deploying often. What
-makes it a signal is the combination — rolling far above the cluster median *and* carrying a
-`checksum/` annotation derived from a Secret. `doctor` ranks suspects; `idem <chart> --context=`
-establishes the cause.
-
----
-
-## What a cluster connection adds
-
-`--context` is opt-in and read-only. It never applies, creates, updates, or owns anything.
-
-**1. `lookup` resolves, so `unknown` becomes measured.** Covered under
-[Three engines](#three-engines-three-different-answers).
-
-**2. Churn that only exists with `lookup` resolved.** The inverse of the usual case: a chart can
-be byte-identical under `helm template` — so ArgoCD's repo-server is genuinely stable — and still
-differ on every render once `lookup` returns real data. Without a cluster there is nothing to
-see, and `idem` used to report the run as clean. With one, both conditions are measured and each
-answers for its own engines:
-
-```console
-$ idem ./charts/home --context=
-
-  identical under `helm template`; differs with `lookup` resolved
-
-  home/templates/configmap.yaml
-    ConfigMap/home-stamp   .data.session   silent — no checksum
-
-      argocd   stable   renders identically without cluster access (observed)
-      flux     CHURNS   on every chart or values change — differs even with lookup resolved (observed)
-      helm     CHURNS   on every `helm upgrade` — differs even with lookup resolved (observed)
-
-  1 of 1 chart will churn under Flux and Helm: identical under `helm template`, different with `lookup` resolved.
-```
-
-It is counted apart from ArgoCD churn — `summary.churningWithLookup` in `-o json`, and every
-finding carries `"condition": "client"` or `"condition": "cluster"` so a policy can say which
-engine it means. `--strict` exits 1 for either: it is churn `idem` observed, whichever condition
-observed it.
-
-**3. Real capabilities.** The cluster's actual `--api-versions` and `--kube-version` are passed
-through, matching what ArgoCD does — so charts gated on `.Capabilities.APIVersions.Has` render
-the way they will for you, not against Helm's defaults.
-
-**4. The true effective values.** Reading the live `Application` or `HelmRelease` gets values
-that git cannot supply: Flux `valuesFrom` references and `postBuild` substitutions resolve
-in-cluster. For Flux this is often the difference between a qualified verdict and a real one.
-
-**5. Drift that has nothing to do with your chart.** A chart can be perfectly deterministic and
-still never converge, because something else changes the object — either as it is applied
-(webhooks, API-server defaulting) or afterwards (External Secrets, cert-manager, operators).
-Those are different problems: a dry-run reproduces the first and is blind to the second, which
-is only visible by comparing the live object to its own `last-applied` record. `idem` does
-both:
-
-```console
-$ idem ./charts/home --context=
-
-  home/templates/service.yaml
-    Service/home-plex   deterministic, but the cluster rewrites it
-
-      .spec.clusterIP           cluster assigns      172.17.0.0
-      .spec.sessionAffinity     cluster defaults     None
-      .spec.ports[0].protocol   cluster defaults     TCP
-
-      ArgoCD normalises most API-server defaulting, so this is usually benign.
-      Mutating webhooks that touch the objects ArgoCD manages are not.
-```
-
-`idem` renders the chart, asks the API server what it would actually store
-(`--dry-run=server`, nothing persisted), and compares the two with the same engine it uses for
-everything else. Two honest caveats: ArgoCD already normalises most plain defaulting, and
-pod-level injectors — Istio sidecars, the Vault agent — mutate *Pods*, not Deployments, so they
-do not cause Deployment-level drift. `idem` says which mutating webhooks actually match the
-objects in question rather than implying every webhook is a problem.
-
----
-
-## Chart references
-
-Three of the four forms need no setup at all:
-
-| Form | Example | Setup |
-|---|---|---|
-| local | `idem ./charts/home` | none |
-| OCI | `idem oci://registry-1.docker.io/bitnamicharts/postgresql` | none |
-| explicit repo | `idem postgresql --repo https://charts.example.com` | none |
-| repo alias | `idem bitnami/postgresql` | needs `helm repo add` first |
-
-The last one bites: `bitnami/postgresql` is a *repo alias*, and on a machine that has never run
-`helm repo add bitnami` it fails with `Error: repo bitnami not found`. `idem` detects that and
-prints the command you need instead of passing the error through.
-
-**Any OCI registry works** — ECR, GHCR, Harbor, Artifact Registry, ACR, localhost. `idem`
-matches the `oci://` scheme and hands the reference to `helm`; it has no per-registry knowledge
-and needs none.
-
-**Authentication is delegated, deliberately.** `idem` never sees a credential:
-
-```sh
-helm registry login ghcr.io -u "$USER" --password-stdin <<< "$GITHUB_TOKEN"
-idem oci://ghcr.io/acme/charts/api
-
-# or reuse existing docker credential helpers, including in CI
-HELM_REGISTRY_CONFIG=~/.docker/config.json \
-  idem oci://123456789012.dkr.ecr.eu-west-1.amazonaws.com/charts/api
-```
-
----
-
-## Three engines, three different answers
-
-This is the point of `idem`. The same chart, the same finding, means something different
-depending on what reconciles it:
-
-| | renders with | `lookup` resolves? | re-renders |
-|---|---|---|---|
-| **argocd** | `helm template`, no cluster access | **never** — always `{}` | every reconcile |
-| **flux** | a real install/upgrade via the Helm SDK | yes | only when chart or values change |
-| **helm** | a real install/upgrade | yes | only on `helm upgrade` |
-
-`idem` picks a lens by looking at the directory — an ArgoCD `Application` means ArgoCD's
-answer, a Flux `HelmRelease` means Flux's. With no signal either way it shows all three,
-because that is exactly when you are evaluating a chart and want to know.
-
-There is no `--type` flag for input kinds and there never will be. If you have to tell the tool
-what it is looking at, the tool should have looked.
-
-**Flux is immune to render-side churn, not to the other two.** `lookup` resolving means a
-non-deterministic chart is genuinely not a Flux problem. But engine-side rewrites and cluster
-mutation hit Flux exactly as hard — and Flux has no continuous divergence surface to tell you:
-a `HelmRelease` reports `Ready: True` once the release succeeded, and `driftDetection.mode`
-defaults to `disabled`. **Quieter, not safer** — which is why `--context` matters more for Flux
-users, not less.
-
-**A chart with no `lookup` at all** is a different verdict everywhere — and a different fix:
-
-```console
-  acme/templates/secrets.yaml
-    Secret/acme-api   .data.session-key
-
-      argocd    CHURNS     every sync
-      flux      CHURNS     on every chart or values change
-      helm      CHURNS     on every `helm upgrade`
-
-      No `lookup` anywhere in this chart, so nothing can stabilise this value. This is a
-      chart defect rather than an ArgoCD limitation — worth reporting upstream. Pin
-      `auth.sessionKey` meanwhile.
-```
-
-Telling that apart from the `lookup` case is the single most useful thing `idem` does. It
-answers the only question you actually have: **do I file an upstream issue, or do I add an
-`ignoreDifferences` block?**
-
-### `--context`: turn `unknown` into a fact
-
-`helm template` defaults to `--dry-run=client` and resolves `lookup` to `{}` — exactly what
-ArgoCD's repo-server does. `--dry-run=server` resolves it for real, which is what Flux and
-`helm upgrade` do. So `idem` can answer by observation instead of argument:
-
-```console
-$ idem oci://registry-1.docker.io/bitnamicharts/postgresql --context=
-
-      argocd    CHURNS     every sync — repo-server renders without cluster access
-      flux      stable     lookup resolves; value identical across renders (observed)
-      helm      stable     same
-
-      `lookup` finds Secret/pg-postgresql in namespace `default`. ArgoCD will not:
-      it renders with `helm template`, which resolves lookup to {} by construction.
-      That single difference is the entire bug.
-```
-
-**`idem` never writes to your cluster.** `--dry-run=server` is a render-time query, not an
-apply. No create, no update, no server-side apply, no ownership of anything. Deployment belongs
-to your GitOps engine.
-
-For Flux this is closer to mandatory than optional — a `HelmRelease` often defers its values to
-cluster-resident `valuesFrom` refs. See
-[design notes §1](docs/design.md#1-what-idem-is-actually-judging).
 
 ---
 
 ## Exit codes
 
-`idem` reports; it does not fail your build unless you ask it to.
-
 | Code | Meaning |
 |---|---|
-| `0` | Ran successfully. Findings are printed but not fatal. |
-| `1` | Findings, **and** `--strict` was passed. |
-| `2` | A chart could not be rendered, or `idem` itself failed. **Always fatal.** |
-
-Exit `2` is not negotiable even without `--strict`, and **the ratchet does not filter it**. A
-chart that would not render is not a finding about that chart — it is a gap in what `idem`
-checked, and a ratchet that hides coverage gaps is claiming a guarantee it never computed.
-golangci-lint special-cases exactly this inside its own diff processor (*"Never hide typechecking
-errors"*), and ESLint, mypy and ruff each make an analysis failure unsuppressable by
-construction. `idem` follows them: `--new-from-rev` filters findings, never render failures.
-
-A finding your delivery config already suppresses is the mirror image — it **does not count and
-cannot fail the build**, because a suppression that works means the churn does not happen. It is
-still printed, in its own section, and still present in `-o json` under `suppressed`. The one
-exception is a suppression `selfHeal` will undo, which is not a suppression at all: it counts, it
-is fatal under `--strict`, and it is never credited as covered.
-
-```yaml
-- run: idem ./charts --strict
-```
+| `0` | Ran fine. Findings are printed but not fatal. |
+| `1` | Findings, **and** you passed `--strict`. |
+| `2` | A chart could not be rendered, or `idem` itself failed. Always fatal. |
 
 ---
 
@@ -811,29 +288,43 @@ is fatal under `--strict`, and it is never credited as covered.
 
 - It does not talk to your cluster unless you pass `--context`, and even then only to render —
   never to apply, create, update, or own anything.
+- It never writes to your repository. Subcharts resolve in a temp directory unless you ask
+  otherwise with `--dependency-update`.
 - It does not reconstruct your delivery pipeline — no kustomize overlays, no `postBuild`
   substitution, no post-renderers. It renders what you point it at and names what it could not
   see.
 - It does not prove a chart is free of secrets. It proves the output is *stable*, which is the
   property ArgoCD actually needs.
-- It does not claim a workload's `checksum/` annotation was derived from a given Secret by
-  inspection — that value is a hash and cannot be inverted. It reports that the two **change
-  together across renders**, which is an observation, not a guess.
 - It renders twice **back to back**, so it cannot see non-determinism that unfolds over *time*:
-  an unpinned dependency range (`^1.0`), a floating `:latest` tag, a re-published chart version.
-  A clean run means "this renders consistently right now, with this helm" — not "this chart is
-  pinned or reproducible next month".
-- Where it cannot establish something, it says `unknown` rather than guessing.
+  an unpinned dependency range, a floating `:latest` tag, a re-published chart version. A clean
+  run means "this renders consistently right now, with this helm" — not "this chart is pinned
+  forever".
+
+---
+
+## How it compares
+
+| Tool | Compares | Finds a chart that churns? | Writes the fix? |
+|---|---|---|---|
+| **`idem`** | one release against **itself**, twice | **yes** | **yes** |
+| `argocd app diff` | desired vs live, once — *and ignores Secrets* | no | no |
+| `helm diff` | two different chart versions | no | no |
+| `helm unittest` | this render vs a committed snapshot | goes red, but re-baselining hides it | no |
+| kubeconform, kube-score, polaris | schema and policy on one render | no | no |
+| conftest / OPA | policy on one render | no | no |
+
+Everything else compares two *different* things once. Non-determinism only shows when you compare
+a release to itself — and telling it apart from genuine drift is what makes the fix different in
+each case.
 
 ---
 
 ## Design notes
 
-The reasoning, the limits and the evidence live in **[docs/design.md](docs/design.md)**:
-what `idem` is judging and why it is a release rather than a chart, how each verdict is
-reached and how certain it is, what `idem` actually runs for each engine, why this is an
-ArgoCD problem specifically (with receipts), and why it shells out to `helm`.
+The reasoning, the evidence, and the places `idem` can itself be wrong are in
+[`docs/design.md`](docs/design.md) — including why there is no rules file, why input type is
+detected rather than declared, and what each engine actually does, checked against its source.
 
 ## License
 
-Apache-2.0
+Apache 2.0. See [LICENSE](LICENSE).

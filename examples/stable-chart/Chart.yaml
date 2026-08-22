@@ -1,0 +1,4 @@
+apiVersion: v2
+name: stable-chart
+description: The same shape as churning-chart, with the value pinned.
+version: 0.1.0
