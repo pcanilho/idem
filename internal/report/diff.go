@@ -16,7 +16,7 @@ import (
 // fix block would be claims about an engine and a chart idem was never shown -
 // `idem <chart>` is where those are earned, because it knows what it rendered
 // and what the repository says about it.
-func Diff(w io.Writer, findings []check.Finding, left, right string) error {
+func Diff(w io.Writer, findings []check.Finding, left, right string, limit int) error {
 	var b strings.Builder
 
 	if len(findings) == 0 {
@@ -29,7 +29,7 @@ func Diff(w io.Writer, findings []check.Finding, left, right string) error {
 
 	tw := tabwriter.NewWriter(&b, 0, 0, 3, ' ', 0)
 	for _, f := range findings {
-		writeFinding(tw, f, findings)
+		writeFinding(tw, f, findings, limit)
 	}
 	tw.Flush()
 

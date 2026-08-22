@@ -2,6 +2,7 @@ package report
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1496,10 +1497,10 @@ func TestTheDiffCountAgreesWithItsVerb(t *testing.T) {
 	var one, two strings.Builder
 	f := secretFinding("creds", ".data.password")
 
-	if err := Diff(&one, []check.Finding{f}, "a.yaml", "b.yaml"); err != nil {
+	if err := Diff(&one, []check.Finding{f}, "a.yaml", "b.yaml", maxFields); err != nil {
 		t.Fatal(err)
 	}
-	if err := Diff(&two, []check.Finding{f, secretFinding("other", ".data.x")}, "a.yaml", "b.yaml"); err != nil {
+	if err := Diff(&two, []check.Finding{f, secretFinding("other", ".data.x")}, "a.yaml", "b.yaml", maxFields); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1508,5 +1509,65 @@ func TestTheDiffCountAgreesWithItsVerb(t *testing.T) {
 	}
 	if !strings.Contains(two.String(), "2 objects differ.") {
 		t.Errorf("Diff() = %q, want plural agreement", two.String())
+	}
+}
+
+// `maxFields` caps a finding at five fields and prints "… and N more" with no
+// way to see the rest. A Secret whose whole .data regenerates is exactly the
+// case idem exists for, and it is the case the cap hides.
+
+func manyFields(name string, n int) check.Finding {
+	fields := make([]string, 0, n)
+	for i := range n {
+		fields = append(fields, fmt.Sprintf(".data.key%d", i))
+	}
+	return finding("home/templates/secret.yaml", name, fields...)
+}
+
+func TestByDefaultAFindingIsCappedAndSaysSo(t *testing.T) {
+	got := text(t, Report{
+		Charts: []Chart{{Name: "home", Findings: []check.Finding{manyFields("creds", 9)}}},
+		Helm:   "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "and 4 more") {
+		t.Errorf("Text() = %q, want the elision counted", got)
+	}
+	if strings.Contains(got, ".data.key8") {
+		t.Errorf("Text() = %q, want the tail held back by default", got)
+	}
+}
+
+func TestVerboseExpandsEveryField(t *testing.T) {
+	got := text(t, Report{
+		Charts:  []Chart{{Name: "home", Findings: []check.Finding{manyFields("creds", 9)}}},
+		Verbose: true,
+		Helm:    "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, ".data.key8") {
+		t.Errorf("Text() = %q, want every field", got)
+	}
+	if strings.Contains(got, "more") {
+		t.Errorf("Text() = %q, want nothing elided", got)
+	}
+}
+
+func TestVerboseExpandsThePotentialSectionToo(t *testing.T) {
+	// Same cap, same problem: a chart calling nine non-deterministic functions
+	// shows five and hides the rest.
+	uses := make([]analyze.Use, 0, 9)
+	for i := range 9 {
+		uses = append(uses, analyze.Use{Function: "randAlphaNum", File: fmt.Sprintf("templates/t%d.yaml", i), Line: i + 1})
+	}
+
+	got := text(t, Report{
+		Charts:  []Chart{{Name: "home", Potential: uses}},
+		Verbose: true,
+		Helm:    "4.2.4", Rounds: 2,
+	})
+
+	if !strings.Contains(got, "templates/t8.yaml") {
+		t.Errorf("Text() = %q, want every potential finding", got)
 	}
 }

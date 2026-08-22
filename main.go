@@ -76,6 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&opt.setValues, "set", "set a value, repeatable")
 	fs.IntVar(&opt.rounds, "rounds", 2, "renders to compare")
 	fs.BoolVar(&opt.strict, "strict", false, "exit non-zero on findings")
+	fs.BoolVar(&opt.verbose, "v", false, "expand every finding instead of capping each at five fields")
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
 	fs.IntVar(&opt.jobs, "jobs", runtime.NumCPU(), "renders to run at once")
@@ -149,7 +150,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// The verbs. Disambiguated by disk, the same way a chart reference is: a
 	// directory actually named "doctor" is a chart, not the verb.
 	if verb(operands, "diff") {
-		return runDiff(operands[1:], stdout, stderr)
+		return runDiff(operands[1:], opt, stdout, stderr)
 	}
 	if verb(operands, "doctor") {
 		return runDoctor(context.Background(), opt, stdout, stderr)
@@ -261,7 +262,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	rep := report.Report{
 		Helm: helmVersion, Rounds: opt.rounds,
-		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since,
+		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since, Verbose: opt.verbose,
 		Cluster: opt.cluster, Context: opt.kubeContext,
 	}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, scan.Hooks{Inspect: inspector(ctx, ref, h), Prepare: prepare, Admission: admission(ctx, opt)}) {
@@ -429,7 +430,7 @@ func verb(operands []string, name string) bool {
 // `idem <chart>` invokes the renderer itself; this is for when you would
 // rather produce the renderings yourself, and it is what makes kustomize a
 // target: `kustomize build a/ > a.yaml`, twice, then diff.
-func runDiff(files []string, stdout, stderr io.Writer) int {
+func runDiff(files []string, opt options, stdout, stderr io.Writer) int {
 	if len(files) != 2 {
 		fmt.Fprintf(stderr, "idem: diff takes exactly two files, got %d\n", len(files))
 		fmt.Fprintf(stderr, "      usage: idem diff a.yaml b.yaml\n")
@@ -452,7 +453,7 @@ func runDiff(files []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	if err := report.Diff(stdout, result.Findings, files[0], files[1]); err != nil {
+	if err := report.Diff(stdout, result.Findings, files[0], files[1], report.Fields(opt.verbose)); err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
 	}
@@ -495,6 +496,7 @@ type options struct {
 	setValues    multiFlag
 	rounds       int
 	strict       bool
+	verbose      bool
 	helmBin      string
 	repo         string
 	chartVersion string

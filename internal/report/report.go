@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -20,6 +21,19 @@ import (
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/remediate"
 )
+
+// fields is how many entries a section lists before eliding, which is
+// maxFields unless the reader asked for all of them.
+func (r Report) fields() int { return Fields(r.Verbose) }
+
+// Fields is the same answer for callers that render without a Report - `idem
+// diff` has no chart and no engine, but it has the same cap and the same flag.
+func Fields(verbose bool) int {
+	if verbose {
+		return math.MaxInt
+	}
+	return maxFields
+}
 
 // maxFields caps how many differing fields one object lists.
 //
@@ -125,6 +139,13 @@ type Report struct {
 	// line exists for.
 	Cluster bool
 	Context string
+
+	// Verbose expands every finding rather than capping each at maxFields.
+	//
+	// The cap keeps a Secret whose whole .data regenerates from filling the
+	// terminal, but that is also the case idem exists for - so there has to be
+	// a way to see the rest, or "… and 4 more" is a dead end.
+	Verbose bool
 
 	// Engines are the engine names whose verdicts to display. Empty shows all.
 	//
@@ -286,10 +307,10 @@ func (r Report) Text(w io.Writer) error {
 	if writeSuppressed(&b, scope) {
 		detail = true
 	}
-	if writePotential(&b, scope) {
+	if writePotential(&b, scope, r.fields()) {
 		detail = true
 	}
-	if writeRewrites(&b, scope) {
+	if writeRewrites(&b, scope, r.fields()) {
 		detail = true
 	}
 	if writeUnconstructed(&b, r.Charts) {
@@ -354,7 +375,7 @@ func writeGroups(b *strings.Builder, r Report, c Chart, findings []check.Finding
 
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, f := range groups[source] {
-			writeFinding(tw, f, findings)
+			writeFinding(tw, f, findings, r.fields())
 		}
 		tw.Flush()
 	}
@@ -452,7 +473,7 @@ func defect(verdicts []engine.Verdict) bool {
 	return false
 }
 
-func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding) {
+func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding, limit int) {
 	object := f.Change.Object.Display()
 
 	// An object present in one render and absent from another has no differing
@@ -466,7 +487,7 @@ func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding) {
 	// object, not of each field.
 	cost := consequenceOf(f, siblings).Text
 
-	shown := min(len(f.Change.Paths), maxFields)
+	shown := min(len(f.Change.Paths), limit)
 	for i, p := range f.Change.Paths[:shown] {
 		if i == 0 {
 			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, p.Path, cost)
@@ -669,7 +690,7 @@ func writeUnconstructed(b *strings.Builder, charts []Chart) bool {
 // case teaches you to distrust it about the observed one. But the failure that
 // motivated idem was a pin that silently stopped applying, so hiding these
 // would hide the thing most worth knowing.
-func writePotential(b *strings.Builder, charts []Chart) bool {
+func writePotential(b *strings.Builder, charts []Chart, limit int) bool {
 	var any bool
 	for _, c := range charts {
 		if len(c.Potential) == 0 {
@@ -690,7 +711,7 @@ func writePotential(b *strings.Builder, charts []Chart) bool {
 		// has to go and find.
 		fmt.Fprintf(b, "\n    %s\n", c.Name)
 
-		shown := min(len(c.Potential), maxFields)
+		shown := min(len(c.Potential), limit)
 		tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
 		for _, u := range c.Potential[:shown] {
 			note := whyOf(u.Function)
@@ -718,7 +739,7 @@ func writePotential(b *strings.Builder, charts []Chart) bool {
 // API-server defaulting that the engine already normalises away. The part that
 // matters is a mutating webhook touching an object the engine manages, and the
 // reader is better placed than idem to tell which is which.
-func writeRewrites(b *strings.Builder, charts []Chart) bool {
+func writeRewrites(b *strings.Builder, charts []Chart, limit int) bool {
 	var any bool
 	for _, c := range charts {
 		for _, r := range c.Rewrites {
@@ -730,7 +751,7 @@ func writeRewrites(b *strings.Builder, charts []Chart) bool {
 			fmt.Fprintf(b, "\n    %s\n", r.Object.Display())
 
 			tw := tabwriter.NewWriter(b, 0, 0, 3, ' ', 0)
-			shown := min(len(r.Changes), maxFields)
+			shown := min(len(r.Changes), limit)
 			for _, change := range r.Changes[:shown] {
 				fmt.Fprintf(tw, "      %s\t%s\t%v\n", change.Path, kindOf(change), change.Value)
 			}
