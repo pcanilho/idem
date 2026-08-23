@@ -2,13 +2,8 @@
 package engine
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
-	"slices"
-
-	"github.com/pcanilho/idem/internal/manifest"
 )
 
 // Result is what idem concluded about one chart under one engine.
@@ -112,70 +107,4 @@ type Spec struct {
 
 	// KubeContext selects which cluster, when Cluster is set.
 	KubeContext string `json:"kubeContext,omitempty"`
-}
-
-// Engine is any target idem can say something true about.
-type Engine interface {
-	// ID uniquely identifies this engine instance. Two engines may share a
-	// Name - an argocd driving helm 3 and one driving helm 4 - but never an ID.
-	ID() string
-	// Name is the display name, e.g. "argocd".
-	Name() string
-	Capabilities() Capabilities
-}
-
-// Renderer is an Engine that idem can execute locally.
-type Renderer interface {
-	Engine
-	Render(ctx context.Context, spec Spec) ([]manifest.Object, error)
-}
-
-// Registry holds the known engines, keyed by ID.
-type Registry struct {
-	engines map[string]Engine
-}
-
-// NewRegistry returns an empty registry.
-func NewRegistry() *Registry {
-	return &Registry{engines: make(map[string]Engine)}
-}
-
-// Register adds an engine. Registering a duplicate ID is an error rather than a
-// silent replacement: quietly dropping an engine would make `--engine all`
-// report less than it claims to.
-func (r *Registry) Register(e Engine) error {
-	id := e.ID()
-	if _, dup := r.engines[id]; dup {
-		return fmt.Errorf("engine %q is already registered", id)
-	}
-	r.engines[id] = e
-	return nil
-}
-
-// Lookup returns the engine registered under id.
-func (r *Registry) Lookup(id string) (Engine, bool) {
-	e, ok := r.engines[id]
-	return e, ok
-}
-
-// IDs returns every registered engine ID, sorted so that output built from it
-// is deterministic.
-func (r *Registry) IDs() []string {
-	return slices.Sorted(maps.Keys(r.engines))
-}
-
-// Renderers returns only the engines idem can execute locally, in ID order.
-//
-// An engine that cannot be executed - Flux, whose helm-controller performs a
-// real install against a live cluster - is deliberately absent here rather than
-// present-and-failing, so an inferred verdict can never be mistaken for an
-// observed one.
-func (r *Registry) Renderers() []Renderer {
-	var out []Renderer
-	for _, id := range r.IDs() {
-		if rd, ok := r.engines[id].(Renderer); ok {
-			out = append(out, rd)
-		}
-	}
-	return out
 }
