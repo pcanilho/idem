@@ -28,7 +28,12 @@ jobs:
           go-version-file: go.mod
 
       - name: Install helm
-        uses: azure/setup-helm@v4
+        # Pinned, and to the same version ci.yml's helm4 cell uses: a release
+        # runs the suite one last time, and "latest" would let a helm published
+        # that morning decide whether a tag ships.
+        uses: azure/setup-helm@v5
+        with:
+          version: v4.2.4
 
       - name: Test
         run: go test ./... -race

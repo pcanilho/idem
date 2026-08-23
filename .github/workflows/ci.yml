@@ -14,24 +14,16 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        # Both, because idem is a developer tool people run locally and a CI
-        # tool people run on Linux - and path handling has differed between
-        # them before.
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  # Formatting, vet and the modernizers do not depend on which helm is
+  # installed, so they run once rather than once per matrix cell.
+  check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Install helm
-        uses: azure/setup-helm@v4
 
       - name: Formatting
         run: |
@@ -55,6 +47,42 @@ jobs:
             git --no-pager diff --stat
             exit 1
           fi
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, because idem is a developer tool people run locally and a CI
+        # tool people run on Linux - and path handling has differed between
+        # them before.
+        os: [ubuntu-latest, macos-latest]
+
+        # BOTH helm lines, because idem's whole thesis is that the renderer is
+        # an input: the docs state that ArgoCD 3.4 ships Helm 3.19 and 3.5
+        # ships Helm 4.2, and idem tells users to pin `--helm` to whichever
+        # their ArgoCD runs. Until this matrix existed, every claim the docs
+        # made about the 3.x line was untested - CI installed whatever
+        # azure/setup-helm called latest, so the tool that exists to catch
+        # non-determinism had a non-deterministic renderer in its own pipeline.
+        #
+        # Pinned exactly, which is the same advice idem gives its users:
+        # `version:` takes "latest or any semantic version string", so there is
+        # no way to say "newest 3.x" - and a floating version would mean a helm
+        # release could turn this build red with no change here. Bump these
+        # deliberately when a new line ships.
+        helm: ["v3.19.2", "v4.2.4"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install helm ${{ matrix.helm }}
+        uses: azure/setup-helm@v5
+        with:
+          version: ${{ matrix.helm }}
 
       - name: Test
         run: go test ./... -race
