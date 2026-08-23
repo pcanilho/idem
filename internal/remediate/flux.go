@@ -54,6 +54,13 @@ func FluxEntries(findings []check.Finding) []FluxEntry {
 			byKey[key] = entry
 		}
 		for _, p := range f.Change.Paths {
+			// Flux's ignore entries are RFC 6901 removes, so the only thing
+			// expressible about a reordered list is removing it whole - which
+			// hides its contents to suppress its order. Same limitation as
+			// ArgoCD's, reached by a different route; see Entries.
+			if p.Reordered {
+				continue
+			}
 			entry.Paths = append(entry.Paths, storedPointer(ref, p.Path.JSONPointer())...)
 		}
 	}

@@ -504,3 +504,267 @@ data:
 		t.Errorf("pointer = %q, want /data/8080 - suppressing /data would hide 9090 forever", p)
 	}
 }
+
+// A list whose elements are unchanged and whose ORDER is not is one finding at
+// the list, not one per leaf of every element that moved.
+//
+// The leaf-per-element form is not merely verbose, it is wrong twice over. It
+// describes field churn that is not happening - every element is byte-identical
+// on both sides - and remediate then turns each leaf into a jsonPointer, so the
+// emitted block permanently un-reconciles the whole list's CONTENTS to suppress
+// its ORDER. See the reorder tests in internal/remediate.
+func TestAPermutedListIsOneFindingAtTheListRatherThanOnePerMovedLeaf(t *testing.T) {
+	got := compare(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  env:
+    - {name: ALPHA, value: "1"}
+    - {name: BRAVO, value: "2"}
+    - {name: CHARLIE, value: "3"}
+`, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  env:
+    - {name: CHARLIE, value: "3"}
+    - {name: ALPHA, value: "1"}
+    - {name: BRAVO, value: "2"}
+`)
+	if len(got) != 1 {
+		t.Fatalf("unexpected changes: %+v", got)
+	}
+	if n := len(got[0].Paths); n != 1 {
+		t.Fatalf("Paths = %d, want 1: a permutation is one fact about the list, not %d facts about its leaves", n, n)
+	}
+
+	p := got[0].Paths[0]
+	if s := p.Path.String(); s != ".spec.env" {
+		t.Errorf("Path = %q, want %q - the list itself, since no leaf changed", s, ".spec.env")
+	}
+	if !p.Reordered {
+		t.Errorf("Reordered = false, want true")
+	}
+	if !p.HasLeft || !p.HasRight {
+		t.Errorf("HasLeft/HasRight = (%v, %v), want both true: the list is present on both sides", p.HasLeft, p.HasRight)
+	}
+
+	// Both orderings survive into -o json, so a consumer can see what moved.
+	left, ok := p.Left.([]any)
+	if !ok || len(left) != 3 {
+		t.Fatalf("Left = %#v, want the three-element list", p.Left)
+	}
+	right, ok := p.Right.([]any)
+	if !ok || len(right) != 3 {
+		t.Fatalf("Right = %#v, want the three-element list", p.Right)
+	}
+}
+
+// An element whose VALUE changed is not a permutation, however similar it looks.
+//
+// The multiset has to be equal, not merely the same size: comparing only sorted
+// order would call a changed value a reorder, drop it from the fix block, and
+// leave real churn with no remediation at all.
+func TestAListWithAChangedElementIsNotAReorder(t *testing.T) {
+	got := compare(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  env:
+    - {name: ALPHA, value: "1"}
+    - {name: BRAVO, value: "2"}
+`, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  env:
+    - {name: BRAVO, value: "2"}
+    - {name: ALPHA, value: "9"}
+`)
+	if len(got) != 1 {
+		t.Fatalf("unexpected changes: %+v", got)
+	}
+	for _, p := range got[0].Paths {
+		if p.Reordered {
+			t.Fatalf("Reordered = true at %s, want false: ALPHA's value changed, so this is churn a fix block must still cover", p.Path)
+		}
+	}
+	if len(got[0].Paths) == 0 {
+		t.Fatal("no paths: a changed value must still be reported")
+	}
+}
+
+// An element ADDED is not a permutation either.
+//
+// This pins the `idem diff` avalanche as unchanged. Inserting a container at
+// index 0 of a two-element list still reports every leaf of every shifted
+// element, which is a real shortcoming of positional matching - and a separate
+// problem from this one. Detecting a permutation must not quietly half-fix it.
+func TestAListWithAnAddedElementIsNotAReorder(t *testing.T) {
+	got := compare(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  containers:
+    - {name: app, image: "app:1.0"}
+    - {name: sidecar, image: "envoy:1.2"}
+`, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api}
+spec:
+  containers:
+    - {name: logger, image: "fluentd:2.0"}
+    - {name: app, image: "app:1.0"}
+    - {name: sidecar, image: "envoy:1.2"}
+`)
+	if len(got) != 1 {
+		t.Fatalf("unexpected changes: %+v", got)
+	}
+	for _, p := range got[0].Paths {
+		if p.Reordered {
+			t.Fatalf("Reordered = true at %s, want false: an element was added, so the sets differ", p.Path)
+		}
+	}
+	if n := len(got[0].Paths); n < 2 {
+		t.Errorf("Paths = %d, want the positional walk's several: this case is deliberately not collapsed", n)
+	}
+}
+
+// Equality is on the element's whole VALUE, not on a name key.
+//
+// Nothing here matches list elements by name - see the note in CLAUDE.md. A
+// permutation is recognised because the two multisets are identical, which is
+// exact; matching by name would be a heuristic, and would call a reordered list
+// whose elements ALSO changed a clean permutation.
+func TestAPermutationIsRecognisedByDeepValueNotByAnyNameKey(t *testing.T) {
+	got := compare(t, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec:
+  rules:
+    - {host: a, paths: [{p: "/x"}, {p: "/y"}]}
+    - {host: b, paths: [{p: "/z"}]}
+`, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec:
+  rules:
+    - {host: b, paths: [{p: "/z"}]}
+    - {host: a, paths: [{p: "/x"}, {p: "/y"}]}
+`)
+	if len(got) != 1 || len(got[0].Paths) != 1 {
+		t.Fatalf("unexpected changes: %+v", got)
+	}
+	if s := got[0].Paths[0].Path.String(); s != ".spec.rules" {
+		t.Errorf("Path = %q, want %q", s, ".spec.rules")
+	}
+	if !got[0].Paths[0].Reordered {
+		t.Errorf("Reordered = false, want true: the elements are nested maps and lists, and both sides hold the same two")
+	}
+}
+
+// A single-element list that "reorders" is not a thing, and a list identical on
+// both sides reports nothing at all.
+func TestAnIdenticalListIsNotReportedAsReordered(t *testing.T) {
+	got := compare(t, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec: {items: ["a", "b"], other: "1"}
+`, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec: {items: ["a", "b"], other: "2"}
+`)
+	if len(got) != 1 || len(got[0].Paths) != 1 {
+		t.Fatalf("unexpected changes: %+v", got)
+	}
+	p := got[0].Paths[0]
+	if p.Reordered {
+		t.Errorf("Reordered = true at %s, want false: the list is identical, only .spec.other changed", p.Path)
+	}
+	if s := p.Path.String(); s != ".spec.other" {
+		t.Errorf("Path = %q, want %q", s, ".spec.other")
+	}
+}
+
+// -o json carries the marker, so a consumer gating on .findings[].paths[] can
+// tell a reorder from a leaf it could suppress.
+func TestJSONOutputMarksAReorderedList(t *testing.T) {
+	got := compare(t, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec: {items: ["a", "b"]}
+`, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+spec: {items: ["b", "a"]}
+`)
+	raw, err := json.Marshal(got[0].Paths[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded struct {
+		Path      string `json:"path"`
+		Pointer   string `json:"pointer"`
+		Reordered bool   `json:"reordered"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !decoded.Reordered {
+		t.Errorf("reordered = false, want true in %s", raw)
+	}
+	if decoded.Pointer != "/spec/items" {
+		t.Errorf("pointer = %q, want %q", decoded.Pointer, "/spec/items")
+	}
+
+	// An ordinary leaf must not carry the key at all, so the field's presence
+	// means something.
+	plain := compare(t, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+data: {a: "1"}
+`, `
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm}
+data: {a: "2"}
+`)
+	raw, err = json.Marshal(plain[0].Paths[0])
+	if err != nil {
+		t.Fatalf("marshal plain: %v", err)
+	}
+	if strings.Contains(string(raw), "reordered") {
+		t.Errorf("plain leaf carries a reordered key: %s", raw)
+	}
+}
+
+// An empty list is not reordered, and the length guard is what says so.
+//
+// Called directly because YAML cannot currently hand walk this pair: `items:`
+// decodes to an untyped nil, which never reaches the sequence branch. It is
+// pinned anyway because the failure is silent - a nil []any and an empty one
+// are both length zero, DeepEqual reports them as different, and both
+// canonicalise to nothing, so the multiset comparison alone would call them a
+// permutation and invent a finding about an empty list.
+func TestAnEmptyListIsNeverReordered(t *testing.T) {
+	if permuted(nil, []any{}) {
+		t.Errorf("permuted(nil, []any{}) = true, want false")
+	}
+	if permuted([]any{"a"}, []any{"b"}) {
+		t.Errorf("permuted([a], [b]) = true, want false: one element cannot be out of order")
+	}
+}

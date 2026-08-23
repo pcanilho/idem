@@ -1,0 +1,10 @@
+# Six keys, because a permutation has to be unlikely to coincide across three
+# rounds. Go randomises only the map iteration START offset, so a two-key map
+# comes back in the same order about half the time.
+envs:
+  ALPHA: "1"
+  BRAVO: "2"
+  CHARLIE: "3"
+  DELTA: "4"
+  ECHO: "5"
+  FOXTROT: "6"

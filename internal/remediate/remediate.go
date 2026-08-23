@@ -30,7 +30,13 @@ type Entry struct {
 // Entries builds the ignoreDifferences entries for a set of findings.
 //
 // Findings that cannot be addressed precisely are left out rather than
-// approximated - see skip.
+// approximated - see skip, and the Reordered check below.
+//
+// A reordered list is dropped path by path rather than finding by finding,
+// because an object can reorder one list and regenerate a password beside it;
+// discarding the whole finding would take the fix for the half a fix can reach.
+// An object left holding no usable pointer falls out at the emptiness check
+// further down, which already exists for the same reason.
 func Entries(findings []check.Finding) []Entry {
 	byKey := make(map[string]*Entry)
 	for _, f := range findings {
@@ -46,6 +52,9 @@ func Entries(findings []check.Finding) []Entry {
 			byKey[key] = entry
 		}
 		for _, p := range f.Change.Paths {
+			if p.Reordered {
+				continue
+			}
 			entry.Pointers = append(entry.Pointers, EvaluablePointers(ref, p.Path.JSONPointer())...)
 		}
 	}

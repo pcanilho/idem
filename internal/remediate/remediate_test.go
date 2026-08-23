@@ -542,3 +542,80 @@ func TestTheFluxBlockStillParsesWithSeveralPathsAndAwkwardKeys(t *testing.T) {
 		t.Errorf("Paths = %v, want the comma-bearing key intact", paths)
 	}
 }
+
+// reorderFinding is what walk produces for a list whose elements are unchanged
+// and whose order is not: one PathDiff at the list itself.
+func reorderFinding(ref diff.ObjectRef, list objpath.Path, others ...objpath.Path) check.Finding {
+	f := finding(ref, others...)
+	f.Change.Paths = append(f.Change.Paths, diff.PathDiff{
+		Path: list, Left: []any{"a", "b"}, Right: []any{"b", "a"},
+		HasLeft: true, HasRight: true, Reordered: true,
+	})
+	return f
+}
+
+// A reordered list gets no entry, because no ignoreDifferences can express it.
+//
+// ArgoCD's diffing options are jsonPointers, jqPathExpressions and
+// managedFieldsManagers, and none of them ignores ORDER while still comparing
+// CONTENT - for the equivalent HPA spec.metrics reordering ArgoCD's own docs
+// tell you to reorder the source in Git. A pointer at the list would suppress
+// its contents to hide its order, which is strictly worse than the churn: a
+// genuine change to any element would then never sync.
+//
+// This is skip's existing rule, not a new one. An index into a list that
+// reorders is not a precise address, so the entry is left out rather than
+// approximated - the same reason a generateName object gets none.
+func TestAReorderedListIsNotGivenAnEntry(t *testing.T) {
+	ref := diff.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"}
+	got := Entries([]check.Finding{reorderFinding(ref, path(".spec.env"))})
+
+	if len(got) != 0 {
+		t.Fatalf("Entries = %+v, want none: a pointer at .spec.env suppresses the list's contents to hide its order", got)
+	}
+	if block := YAML(got); block != "" {
+		t.Errorf("YAML = %q, want empty", block)
+	}
+}
+
+// An object that reorders AND churns keeps the fix for the part a fix can reach.
+//
+// The filter belongs in the pointer loop rather than in skip for exactly this
+// case: dropping the whole finding would discard a regenerated password because
+// an unrelated list beside it moved.
+func TestAnObjectThatBothReordersAndChurnsIsGivenOnlyTheChurningPointer(t *testing.T) {
+	ref := diff.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"}
+	got := Entries([]check.Finding{
+		reorderFinding(ref, path(".spec.env"), path(".spec.token")),
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("Entries = %+v, want one", got)
+	}
+	want := []string{"/spec/token"}
+	if !slices.Equal(got[0].Pointers, want) {
+		t.Errorf("Pointers = %v, want %v", got[0].Pointers, want)
+	}
+}
+
+// The same two facts for Flux, whose ignore entries are RFC 6901 removes and so
+// have exactly the same limitation.
+func TestTheFluxBlockAlsoRefusesAReorderedList(t *testing.T) {
+	ref := diff.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Name: "api"}
+
+	only := FluxEntries([]check.Finding{reorderFinding(ref, path(".spec.env"))})
+	if len(only) != 0 {
+		t.Fatalf("FluxEntries = %+v, want none", only)
+	}
+
+	both := FluxEntries([]check.Finding{
+		reorderFinding(ref, path(".spec.env"), path(".spec.token")),
+	})
+	if len(both) != 1 {
+		t.Fatalf("FluxEntries = %+v, want one", both)
+	}
+	want := []string{"/spec/token"}
+	if !slices.Equal(both[0].Paths, want) {
+		t.Errorf("Paths = %v, want %v", both[0].Paths, want)
+	}
+}

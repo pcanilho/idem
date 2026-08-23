@@ -101,25 +101,44 @@ type PathDiff struct {
 	Right    any
 	HasLeft  bool
 	HasRight bool
+
+	// Reordered marks a list whose elements are unchanged and whose order is
+	// not. Path addresses the list itself rather than a leaf inside it,
+	// because the leaves did not change - their positions did.
+	//
+	// A bool rather than a named kind, and the zero value is deliberate: an
+	// unset Reordered means "an ordinary differing leaf", which is the loud
+	// direction. A consumer that ignores this field falls back to today's
+	// behaviour rather than to a false pass.
+	//
+	// Per-path, not per-Change: one object can hold a reordered list AND a
+	// regenerated password, and the two need different treatment inside the
+	// same finding.
+	Reordered bool
 }
 
 // MarshalJSON flattens the path's two renderings up to this level, so consumers
 // reach them as `.paths[].pointer` rather than `.paths[].path.pointer`.
 func (d PathDiff) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Path     string `json:"path"`
-		Pointer  string `json:"pointer"`
-		Left     any    `json:"left,omitempty"`
-		Right    any    `json:"right,omitempty"`
-		HasLeft  bool   `json:"hasLeft"`
-		HasRight bool   `json:"hasRight"`
+		Path string `json:"path"`
+		// Pointer addresses the list itself on a reordered entry, and it is
+		// NOT a pointer to paste: no ArgoCD or Flux config can ignore ordering
+		// alone, so suppressing it would suppress the contents too.
+		Pointer   string `json:"pointer"`
+		Reordered bool   `json:"reordered,omitempty"`
+		Left      any    `json:"left,omitempty"`
+		Right     any    `json:"right,omitempty"`
+		HasLeft   bool   `json:"hasLeft"`
+		HasRight  bool   `json:"hasRight"`
 	}{
-		Path:     d.Path.String(),
-		Pointer:  d.Path.JSONPointer(),
-		Left:     d.Left,
-		Right:    d.Right,
-		HasLeft:  d.HasLeft,
-		HasRight: d.HasRight,
+		Path:      d.Path.String(),
+		Pointer:   d.Path.JSONPointer(),
+		Reordered: d.Reordered,
+		Left:      d.Left,
+		Right:     d.Right,
+		HasLeft:   d.HasLeft,
+		HasRight:  d.HasRight,
 	})
 }
 
@@ -213,6 +232,17 @@ func walk(path objpath.Path, l, r any, hasL, hasR bool, out *[]PathDiff) {
 	ls, lIsSeq := l.([]any)
 	rs, rIsSeq := r.([]any)
 	if lIsSeq && rIsSeq {
+		// A permutation is one fact about the list, and descending would state
+		// it as many false facts about its leaves: every element is identical
+		// on both sides, so nothing at .env[0].value changed except which
+		// element sits at index 0. remediate then turns each of those leaves
+		// into a jsonPointer, and the block suppresses the list's CONTENTS to
+		// hide its ORDER.
+		if permuted(ls, rs) {
+			*out = append(*out, PathDiff{Path: path, Left: ls, Right: rs, HasLeft: true, HasRight: true, Reordered: true})
+			return
+		}
+
 		n := max(len(ls), len(rs))
 		for i := range n {
 			var lv, rv any
@@ -233,6 +263,65 @@ func walk(path objpath.Path, l, r any, hasL, hasR bool, out *[]PathDiff) {
 	if !reflect.DeepEqual(l, r) {
 		*out = append(*out, PathDiff{Path: path, Left: l, Right: r, HasLeft: true, HasRight: true})
 	}
+}
+
+// permuted reports whether two sequences hold the same elements in a different
+// order.
+//
+// Exact multiset equality, never a name key: nothing in idem matches list
+// elements by name, and a heuristic here would call a list whose elements also
+// CHANGED a clean permutation - dropping real churn out of the fix block. The
+// failure direction is chosen deliberately: a miss leaves today's positional
+// output, which is merely verbose, while a false hit would hide churn.
+//
+// Canonicalise once and sort, rather than pairwise deep equality: that is
+// O(n log n) against O(n^2), and design.md §9 already carries one quadratic
+// worth apologising for. manifest.stringKeys has rewritten every map[any]any as
+// map[string]any before this point, so marshalling succeeds for anything YAML
+// can produce - and an element that will not marshal returns false, which is
+// the same safe direction as everything else here.
+func permuted(a, b []any) bool {
+	// Identical lists are not a difference at all and must fall through so the
+	// walk emits nothing.
+	//
+	// len(a) < 2 IS a guard, and it earns its place on the empty pair: a nil
+	// []any and an empty one are both length zero, DeepEqual says they differ,
+	// and both canonicalise to nothing - so without it an empty list would be
+	// reported as reordered. YAML cannot currently produce that pair, which is
+	// exactly why it is pinned by a test rather than trusted.
+	//
+	// The length comparison is an early-out, NOT a guard: slices.Equal below
+	// already refuses two different-sized multisets. It is here to avoid
+	// marshalling two whole lists to learn what their lengths already say.
+	if len(a) < 2 || len(a) != len(b) || reflect.DeepEqual(a, b) {
+		return false
+	}
+
+	ca, ok := canonical(a)
+	if !ok {
+		return false
+	}
+	cb, ok := canonical(b)
+	if !ok {
+		return false
+	}
+	slices.Sort(ca)
+	slices.Sort(cb)
+	return slices.Equal(ca, cb)
+}
+
+// canonical renders each element to a stable string. json.Marshal sorts map
+// keys, so two equal elements always produce equal bytes.
+func canonical(s []any) ([]string, bool) {
+	out := make([]string, 0, len(s))
+	for _, e := range s {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, string(raw))
+	}
+	return out, true
 }
 
 func unionKeys(a, b map[string]any) []string {

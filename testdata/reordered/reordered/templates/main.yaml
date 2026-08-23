@@ -1,0 +1,21 @@
+# `keys` builds a slice from Go's map iteration order and never sorts it, so
+# this list comes out in a different order on most renders. The elements are
+# always the same six; only their positions move.
+#
+# This is the case idem must NOT answer with an ignoreDifferences block: a
+# pointer per index would suppress every env var's value to hide their order.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reordered
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: app:1.0
+          env:
+{{- range $k := keys .Values.envs }}
+            - name: {{ $k }}
+              value: {{ index $.Values.envs $k | quote }}
+{{- end }}

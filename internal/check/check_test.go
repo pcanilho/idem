@@ -333,3 +333,68 @@ data: {k: two}
 		t.Errorf("Paths = %+v, want none: a field list makes the report and the fix block both treat this as ordinary field churn", keep.Change.Paths)
 	}
 }
+
+// A round that permuted and a round that changed content both survive.
+//
+// merge dedups on the JSON pointer, and a reorder is recorded at the list
+// (/spec/items) while a changed element is recorded at the leaf
+// (/spec/items/2). They are different pointers, so both are kept - which is
+// honest: round 2 moved the elements and round 3 replaced one, and neither
+// fact implies the other.
+//
+// It matters because the two need different treatment downstream. remediate
+// drops the reorder path and keeps the leaf, so this object still gets the fix
+// for the half a fix can reach. Pinned so that is deliberate rather than a
+// coincidence of pointer spelling.
+func TestAReorderInOneRoundAndAChangedElementInAnotherAreBothKept(t *testing.T) {
+	const round1 = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+spec: {items: ["a", "b", "c"]}
+`
+	const permuted = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+spec: {items: ["c", "a", "b"]}
+`
+	const changed = `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+spec: {items: ["a", "b", "z"]}
+`
+
+	got, err := Compare([][]manifest.Object{parse(t, round1), parse(t, permuted), parse(t, changed)})
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(got.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1: %+v", len(got.Findings), got.Findings)
+	}
+
+	byPointer := map[string]bool{}
+	for _, p := range got.Findings[0].Change.Paths {
+		byPointer[p.Path.JSONPointer()] = p.Reordered
+	}
+
+	reorder, ok := byPointer["/spec/items"]
+	if !ok {
+		t.Errorf("no path at /spec/items: round 2 permuted the list and that fact was lost: %v", byPointer)
+	}
+	if !reorder {
+		t.Errorf("Reordered = false at /spec/items, want true")
+	}
+
+	leaf, ok := byPointer["/spec/items/2"]
+	if !ok {
+		t.Errorf("no path at /spec/items/2: round 3 replaced an element and that fact was lost: %v", byPointer)
+	}
+	if leaf {
+		t.Errorf("Reordered = true at /spec/items/2, want false: the element's value changed")
+	}
+}
