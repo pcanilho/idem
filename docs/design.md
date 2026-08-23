@@ -50,6 +50,29 @@ manifest.
 
 For Flux, `--context` is often the only way to get a truthful answer at all.
 
+### A library chart is not a chart that failed
+
+`type: library` is correct Helm and the recommended way to share templates - bitnami/common is
+one - and helm will not render it: *"library charts are not installable"*. `idem` used to hand it
+over anyway and report the refusal as a chart it could not render.
+
+That is **exit 2**, which is always fatal *and* escapes the ratchet (§3), so a single library
+chart anywhere in a tree produced a permanently red gate from day one - and there is no exclusion
+mechanism to escape it, deliberately. A tool that is wrong about a legitimate chart, in the one
+direction its own design cannot be argued out of, is worse than a tool with a gap.
+
+`internal/discover` now reads `type` alongside `name` and marks it; the chart is excluded from
+the scan and **counted on the provenance line** (`· 1 library chart not rendered`), on the same
+rule as the skipped-hooks count: what was not checked is part of what was checked. Only the exact
+string `library` counts, and the fallback runs toward *application* - missing a library chart
+gives helm's own accurate error, while wrongly calling an application chart a library would skip
+something the user asked about and report that it had, which is the silent coverage gap a gate
+must never have.
+
+Pointed at a library chart and nothing else, `idem` still exits 2, but says why rather than
+falling through to `discover`'s "no directory contains a Chart.yaml" - which would be false,
+since it found one and chose not to render it.
+
 ### Where `idem` stops
 
 It renders a chart with values. It does not reconstruct your delivery pipeline:
@@ -222,6 +245,51 @@ are only reported where they read as an actual call: `.Values.keys` and a YAML f
 chart calling one fails to parse. `hostname` is absent because sprig v3.3.0 has no such function.
 `getHostByName` is included even though Helm stubs it to `""` without `--enable-dns`, since a
 chart cannot control the flag its consumer passes.
+
+### A reordered list is a third shape, and it has no fix block
+
+The observed/potential split above is about *whether* something differed. A permutation is about
+*what* differed, and it needed its own treatment because the obvious one is actively harmful.
+
+`internal/diff` walks two sequences by index. When a list is permuted between renders - the
+`keys` case above - every leaf of every element whose index moved comes back as a differing path.
+Twelve paths for a six-key `env` block, and `internal/remediate` then turned each into a
+`jsonPointer`. Pasting that block **permanently un-reconciles every one of those values in order
+to suppress their order**: change `ALPHA` next month and ArgoCD will never sync it. It was also
+incomplete by construction, since the pointers are the indices that happened to move in those
+rounds and a seventh key churns at an index nothing covers.
+
+So `Compare` now recognises an exact permutation - the two multisets are equal and the orders are
+not - and reports **one** `PathDiff` at the list itself, marked `Reordered`. Detection is exact
+multiset equality over a canonical encoding of each element, never a `name` key: nothing in idem
+matches list elements by name (§12), and a heuristic here would call a list whose elements *also*
+changed a clean permutation and drop real churn out of the fix block. A miss leaves the old
+positional output, which is merely verbose; a false hit would hide churn, so the bias runs that
+way deliberately.
+
+**No fix block is emitted, and that is the true answer rather than a shortfall.** Checked against
+both engines:
+
+- ArgoCD's `ignoreDifferences` takes `jsonPointers`, `jqPathExpressions` and
+  `managedFieldsManagers`. None ignores *order* while still comparing *content*; for the
+  equivalent reordering the HPA controller does to `spec.metrics`, ArgoCD's own diffing page
+  tells you to reorder the source in Git to match.
+- Flux's `driftDetection.ignore` entries are RFC 6901 *removes* (`ssa/jsondiff/patch.go`, §7), so
+  the only expressible thing is removing the whole list.
+
+Server-Side Diff does not rescue it either. SSA normalises a list's order only where the schema
+declares `x-kubernetes-list-type: map`, and neither `containers` nor `env` carries one - checked
+against a live cluster's OpenAPI v3, where on `Container` only `ports` does. A permuted `env`
+churns under both diff strategies.
+
+The note idem prints in its place names the *class* of cause and not the call. `sortAlpha` fixes
+`keys` and `values`, but `shuffle` and a `lookup` returning cluster order produce the same shape,
+and §9's rule forbids tracing a rendered value back to the call that produced it. It is worded as
+facts and a fix rather than an all-clear: a reordered `initContainers` list changes execution
+order and is a real bug.
+
+The finding still counts and `--strict` still exits 1 on it. This changed the description and the
+fix, never the verdict.
 
 Deterministic despite appearances, and deliberately **not** flagged: `derivePassword`,
 `buildCustomCert`, `decryptAES`.
@@ -721,9 +789,33 @@ cut, so its shape is stable from the first release: enums marshal as names rathe
 ordinals, and each path carries both its dotted and RFC 6901 renderings so no consumer has to
 reimplement the escaping.
 
+A path may also carry `reordered: true`, and it is the one place the contract has deliberately
+changed shape. A permuted list used to appear as one entry per moved leaf - twelve of them for a
+six-element `env` block - describing field churn that was not happening. It is now a single entry
+addressing the list, with both orderings in `left` and `right`. The `pointer` on such an entry is
+**not** a pointer to paste: `.remediation` omits it for the reason §5 gives, and `reordered` is
+how a policy gate reading `.findings` tells a path it could suppress from one it cannot.
+
 **`markdown`** exists for one job — a pull-request comment. A table survives GitHub's renderer
 without alignment tricks, and the remediation goes in a `<details>` block because it is long
 and only some readers need it. `gh pr comment --body-file -` is then the entire CI integration.
+
+**`idem doctor` and `idem diff` take `text`, `json` and `yaml`, and refuse the other two.** Both
+verbs used to render text and nothing else, with `-o` refused outright - which contradicted the
+reason there is no rules file. `-o json | conftest` is the stated extension point (§13), so two
+of the three verbs being unable to reach it left the seam pointing at a wall. `doctor` in
+particular produces a ranked table of what keeps rolling, which is the shape someone graphs.
+
+`markdown` and `github` stay refused there, and the distinction is shape versus encoding:
+`markdown` is a pull-request comment about a chart in a diff, `github` annotates a file at a
+line, and a cluster's rollout history belongs to neither. Refused rather than ignored, on the
+rule that a flag silently doing nothing is worse than one that errors.
+
+The rates in `doctor`'s document are **rounded to two decimals**, which is what the text form has
+always displayed. That is not cosmetic: they are derived from `time.Now()`, so at full float64
+precision two runs a second apart differ in every one of them - and `idem doctor -o json` hashed
+or diffed would show churn that idem produced itself. Same rule that made `internal/doctor`
+redact the API server's minted token names, applied to idem's own arithmetic.
 
 **No HTML, CSV or SARIF.** JSON covers every machine consumer and markdown covers the human one
 that matters; each further format is a rendering to maintain forever, and SARIF in particular

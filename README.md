@@ -187,19 +187,34 @@ Findings are informative by default. `--strict` turns them into a failing build:
 - uses: pcanilho/idem@main   # no tag is published yet; pin a v* tag once one is
   with:
     args: ./charts --strict
+    helm-version: v3.19.2    # optional — see below
 ```
+
+GitHub's Ubuntu runners already ship Helm, so the action renders with that unless you say
+otherwise, and installs nothing. Set `helm-version:` to whatever your ArgoCD runs and it will
+install exactly that — which is the same advice as `--helm`, for the same reason: the renderer is
+an input, and a finding produced under a helm you do not run is a finding about someone else's
+cluster.
 
 `-o github` emits workflow commands, so findings appear **inline on the diff** in Files Changed —
 no token, no API calls, no extra permissions. To post one summary comment instead:
 
 ```yaml
-- run: idem ./charts -o markdown > /tmp/idem.md
-- run: gh pr comment ${{ github.event.number }} --body-file /tmp/idem.md
-  if: ${{ hashFiles('/tmp/idem.md') != '' }}
+permissions:
+  pull-requests: write     # the comment step needs it; `-o github` does not
+# ...
+- run: idem ./charts -o markdown > idem.md
+- run: gh pr comment ${{ github.event.number }} --body-file idem.md
+  if: ${{ hashFiles('idem.md') != '' }}
+  env:
+    GH_TOKEN: ${{ github.token }}
 ```
 
 A clean run writes **nothing**, so the guard is what stops a comment saying everything is fine on
-every pull request that touches a chart.
+every pull request that touches a chart. Write it **inside the workspace**, not to `/tmp`:
+`hashFiles` only sees files under `GITHUB_WORKSPACE` and returns an empty string for anything
+else, so an absolute path outside it makes the guard permanently false and the comment is never
+posted at all.
 
 **Day one on a real estate will find things** — that is the point, and it is also why the first
 run should not be the gate. Report only what your branch changed:
@@ -308,7 +323,7 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 | `--rounds` | how many renders to compare (default 3) |
 | `--strict` | exit 1 when something will churn |
 | `-v` | expand every finding instead of capping each at five fields |
-| `-o` | `text`, `json`, `yaml`, `markdown` or `github` |
+| `-o` | `text`, `json`, `yaml`, `markdown` or `github` (`diff` and `doctor` take the first three) |
 | `--engine` | `argocd`, `flux`, `helm`, `all`, or `auto` (default) |
 | `--context` | resolve `lookup` and capabilities against a cluster |
 | `--namespace` | render into this namespace instead of the one your config names |
@@ -329,7 +344,12 @@ the same document, for when the next thing in the pipe reads YAML:
 idem ./charts -o json | jq '.findings[] | select(.consequence == "rolls")'
 idem ./charts -o json | conftest test -
 idem ./charts -o yaml | yq '.remediation[] | select(.engine == "argocd")'
+idem doctor -o json   | jq '.suspects[] | select(.perDay > 0.5) | .name'
+idem diff a.yaml b.yaml -o json | jq '.findings[].paths[].pointer'
 ```
+
+`diff` and `doctor` take `text`, `json` and `yaml`. They refuse `markdown` and `github`, which
+describe a chart in a pull request rather than a cluster.
 
 ---
 
@@ -357,6 +377,14 @@ idem ./charts -o yaml | yq '.remediation[] | select(.engine == "argocd")'
   directory unless you pass `--dependency-update`).
 - **It proves output is stable, not that a chart is safe.** Stability is the property your engine
   needs; it is not a secrets scan or a policy check.
+- **Not every finding comes with config.** A list that only *reorders* — the same elements in a
+  different order — churns just as much, but neither ArgoCD nor Flux can ignore ordering without
+  also ignoring the list's contents. `idem` says so and points at the fix in the chart, rather
+  than handing you a block that would hide real changes along with the noise.
+- **It skips `type: library` charts, and says how many.** Helm refuses to render one at all
+  (*"library charts are not installable"*), so there is nothing to compare. They are counted on
+  the provenance line rather than dropped in silence — and they no longer fail the run, which
+  they used to.
 
 **It needs `helm` on your `PATH`, and which one matters.** `idem` renders with whatever `helm`
 it finds — pin it with `--helm`, and pin it in CI to whatever your ArgoCD runs, because ArgoCD
@@ -370,14 +398,16 @@ it finds — pin it with `--helm`, and pin it in CI to whatever your ArgoCD runs
 |---|---|---|---|
 | **`idem`** | one release against **itself**, twice | **yes** | **yes** |
 | `argocd app diff` | desired vs live, once — *and ignores Secrets* | no | no |
-| `helm diff` | two different chart versions | no | no |
+| `helm diff` | two chart directories, or a release against an upgrade | `helm diff local` on one directory twice shows a raw diff — no verdict, no engine | no |
 | `helm unittest` | this render vs a committed snapshot | goes red, but re-baselining hides it | no |
 | kubeconform, kube-score, polaris | schema and policy on one render | no | no |
 | conftest / OPA | policy on one render | no | no |
 
-Everything else compares two *different* things once. Non-determinism only shows when you compare
-a release to itself — and telling it apart from genuine drift is what makes the fix different in
-each case.
+Everything else is built to compare two *different* things. `helm diff local` is the one that
+can be pointed at a single chart twice, and then it shows you the raw diff — which is the easy
+half. The hard half is what idem is: knowing that a differing field means churn *under your
+engine*, telling a regenerated value apart from a reordered list, and writing config that stops
+it without hiding anything else.
 
 ---
 

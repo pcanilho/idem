@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -50,8 +51,16 @@ func TestTheREADMEShowsWhatTheBinaryActuallyPrints(t *testing.T) {
 
 			// Line by line: a whole-block match would fail on the surrounding
 			// markdown and say nothing about which line drifted.
+			//
+			// The helm version is normalised out of both sides. The blocks are
+			// real captured output and so carry the version that produced them,
+			// but which helm is on PATH is the ENVIRONMENT, not the content
+			// this test exists to pin - and idem is meant to run under Helm 3
+			// and Helm 4 alike, which is what CI's matrix checks. Without this
+			// the README could only ever be regenerated on one of them.
+			printed := anyHelmVersion(stdout)
 			for _, line := range shown {
-				if !strings.Contains(stdout, line) {
+				if !strings.Contains(printed, anyHelmVersion(line)) {
 					t.Errorf("README shows a line the binary does not print:\n  %s", line)
 				}
 			}
@@ -96,15 +105,68 @@ func TestTheDocumentedCommentWorkflowGuardsAgainstAnEmptyFile(t *testing.T) {
 		t.Fatalf("reading README: %v", err)
 	}
 
-	_, snippet, found := strings.Cut(string(readme), "gh pr comment")
-	if !found {
-		t.Fatal("README no longer documents the `gh pr comment` workflow")
-	}
-	snippet, _, _ = strings.Cut(snippet, "```")
+	snippet := fencedBlockContaining(t, string(readme), "gh pr comment")
 
 	if !strings.Contains(snippet, "hashFiles") {
 		t.Errorf("the documented `gh pr comment` step does not guard on the file being non-empty:\n%s", snippet)
 	}
+
+	// And the guard has to be able to fire. hashFiles reads only files under
+	// GITHUB_WORKSPACE - "The path is relative to the GITHUB_WORKSPACE
+	// directory and can only include files inside of the GITHUB_WORKSPACE" -
+	// and returns an empty string for anything else. The snippet shipped for
+	// months writing to /tmp/idem.md and guarding on hashFiles('/tmp/idem.md'),
+	// so the condition was ALWAYS false and the comment was never posted. The
+	// keyword check above passed the whole time, which is why this one exists.
+	arg := hashFilesArgument(t, snippet)
+	if strings.HasPrefix(arg, "/") {
+		t.Errorf("hashFiles(%q) is an absolute path outside GITHUB_WORKSPACE, so the guard can never be true and the comment is never posted", arg)
+	}
+
+	// Both halves must name the same file, or the guard tests something the
+	// previous step did not write.
+	if !strings.Contains(snippet, "--body-file "+arg) {
+		t.Errorf("the guard checks %q but --body-file names a different file:\n%s", arg, snippet)
+	}
+	if !strings.Contains(snippet, "-o markdown > "+arg) {
+		t.Errorf("nothing in the snippet writes %q, which is what the guard checks:\n%s", arg, snippet)
+	}
+}
+
+// fencedBlockContaining returns the whole ``` block that holds want.
+//
+// The whole block, and located by fence rather than by cutting at the first
+// occurrence of want: the previous version cut the README at the first
+// "gh pr comment" anywhere, so prose mentioning the step - or a comment inside
+// the snippet itself - silently moved the boundary and hid half the snippet
+// from the assertions below.
+func fencedBlockContaining(t *testing.T, doc, want string) string {
+	t.Helper()
+	const fence = "```"
+	parts := strings.Split(doc, fence)
+	// Odd indices are inside a fence: split on the delimiter alternates
+	// outside, inside, outside...
+	for i := 1; i < len(parts); i += 2 {
+		if strings.Contains(parts[i], want) {
+			return parts[i]
+		}
+	}
+	t.Fatalf("no fenced block contains %q", want)
+	return ""
+}
+
+// hashFilesArgument pulls the path out of `hashFiles('...')`.
+func hashFilesArgument(t *testing.T, snippet string) string {
+	t.Helper()
+	_, rest, found := strings.Cut(snippet, "hashFiles('")
+	if !found {
+		t.Fatalf("hashFiles is not called with a single-quoted path:\n%s", snippet)
+	}
+	arg, _, found := strings.Cut(rest, "'")
+	if !found {
+		t.Fatalf("unterminated hashFiles argument:\n%s", snippet)
+	}
+	return arg
 }
 
 // The README's flag table and the binary have to agree, in both directions.
@@ -257,4 +319,13 @@ func TestTheREADMEQuotesTheClusterPathsCorrectly(t *testing.T) {
 			t.Errorf("README quotes %q, which idem does not print:\n%s", tc.quoted, tc.in)
 		}
 	}
+}
+
+// helmVersionStamp matches the "helm 4.2.4" that every provenance line carries.
+var helmVersionStamp = regexp.MustCompile(`helm \d+\.\d+\.\d+\S*`)
+
+// anyHelmVersion replaces the helm version stamp with a placeholder, so a
+// README captured under one helm still matches output produced by another.
+func anyHelmVersion(s string) string {
+	return helmVersionStamp.ReplaceAllString(s, "helm <version>")
 }
