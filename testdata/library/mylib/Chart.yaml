@@ -1,0 +1,7 @@
+apiVersion: v2
+name: mylib
+version: 0.1.0
+# helm refuses to render this: "library charts are not installable". It is
+# correct Helm and the recommended way to share templates - bitnami/common is
+# one - so idem must not treat it as a chart that failed to render.
+type: library

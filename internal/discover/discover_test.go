@@ -293,3 +293,53 @@ func TestAnUnreadableDirectoryDoesNotDiscardTheRest(t *testing.T) {
 		t.Errorf("Charts() = %+v, want just the readable chart", got)
 	}
 }
+
+// A library chart is found and marked, not silently dropped.
+//
+// `type: library` is correct Helm and the recommended way to share templates -
+// bitnami/common is one - but helm refuses to render it: "library charts are
+// not installable". idem used to hand it to helm anyway, take the error as a
+// chart it could not render, and exit 2. That is FATAL and it escapes the
+// ratchet by design, so a repository holding one library chart got a
+// permanently red gate on day one with no documented way out.
+//
+// It is marked rather than dropped because a tool that reports what it checked
+// has to report what it did not - the same rule as check.Result.Skipped.
+func TestALibraryChartIsMarkedRatherThanTreatedAsAChartToRender(t *testing.T) {
+	root := t.TempDir()
+	write := func(dir, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "Chart.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("mylib", "apiVersion: v2\nname: mylib\nversion: 0.1.0\ntype: library\n")
+	write("app", "apiVersion: v2\nname: app\nversion: 0.1.0\n")
+	// `type: application` is the explicit form of the default.
+	write("explicit", "apiVersion: v2\nname: explicit\nversion: 0.1.0\ntype: application\n")
+
+	got, err := Charts(root)
+	if err != nil {
+		t.Fatalf("Charts: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("Charts = %+v, want all three - a library chart is still reported", got)
+	}
+
+	byName := map[string]Chart{}
+	for _, c := range got {
+		byName[c.Name] = c
+	}
+	if !byName["mylib"].Library {
+		t.Errorf("mylib: Library = false, want true")
+	}
+	if byName["app"].Library {
+		t.Errorf("app: Library = true, want false - no type means application")
+	}
+	if byName["explicit"].Library {
+		t.Errorf("explicit: Library = true, want false")
+	}
+}

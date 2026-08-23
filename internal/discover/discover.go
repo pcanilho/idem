@@ -31,6 +31,12 @@ type Chart struct {
 	// name. It becomes the release name at render time, where the only
 	// property that matters is that it is the same in every round.
 	Name string
+
+	// Library marks `type: library`, which helm refuses to render at all -
+	// "library charts are not installable". Reported rather than dropped, so
+	// the caller can say what it did not check instead of silently checking
+	// less than the user asked for.
+	Library bool
 }
 
 // Charts finds every chart at or below root, in path order.
@@ -125,27 +131,40 @@ func walk(root, dir string, seen map[string]bool, out *[]Chart) error {
 		if _, statErr := os.Stat(filepath.Join(path, chartFile)); statErr != nil {
 			return nil
 		}
-		*out = append(*out, Chart{Dir: path, Name: nameOf(path)})
+		name, library := metaOf(path)
+		*out = append(*out, Chart{Dir: path, Name: name, Library: library})
 		return fs.SkipDir
 	})
 }
 
-// nameOf reads metadata.name from Chart.yaml.
+// metaOf reads metadata.name and the chart type from Chart.yaml.
 //
 // An unreadable or nameless Chart.yaml falls back to the directory name rather
 // than failing: the name is only used as the release name, and helm will
 // produce a far better error about the malformed chart when it renders it.
-func nameOf(dir string) string {
+//
+// The type falls back to NOT a library for the same reason the over-matching in
+// internal/analyze runs the other way: the two errors are not symmetrical.
+// Missing a library chart means helm's own accurate "library charts are not
+// installable", which is what happened before this existed. Wrongly calling an
+// application chart a library would skip a chart the user asked about and
+// report that it had - a silent coverage gap, which is the one thing a gate
+// must never have. Only the exact string wins.
+func metaOf(dir string) (name string, library bool) {
 	fallback := filepath.Base(dir)
 	b, err := os.ReadFile(filepath.Join(dir, chartFile))
 	if err != nil {
-		return fallback
+		return fallback, false
 	}
 	var meta struct {
 		Name string `yaml:"name"`
+		Type string `yaml:"type"`
 	}
-	if err := yaml.Unmarshal(b, &meta); err != nil || meta.Name == "" {
-		return fallback
+	if err := yaml.Unmarshal(b, &meta); err != nil {
+		return fallback, false
 	}
-	return meta.Name
+	if meta.Name == "" {
+		return fallback, meta.Type == "library"
+	}
+	return meta.Name, meta.Type == "library"
 }
