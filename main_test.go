@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1482,23 +1483,105 @@ func TestAFailedDryRunStillExplainsWhenTheApplicationNamesNoNamespace(t *testing
 	}
 }
 
-// `idem diff -o json` used to print text and exit 0, so a script that believed
-// it was parsing JSON silently got a table. Same rule as flags after the chart
-// path: a flag the user believes is doing something, silently doing nothing, is
-// worse than one that is refused.
-func TestAVerbThatRendersOnlyTextRefusesAnotherFormat(t *testing.T) {
+// The verbs refuse markdown and github, and only those.
+//
+// Those two are shapes rather than encodings - markdown is a pull-request
+// comment about a chart in a diff, github annotates a file at a line - and a
+// cluster's rollout history belongs to neither. Refused rather than ignored,
+// on the same rule as flags after the chart path: a flag the user believes is
+// doing something, silently doing nothing, is worse than one that is refused.
+//
+// json and yaml ARE accepted, and used not to be. `-o json | conftest` is the
+// seam idem points policy engines at instead of shipping a rules file, so two
+// of three verbs being unable to reach it was the design contradicting itself.
+func TestTheVerbsRefuseTheFormatsThatDescribeAChartInAPullRequest(t *testing.T) {
 	for _, args := range [][]string{
-		{"diff", "a.yaml", "b.yaml", "-o", "json"},
-		{"doctor", "-o", "yaml"},
+		{"diff", "a.yaml", "b.yaml", "-o", "markdown"},
+		{"doctor", "-o", "github"},
 	} {
 		code, _, stderr := invoke(t, args...)
 
 		if code != exitFatal {
 			t.Errorf("idem %v exit = %d, want %d", args, code, exitFatal)
 		}
-		if !strings.Contains(stderr, "renders text only") {
-			t.Errorf("idem %v stderr = %q, want it to say the verb renders text only", args, stderr)
+		if !strings.Contains(stderr, "does not render") {
+			t.Errorf("idem %v stderr = %q, want it to name the format it will not render", args, stderr)
 		}
+	}
+}
+
+// And they do not refuse the machine-readable ones.
+//
+// Asserted through the argument parser rather than by calling the renderer, so
+// a future format added to `formatter` but left out of `verbFormat` fails here
+// - the join that was wrong in the first place.
+func TestTheVerbsAcceptJSONAndYAML(t *testing.T) {
+	for _, format := range []string{"json", "yaml"} {
+		if !verbFormat(format) {
+			t.Errorf("verbFormat(%q) = false, want true: -o json is the seam idem tells people to gate on", format)
+		}
+	}
+	for _, format := range []string{"markdown", "github"} {
+		if verbFormat(format) {
+			t.Errorf("verbFormat(%q) = true, want false", format)
+		}
+	}
+	if !verbFormat("text") {
+		t.Error(`verbFormat("text") = false, and text is the default`)
+	}
+}
+
+// `idem diff -o json` produces JSON that decodes, end to end.
+func TestDiffRendersTheMachineReadableContract(t *testing.T) {
+	dir := t.TempDir()
+	left := filepath.Join(dir, "a.yaml")
+	right := filepath.Join(dir, "b.yaml")
+	const body = `apiVersion: v1
+kind: ConfigMap
+metadata: {name: cm, namespace: prod}
+data: {token: %s}
+`
+	if err := os.WriteFile(left, fmt.Appendf(nil, body, "one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(right, fmt.Appendf(nil, body, "two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := invoke(t, "diff", left, right, "-o", "json")
+	if code != exitOK {
+		t.Fatalf("exit = %d: %s%s", code, stdout, stderr)
+	}
+
+	var doc struct {
+		Left     string `json:"left"`
+		Right    string `json:"right"`
+		Findings []struct {
+			Object struct {
+				Kind      string `json:"kind"`
+				Namespace string `json:"namespace"`
+				Name      string `json:"name"`
+			} `json:"object"`
+			Type  string `json:"type"`
+			Paths []struct {
+				Pointer string `json:"pointer"`
+			} `json:"paths"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("output does not decode as JSON: %v\n%s", err, stdout)
+	}
+	if doc.Left != left || doc.Right != right {
+		t.Errorf("left/right = %q/%q, want the files as given", doc.Left, doc.Right)
+	}
+	if len(doc.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one", doc.Findings)
+	}
+	if doc.Findings[0].Object.Name != "cm" || doc.Findings[0].Type != "differs" {
+		t.Errorf("finding = %+v", doc.Findings[0])
+	}
+	if len(doc.Findings[0].Paths) != 1 || doc.Findings[0].Paths[0].Pointer != "/data/token" {
+		t.Errorf("paths = %+v, want /data/token", doc.Findings[0].Paths)
 	}
 }
 
@@ -1600,5 +1683,171 @@ func TestAnImplausibleJobCountIsRefused(t *testing.T) {
 		if !strings.Contains(stderr, "--jobs") {
 			t.Errorf("--jobs %s stderr = %q, want the flag named", jobs, stderr)
 		}
+	}
+}
+
+// A chart whose only churn is a list's ORDER is reported, counted, fatal under
+// --strict, and given no fix block at all.
+//
+// The last part is the point. Before this, the same chart produced twelve
+// jsonPointers - one per leaf of every element that moved - and pasting them
+// would have permanently un-reconciled every env var's VALUE in order to
+// suppress their ORDER. No ArgoCD or Flux config can express the latter without
+// the former, so the honest output is a finding with no config beside it.
+func TestAChartThatOnlyReordersAListGetsNoFixBlock(t *testing.T) {
+	requireHelm(t)
+
+	code, stdout, _ := invoke(t, "testdata/reordered")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s", code, exitOK, stdout)
+	}
+
+	if !strings.Contains(stdout, "(reordered — same 6 elements)") {
+		t.Errorf("the row does not say the list reordered:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 of 1 chart will churn") {
+		t.Errorf("a reorder must still count as churn:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "sortAlpha") {
+		t.Errorf("the note does not name the fix:\n%s", stdout)
+	}
+
+	// No block, for either engine, and nothing that reads like one.
+	for _, unwanted := range []string{"ignoreDifferences:", "driftDetection:", "jsonPointers"} {
+		if strings.Contains(stdout, unwanted) {
+			t.Errorf("emitted %q for a reordered list, which cannot be suppressed without suppressing its contents:\n%s", unwanted, stdout)
+		}
+	}
+
+	// The judgement is unchanged: only the description and the fix are.
+	if code, _, _ := invoke(t, "testdata/reordered", "--strict"); code != exitFinding {
+		t.Errorf("--strict exit = %d, want %d: a reorder is churn", code, exitFinding)
+	}
+}
+
+// A library chart is skipped and counted, not treated as a chart that failed.
+//
+// `type: library` is correct Helm - it is the recommended way to share
+// templates, and bitnami/common is one - but helm will not render it:
+// "library charts are not installable". idem used to hand it over anyway and
+// report the refusal as a chart it could not render, which is exit 2. Exit 2 is
+// always fatal AND escapes the ratchet, so one library chart anywhere in a tree
+// gave a permanently red gate on day one, with no exclusion mechanism to
+// escape it (there is none, by design).
+//
+// Counted rather than dropped: a tool that reports what it checked has to
+// report what it did not.
+func TestALibraryChartIsSkippedRatherThanFailingTheRun(t *testing.T) {
+	requireHelm(t)
+
+	code, stdout, stderr := invoke(t, "testdata/library")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d — a library chart is not a chart idem failed to render\n%s%s", code, exitOK, stdout, stderr)
+	}
+
+	if !strings.Contains(stdout, "1 library chart not rendered") {
+		t.Errorf("the run does not say a library chart was skipped:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "could not be rendered") {
+		t.Errorf("a library chart is reported as a failure to render:\n%s", stdout)
+	}
+	// The application chart beside it is still checked.
+	if !strings.Contains(stdout, "app") {
+		t.Errorf("the application chart was not checked:\n%s", stdout)
+	}
+
+	// And it must not turn --strict red either.
+	if code, _, _ := invoke(t, "testdata/library", "--strict"); code != exitOK {
+		t.Errorf("--strict exit = %d, want %d", code, exitOK)
+	}
+}
+
+// A tree holding ONLY library charts says so, rather than "no chart found".
+func TestATreeOfOnlyLibraryChartsSaysWhatItSkipped(t *testing.T) {
+	requireHelm(t)
+
+	_, stdout, stderr := invoke(t, "testdata/library/mylib")
+	out := stdout + stderr
+
+	// The idem-level sentence, not merely the word "library" - helm's own
+	// refusal says "library charts are not installable", so a bare Contains
+	// passed before any of this existed.
+	if !strings.Contains(out, "helm cannot render a `type: library` chart") {
+		t.Errorf("does not explain why there was nothing to compare:\n%s", out)
+	}
+	if strings.Contains(out, "not installable") {
+		t.Errorf("still handing a library chart to helm and reporting its refusal:\n%s", out)
+	}
+	if strings.Contains(out, "no directory contains a Chart.yaml") {
+		t.Errorf("reported no chart found, when it found one and chose not to render it:\n%s", out)
+	}
+}
+
+// A generator element that is a path must still get its values.
+//
+// writeInline named the file after the release label, and for a git `files`
+// generator that label IS a repository path - `api (envs/prod.yaml)`. The
+// slash made os.WriteFile try to write into a directory that does not exist,
+// so it failed, the values were dropped, and the chart rendered with defaults:
+// a release nobody deploys, which is the exact failure reading the delivery
+// config exists to prevent. It was reported as "missing valuesObject" - the
+// wrong field, since these came from `helm.values` - and exited 0.
+//
+// `path: "envs/*.yaml"` is the ordinary ArgoCD pattern, so this was most real
+// ApplicationSets.
+func TestInlineValuesSurviveAReleaseLabelThatIsAPath(t *testing.T) {
+	dir := t.TempDir()
+
+	got, err := writeInline(dir, "api (envs/prod.yaml)", map[string]any{"greeting": "hello prod"})
+	if err != nil {
+		t.Fatalf("writeInline: %v", err)
+	}
+	if got == "" {
+		t.Fatal("writeInline returned no path")
+	}
+
+	body, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("reading what writeInline wrote: %v", err)
+	}
+	if !strings.Contains(string(body), "hello prod") {
+		t.Errorf("values file = %q, want the generator's value", body)
+	}
+
+	// It must stay inside the directory it was given: the label is built from
+	// a repository path, and a path is exactly the kind of input that escapes.
+	if rel, err := filepath.Rel(dir, got); err != nil || strings.HasPrefix(rel, "..") {
+		t.Errorf("writeInline wrote to %q, which is outside %q", got, dir)
+	}
+}
+
+// Two elements that differ only where the sanitiser rewrites must not collide.
+//
+// One file per release is load-bearing: two releases of one chart have
+// different values, and a shared name would have the second silently overwrite
+// the first - handing helm one element's values while reporting the other's.
+func TestTwoGeneratorElementsNeverShareAValuesFile(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := writeInline(dir, "api (envs/prod.yaml)", map[string]any{"greeting": "from prod"})
+	if err != nil {
+		t.Fatalf("writeInline: %v", err)
+	}
+	// Differs from the first only in the separator, which is what a naive
+	// sanitiser collapses onto the same name.
+	second, err := writeInline(dir, "api (envs_prod.yaml)", map[string]any{"greeting": "from staging"})
+	if err != nil {
+		t.Fatalf("writeInline: %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("both releases wrote to %q", first)
+	}
+	body, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("reading the first: %v", err)
+	}
+	if !strings.Contains(string(body), "from prod") {
+		t.Errorf("the first release's values file = %q, want its own values", body)
 	}
 }
