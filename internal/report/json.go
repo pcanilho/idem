@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/diff"
 	"github.com/pcanilho/idem/internal/remediate"
 )
 
@@ -25,9 +26,17 @@ type jsonReport struct {
 	// one" without being told.
 	Releases []jsonRelease `json:"releases,omitempty" yaml:"releases,omitempty"`
 
-	Summary       jsonSummary         `json:"summary" yaml:"summary"`
-	Findings      []jsonFinding       `json:"findings" yaml:"findings"`
-	Suppressed    []jsonSuppressed    `json:"suppressed,omitempty" yaml:"suppressed,omitempty"`
+	Summary    jsonSummary      `json:"summary" yaml:"summary"`
+	Findings   []jsonFinding    `json:"findings" yaml:"findings"`
+	Suppressed []jsonSuppressed `json:"suppressed,omitempty" yaml:"suppressed,omitempty"`
+
+	// MaybeSuppressed are findings a rule reaches only through a
+	// jqPathExpression, which idem does not evaluate. Separate from Suppressed
+	// on purpose: a consumer folding the two together would drop findings idem
+	// never confirmed were covered. They are counted as churning, not as
+	// suppressed, for the same reason.
+	MaybeSuppressed []jsonSuppressed `json:"maybeSuppressed,omitempty" yaml:"maybeSuppressed,omitempty"`
+
 	Potential     []jsonPotential     `json:"potential,omitempty" yaml:"potential,omitempty"`
 	Unevaluable   []jsonUnevaluable   `json:"unevaluable,omitempty" yaml:"unevaluable,omitempty"`
 	Unconstructed []jsonUnconstructed `json:"unconstructed,omitempty" yaml:"unconstructed,omitempty"`
@@ -111,8 +120,15 @@ type jsonObject struct {
 }
 
 type jsonPath struct {
-	Path    string `json:"path" yaml:"path"`
-	Pointer string `json:"pointer" yaml:"pointer"`
+	Path string `json:"path" yaml:"path"`
+
+	// Pointer addresses the list itself on a reordered path, and is NOT a
+	// pointer to paste there: no ArgoCD or Flux config ignores ordering alone,
+	// so suppressing it would suppress the list's contents too. Reordered is
+	// how a consumer tells the two apart - `.remediation` already omits it,
+	// but a policy gate reading `.findings` needs to know why.
+	Pointer   string `json:"pointer" yaml:"pointer"`
+	Reordered bool   `json:"reordered,omitempty" yaml:"reordered,omitempty"`
 }
 
 type jsonSuppressed struct {
@@ -121,8 +137,12 @@ type jsonSuppressed struct {
 }
 
 type jsonRule struct {
-	File      string   `json:"file" yaml:"file"`
-	Pointers  []string `json:"pointers,omitempty" yaml:"pointers,omitempty"`
+	File     string   `json:"file" yaml:"file"`
+	Pointers []string `json:"pointers,omitempty" yaml:"pointers,omitempty"`
+
+	// JQ is emitted so a consumer can see WHY idem could not decide, rather
+	// than being told only that it could not.
+	JQ        []string `json:"jqPathExpressions,omitempty" yaml:"jqPathExpressions,omitempty"`
 	SelfHeal  bool     `json:"selfHeal" yaml:"selfHeal"`
 	Respected bool     `json:"respected" yaml:"respected"`
 	Engine    string   `json:"engine,omitempty" yaml:"engine,omitempty"`
@@ -171,9 +191,30 @@ type jsonEntry struct {
 
 // JSON writes the machine-readable form.
 func (r Report) JSON(w io.Writer) error {
+	return writeJSON(w, r.contract())
+}
+
+// writeJSON encodes any contract document, so the chart report and the verbs
+// cannot end up with different indentation or escaping.
+func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(r.contract())
+	return enc.Encode(v)
+}
+
+// objectOf narrows a compared object to the identity the contract publishes.
+//
+// One place, because `idem diff` and `idem doctor --namespace` describe the
+// same kind of thing as the chart report does, and three hand-written copies is
+// how two formats came to disagree about the same run before.
+func objectOf(o diff.ObjectRef) jsonObject {
+	return jsonObject{
+		APIVersion:   o.APIVersion,
+		Kind:         o.Kind,
+		Namespace:    o.Namespace,
+		Name:         o.Name,
+		GenerateName: o.GenerateName,
+	}
 }
 
 // contract builds the machine-readable document.
@@ -228,11 +269,20 @@ func (r Report) contract() jsonReport {
 		for _, f := range c.ServerOnly {
 			out.Findings = append(out.Findings, jsonFindingOf(r, c, f, c.ServerOnly, conditionCluster))
 		}
+		for _, s := range c.Maybe {
+			out.MaybeSuppressed = append(out.MaybeSuppressed, jsonSuppressed{
+				Finding: jsonFindingOf(r, c, s.Finding, c.Findings, conditionClient),
+				By: jsonRule{
+					File: s.By.File, Pointers: s.By.Pointers, JQ: s.By.JQ,
+					SelfHeal: s.By.SelfHeal, Respected: s.By.Respected, Engine: s.By.Engine,
+				},
+			})
+		}
 		for _, s := range c.Suppressed {
 			out.Suppressed = append(out.Suppressed, jsonSuppressed{
 				Finding: jsonFindingOf(r, c, s.Finding, c.Findings, conditionClient),
 				By: jsonRule{
-					File: s.By.File, Pointers: s.By.Pointers,
+					File: s.By.File, Pointers: s.By.Pointers, JQ: s.By.JQ,
 					SelfHeal: s.By.SelfHeal, Respected: s.By.Respected, Engine: s.By.Engine,
 				},
 			})
@@ -306,22 +356,18 @@ func jsonFindingOf(r Report, c Chart, f check.Finding, siblings []check.Finding,
 	cost := consequenceOf(f, siblings)
 
 	out := jsonFinding{
-		Chart:     c.Name,
-		Source:    r.sourcePath(c, f.Source),
-		Type:      f.Change.Type.String(),
-		Condition: condition,
-		Object: jsonObject{
-			APIVersion:   f.Change.Object.APIVersion,
-			Kind:         f.Change.Object.Kind,
-			Namespace:    f.Change.Object.Namespace,
-			Name:         f.Change.Object.Name,
-			GenerateName: f.Change.Object.GenerateName,
-		},
+		Chart:       c.Name,
+		Source:      r.sourcePath(c, f.Source),
+		Type:        f.Change.Type.String(),
+		Condition:   condition,
+		Object:      objectOf(f.Change.Object),
 		Consequence: cost.Kind,
 		Workloads:   cost.Workloads,
 	}
 	for _, p := range f.Change.Paths {
-		out.Paths = append(out.Paths, jsonPath{Path: p.Path.String(), Pointer: p.Path.JSONPointer()})
+		out.Paths = append(out.Paths, jsonPath{
+			Path: p.Path.String(), Pointer: p.Path.JSONPointer(), Reordered: p.Reordered,
+		})
 	}
 	return out
 }

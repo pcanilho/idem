@@ -16,9 +16,16 @@ import (
 // Two-space indent because that is what every manifest in the ecosystem uses,
 // and this output is meant to be pasted next to one.
 func (r Report) YAML(w io.Writer) error {
+	return writeYAML(w, r.contract())
+}
+
+// writeYAML encodes any contract document, shared for the same reason
+// writeJSON is: `idem doctor -o yaml` must be the same document as its JSON,
+// down to the indent.
+func writeYAML(w io.Writer, v any) error {
 	enc := yaml.NewEncoder(w)
 	enc.SetIndent(2)
-	if err := enc.Encode(r.contract()); err != nil {
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
 	return enc.Close()

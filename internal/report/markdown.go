@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/pcanilho/idem/internal/check"
@@ -12,9 +13,15 @@ import (
 // Markdown writes the form shaped for a pull-request comment.
 //
 // It writes NOTHING when there is nothing to say. The documented CI snippet
-// guards on `hashFiles('/tmp/idem.md') != ”`, so a clean run must produce an
-// empty file rather than a comment saying everything is fine on every pull
-// request that touches a chart.
+// guards on `hashFiles('idem.md') != ”`, so a clean run must produce an empty
+// file rather than a comment saying everything is fine on every pull request
+// that touches a chart.
+//
+// The path is workspace-relative on purpose, and this comment named `/tmp` for
+// months while the README did too: hashFiles reads only files under
+// GITHUB_WORKSPACE and returns an empty string for anything else, so the guard
+// this function's whole behaviour rests on was permanently false and no comment
+// was ever posted. readme_test.go now refuses an absolute path there.
 func (r Report) Markdown(w io.Writer) error {
 	if r.Churning() == 0 && r.Unevaluable() == 0 && r.ChurningWithLookup() == 0 {
 		return nil
@@ -65,6 +72,13 @@ func (r Report) Markdown(w io.Writer) error {
 	writeUnevaluableRows(&b, r.Charts)
 	writeFixBlock(&b, r.inScope(), r.Engines)
 
+	// Said here because there is no fix block to say it in. Every other
+	// churning finding in this comment carries a collapsed block, so a row
+	// without one reads as a rendering bug unless the absence is explained.
+	if slices.ContainsFunc(r.inScope(), reorders) {
+		b.WriteString(orderingHasNoSuppression + "\n\n")
+	}
+
 	fmt.Fprintf(&b, "<sub>helm %s · %d rounds%s</sub>\n", r.Helm, r.Rounds, r.unevaluableNote())
 
 	return emit(w, b.String())
@@ -104,8 +118,11 @@ func writeRows(b *strings.Builder, c Chart, f check.Finding) {
 		return
 	}
 	for _, p := range f.Change.Paths {
-		fmt.Fprintf(b, "| `%s` | `%s` | `%s` | %s |\n",
-			cell(c.Name), cell(f.Change.Object.Display()), cell(p.Path.String()), cell(cost))
+		// The annotation sits OUTSIDE the backticks: it is prose about the
+		// path, not part of it, and a reviewer copying the cell should get the
+		// path alone.
+		fmt.Fprintf(b, "| `%s` | `%s` | `%s`%s | %s |\n",
+			cell(c.Name), cell(f.Change.Object.Display()), cell(p.Path.String()), reorderNote(p), cell(cost))
 	}
 }
 

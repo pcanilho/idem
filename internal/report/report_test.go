@@ -2040,3 +2040,176 @@ func TestADeeplyNestedPathStaysWithinTheColumn(t *testing.T) {
 		t.Errorf("Text() = %q, want the leaf segment kept", findings)
 	}
 }
+
+// reordered is what walk produces for a list whose elements are unchanged and
+// whose order is not: one PathDiff at the list, holding both orderings.
+func reordered(source, name, list string, n int) check.Finding {
+	left := make([]any, n)
+	right := make([]any, n)
+	for i := range n {
+		left[i] = fmt.Sprintf("e%d", i)
+		right[i] = fmt.Sprintf("e%d", n-1-i)
+	}
+	return check.Finding{
+		Source: source,
+		Change: diff.Change{
+			Object: diff.ObjectRef{APIVersion: "apps/v1", Kind: "Deployment", Name: name},
+			Type:   diff.Differs,
+			Paths: []diff.PathDiff{{
+				Path: path(list), Left: left, Right: right,
+				HasLeft: true, HasRight: true, Reordered: true,
+			}},
+		},
+	}
+}
+
+func churningVerdict() []engine.Verdict {
+	return []engine.Verdict{{
+		Engine: "argocd", Result: engine.Churns,
+		Because: "on every re-render — at least daily, and without cluster access",
+	}}
+}
+
+// A reordered list says so, rather than reading as an ordinary changed field.
+//
+// Without the marker the row is `.spec.env` and nothing else, which a reader
+// takes for "this field's value changed" - and the next question, "so what do I
+// put in ignoreDifferences", has no answer.
+func TestAReorderedListIsLabelledAndCounted(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{reordered("templates/main.yaml", "api", ".spec.env", 6)},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	out := text(t, r)
+
+	if !strings.Contains(out, "reordered") {
+		t.Errorf("output does not label the row as a reorder:\n%s", out)
+	}
+	if !strings.Contains(out, "same 6 elements") {
+		t.Errorf("output does not say the elements are unchanged:\n%s", out)
+	}
+	if !strings.Contains(out, ".spec.env") {
+		t.Errorf("output does not name the list:\n%s", out)
+	}
+
+	// Still churn: it counts, and --strict still fails on it. This changes the
+	// description and the fix, never the judgement.
+	if !strings.Contains(out, "1 of 1 chart will churn") {
+		t.Errorf("a reorder must still count as churn:\n%s", out)
+	}
+}
+
+// The note says why there is no fix block, and points at the class of cause.
+//
+// It must not attribute the reorder to a particular call: `keys` and `values`
+// are the usual cause and `sortAlpha` their fix, but `shuffle` and a `lookup`
+// returning cluster order produce the same shape, and a rendered value cannot
+// be traced back to the call that produced it.
+func TestAReorderedListExplainsWhyNoFixBlockCanExist(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{reordered("templates/main.yaml", "api", ".spec.env", 6)},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	out := text(t, r)
+
+	for _, want := range []string{"only their order differs", "ignore ordering alone", "sortAlpha"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("note is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// The lookup conclusion must not fire on a chart whose only churn is ordering.
+//
+// "No lookup anywhere, so nothing can stabilise this value ... pin the value
+// meanwhile" is a confident wrong answer here: no value changed, and ordering
+// IS stabilisable - at the source, which is what the reorder note says instead.
+func TestAReorderOnlyChartIsNotToldToPinAValue(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{reordered("templates/main.yaml", "api", ".spec.env", 6)},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	out := text(t, r)
+
+	if strings.Contains(out, "nothing can stabilise this value") {
+		t.Errorf("the lookup conclusion fired on a reorder-only chart:\n%s", out)
+	}
+	if strings.Contains(out, "pinning the value") {
+		t.Errorf("a reorder-only chart is told to pin a value that never changed:\n%s", out)
+	}
+}
+
+// A chart that reorders AND regenerates keeps both explanations: the reorder
+// note for the list, the lookup conclusion for the value.
+func TestAChartThatBothReordersAndRegeneratesKeepsBothNotes(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{
+				reordered("templates/main.yaml", "api", ".spec.env", 6),
+				finding("templates/main.yaml", "creds", ".data.password"),
+			},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	out := text(t, r)
+
+	if !strings.Contains(out, "only their order differs") {
+		t.Errorf("reorder note missing:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing can stabilise this value") {
+		t.Errorf("lookup conclusion missing, and a regenerated password is still there:\n%s", out)
+	}
+}
+
+// A rule idem cannot evaluate is reported as unknown, not silently ignored.
+//
+// ArgoCD's ignoreDifferences also takes `jqPathExpressions`, and idem does not
+// evaluate jq: it cannot say whether such a rule covers a finding. It computed
+// that set - delivery.Applied.Maybe - threaded it into the Report, and rendered
+// it in NO format, so the finding was counted as unsuppressed with no hint that
+// the user's own config might already handle it. That is the "say unknown"
+// invariant inverted: idem knew something and said nothing.
+//
+// The finding stays counted, because "might be covered" is not "is covered".
+func TestARuleIdemCannotEvaluateIsReportedRatherThanIgnored(t *testing.T) {
+	f := finding("templates/main.yaml", "creds", ".data.password")
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Delivery: []string{"apps/prod.yaml"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{f},
+			Maybe: []delivery.Suppressed{{
+				Finding: f,
+				By:      delivery.Rule{File: "apps/prod.yaml", JQ: []string{`.data | keys`}},
+			}},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	out := text(t, r)
+
+	if !strings.Contains(out, "apps/prod.yaml") {
+		t.Errorf("does not name the manifest whose rule might cover this:\n%s", out)
+	}
+	if !strings.Contains(out, "jq") {
+		t.Errorf("does not say why idem cannot tell:\n%s", out)
+	}
+	// Still counted: "might be covered" is not "is covered".
+	if !strings.Contains(out, "1 of 1 chart will churn") {
+		t.Errorf("a jq-reachable finding must still count:\n%s", out)
+	}
+}

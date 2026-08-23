@@ -150,8 +150,10 @@ func annotate(b *strings.Builder, r Report, c Chart, f check.Finding, when strin
 
 func message(f check.Finding, cost, when string) string {
 	var fields []string
+	reordered := false
 	for _, p := range f.Change.Paths {
-		fields = append(fields, p.Path.String())
+		fields = append(fields, p.Path.String()+reorderNote(p))
+		reordered = reordered || p.Reordered
 	}
 
 	msg := fmt.Sprintf("idem: %s renders inconsistently%s", f.Change.Object.Display(), when)
@@ -162,6 +164,11 @@ func message(f check.Finding, cost, when string) string {
 	// — no checksum" makes the reader hunt for the clause boundary.
 	if cost != "" {
 		msg += " (" + cost + ")"
+	}
+	// An inline annotation carries no fix block behind it, so the one finding
+	// whose fix is not a fix block has to say so here or nowhere.
+	if reordered {
+		msg += ". " + orderingHasNoSuppression
 	}
 	return data(msg)
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/delivery"
+	"github.com/pcanilho/idem/internal/diff"
 	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/remediate"
@@ -164,6 +165,12 @@ type Report struct {
 	// conclusion is only reachable from an engine that resolves lookup.
 	// Narrowing the display must not quietly discard it.
 	Engines []string
+
+	// Libraries counts `type: library` charts found and deliberately not
+	// rendered. They are not failures - helm itself refuses to template one -
+	// but they are charts the user pointed idem at and did not get an answer
+	// about, so the count is printed rather than swallowed.
+	Libraries int
 }
 
 // considered reports whether a chart is in scope for this run.
@@ -342,8 +349,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown — drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s%s",
-		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.skippedNote(), r.depsNote(), r.deliveryNote())))
+	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s%s%s",
+		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.skippedNote(), r.libraryNote(), r.depsNote(), r.deliveryNote())))
 	writeRemediation(&b, scope, r.Engines)
 
 	return emit(w, b.String())
@@ -363,7 +370,42 @@ func writeChart(b *strings.Builder, r Report, c Chart, show []string) {
 		writeGroups(b, r, c, c.ServerOnly)
 	}
 
-	writeVerdicts(b, c.Verdicts, show)
+	writeVerdicts(b, c, show)
+}
+
+// reorders reports whether any of a chart's findings is a reordered list.
+func reorders(c Chart) bool {
+	for _, f := range slices.Concat(c.Findings, c.ServerOnly) {
+		for _, p := range f.Change.Paths {
+			if p.Reordered {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// churnsBeyondOrdering reports whether anything other than a list's order
+// differed.
+//
+// It gates the lookup conclusion. On a chart whose only churn is ordering,
+// "nothing can stabilise this value ... pin the value meanwhile" is a confident
+// wrong answer twice over: no value changed, and ordering IS stabilisable - at
+// the source, which is what the reorder note says instead.
+func churnsBeyondOrdering(c Chart) bool {
+	for _, f := range slices.Concat(c.Findings, c.ServerOnly) {
+		// An object that renders in one round and not another carries no
+		// paths at all, and is emphatically not a reordering.
+		if len(f.Change.Paths) == 0 {
+			return true
+		}
+		for _, p := range f.Change.Paths {
+			if !p.Reordered {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeGroups prints findings grouped by the template that produced each
@@ -396,7 +438,8 @@ func writeGroups(b *strings.Builder, r Report, c Chart, findings []check.Finding
 // whether the chart calls lookup at all, which is a property of the chart. It
 // becomes per-finding only with --context, where each value can be observed
 // separately.
-func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string) {
+func writeVerdicts(b *strings.Builder, c Chart, show []string) {
+	verdicts := c.Verdicts
 	if len(verdicts) == 0 {
 		return
 	}
@@ -425,11 +468,36 @@ func writeVerdicts(b *strings.Builder, verdicts []engine.Verdict, show []string)
 	}
 	tw.Flush()
 
-	if defect(verdicts) {
+	if defect(verdicts) && churnsBeyondOrdering(c) {
 		b.WriteString("\n")
 		b.WriteString("      No `lookup` anywhere in this chart, so nothing can stabilise this value.\n")
 		b.WriteString("      That is a chart defect rather than an ArgoCD limitation — worth reporting\n")
 		b.WriteString("      upstream, and pinning the value meanwhile.\n")
+	}
+
+	// Why this finding comes with no config to paste. Verified against both
+	// engines rather than assumed: ArgoCD's ignoreDifferences offers
+	// jsonPointers, jqPathExpressions and managedFieldsManagers, and none of
+	// them ignores ORDER while still comparing CONTENT - for the equivalent
+	// HPA spec.metrics reordering ArgoCD's own docs say to reorder the source
+	// in Git. Flux's driftDetection.ignore entries are RFC 6901 removes, so
+	// the only expressible thing is removing the list whole. A pointer at the
+	// list would suppress its contents to hide its order, and a genuine change
+	// to any element would then never sync.
+	//
+	// It names the class of cause and not the call. `keys` and `values` build
+	// a slice from Go's map iteration order and `sortAlpha` is their fix, but
+	// `shuffle` and a `lookup` returning cluster order produce the same shape -
+	// and a rendered value cannot be traced back to the call that produced it.
+	//
+	// It must not read as reassurance either. A reordered initContainers list
+	// changes execution order and is a real bug; these are facts and a fix,
+	// not an all-clear.
+	if reorders(c) {
+		b.WriteString("\n")
+		b.WriteString("      The elements are unchanged; only their order differs. No\n")
+		b.WriteString("      ignoreDifferences or driftDetection.ignore can ignore ordering alone —\n")
+		b.WriteString("      a list built from a Go map has no order, and `sortAlpha` gives it one.\n")
 	}
 }
 
@@ -581,10 +649,10 @@ func writeFinding(tw io.Writer, f check.Finding, siblings []check.Finding, limit
 	shown := min(len(f.Change.Paths), limit)
 	for i, p := range f.Change.Paths[:shown] {
 		if i == 0 {
-			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, clipPath(p.Path.String()), cost)
+			fmt.Fprintf(tw, "    %s\t%s\t%s\n", object, pathCell(p), cost)
 			continue
 		}
-		fmt.Fprintf(tw, "    \t%s\t\n", clipPath(p.Path.String()))
+		fmt.Fprintf(tw, "    \t%s\t\n", pathCell(p))
 	}
 	if elided := len(f.Change.Paths) - shown; elided > 0 {
 		fmt.Fprintf(tw, "    \t… and %d more %s\t\n", elided, plural(elided, "field", "fields"))
@@ -620,6 +688,20 @@ func (r Report) skippedNote() string {
 		return ""
 	}
 	return fmt.Sprintf(" · %d hook %s not compared", n, plural(n, "object", "objects"))
+}
+
+// libraryNote reports charts idem found and deliberately did not render.
+//
+// `type: library` is correct Helm and helm itself will not template one:
+// "library charts are not installable". Skipping it is right; skipping it
+// SILENTLY is not, because a gate that quietly checks less than the user
+// pointed it at is the failure mode idem exists to prevent. Same rule as
+// skippedNote above.
+func (r Report) libraryNote() string {
+	if r.Libraries == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · %d library %s not rendered", r.Libraries, plural(r.Libraries, "chart", "charts"))
 }
 
 // depsNote says what idem had to do to render at all.
@@ -732,7 +814,11 @@ func writeSuppressed(b *strings.Builder, charts []Chart) bool {
 			covered = append(covered, s)
 		}
 	}
-	if len(covered) == 0 && len(broken) == 0 {
+	maybe := 0
+	for _, c := range charts {
+		maybe += len(c.Maybe)
+	}
+	if len(covered) == 0 && len(broken) == 0 && maybe == 0 {
 		return false
 	}
 
@@ -751,7 +837,33 @@ func writeSuppressed(b *strings.Builder, charts []Chart) bool {
 		b.WriteString("      add RespectIgnoreDifferences=true to that Application's syncOptions\n")
 	}
 
+	writeMaybe(b, charts)
 	return true
+}
+
+// writeMaybe names findings a rule reaches only through a jq expression.
+//
+// idem does not vendor a jq engine, so it cannot say whether such a rule covers
+// the finding - and this set was computed, carried on the Report, and rendered
+// nowhere, which meant idem knew the user's config MIGHT already handle this
+// and said nothing. Absent knowledge is reported as absent; knowledge withheld
+// is the same defect the provenance rule exists to prevent.
+//
+// Its own heading, below the covered ones, because "may be covered" and "is
+// covered" are different claims and the counted total treats them differently:
+// these findings are still counted and still fail --strict, exactly because
+// idem could not confirm them.
+func writeMaybe(b *strings.Builder, charts []Chart) {
+	var maybe []delivery.Suppressed
+	for _, c := range charts {
+		maybe = append(maybe, c.Maybe...)
+	}
+	if len(maybe) == 0 {
+		return
+	}
+
+	b.WriteString("\n  may already be covered — idem does not evaluate jq, so these still count\n")
+	writeByManifest(b, maybe)
 }
 
 // writeUnconstructed lists releases idem could not build, and charts it built
@@ -848,6 +960,57 @@ func clip(value any, limit int) string {
 		return text
 	}
 	return string([]rune(text)[:maxValue]) + "…"
+}
+
+// pathCell renders the path column, annotating a reordered list.
+//
+// Without the annotation the row is a bare `.spec.env`, which a reader takes
+// for "this field's value changed" - and then looks for the pointer to
+// suppress, which is exactly the fix that must not be offered here. Saying how
+// many elements there are, and that they are the same ones, is the whole
+// finding in four words.
+//
+// The annotation is appended AFTER clipping, so a long path never eats it.
+func pathCell(p diff.PathDiff) string {
+	cell := clipPath(p.Path.String())
+	if !p.Reordered {
+		return cell
+	}
+	return cell + reorderNote(p)
+}
+
+// reorderNote annotates a path as a reordering, or says nothing.
+//
+// Shared by text, markdown and github so the three channels cannot describe the
+// same finding differently - markdown is a PR comment and github an inline
+// annotation, and a reviewer may well see both.
+func reorderNote(p diff.PathDiff) string {
+	if !p.Reordered {
+		return ""
+	}
+	// Either side gives the count - they hold the same elements, which is the
+	// finding. Left first only because it is the round everything else is
+	// compared against.
+	n, ok := elementCount(p.Left)
+	if !ok {
+		n, ok = elementCount(p.Right)
+	}
+	if !ok {
+		return " (reordered)"
+	}
+	return fmt.Sprintf(" (reordered — same %d elements)", n)
+}
+
+// orderingHasNoSuppression is the one-line form of the note writeVerdicts
+// prints wrapped, for the two channels that carry no fix block to explain
+// themselves with.
+const orderingHasNoSuppression = "A reordered list has no fix block: no `ignoreDifferences` or " +
+	"`driftDetection.ignore` can ignore ordering alone, and one that tried would suppress the " +
+	"list's contents too. `sortAlpha` fixes it at the source."
+
+func elementCount(v any) (int, bool) {
+	list, ok := v.([]any)
+	return len(list), ok
 }
 
 // maxPath is how many columns an object path may occupy.

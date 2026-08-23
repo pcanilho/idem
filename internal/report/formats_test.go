@@ -7,12 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	"time"
+
 	"github.com/pcanilho/idem/internal/analyze"
 	"github.com/pcanilho/idem/internal/check"
+	"github.com/pcanilho/idem/internal/cluster"
 	"github.com/pcanilho/idem/internal/delivery"
+	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
 	"gopkg.in/yaml.v3"
 )
@@ -703,5 +709,514 @@ func TestJSONCarriesAPathAPolicyEngineCanOpen(t *testing.T) {
 	source := got["findings"].([]any)[0].(map[string]any)["source"]
 	if source != "charts/home/templates/secrets.yaml" {
 		t.Errorf("source = %v, want the repository-relative path", source)
+	}
+}
+
+// -o json marks a reordered list, so a consumer gating on the contract can tell
+// a path it could suppress from one it cannot.
+//
+// Decoded and indexed rather than Contains: the word "reordered" appears in the
+// note this feature also prints, so a substring check would pass with the field
+// missing entirely. Two JSON tests in this file were caught passing that way.
+func TestJSONMarksAReorderedPathAsUnsuppressable(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{
+				reordered("templates/main.yaml", "api", ".spec.env", 4),
+				finding("templates/main.yaml", "creds", ".data.password"),
+			},
+		}},
+	}
+
+	var doc struct {
+		Findings []struct {
+			Paths []struct {
+				Path      string `json:"path"`
+				Pointer   string `json:"pointer"`
+				Reordered bool   `json:"reordered"`
+			} `json:"paths"`
+		} `json:"findings"`
+		Remediation []struct {
+			Engine       string   `json:"engine"`
+			JSONPointers []string `json:"jsonPointers"`
+		} `json:"remediation"`
+	}
+	if err := json.Unmarshal([]byte(render(t, r, Report.JSON)), &doc); err != nil {
+		t.Fatalf("JSON does not decode: %v", err)
+	}
+
+	byPointer := map[string]bool{}
+	for _, f := range doc.Findings {
+		for _, p := range f.Paths {
+			byPointer[p.Pointer] = p.Reordered
+		}
+	}
+
+	got, ok := byPointer["/spec/env"]
+	if !ok {
+		t.Fatalf("no path at /spec/env: %+v", doc.Findings)
+	}
+	if !got {
+		t.Errorf("reordered = false at /spec/env, want true")
+	}
+	if byPointer["/data/password"] {
+		t.Errorf("reordered = true at /data/password, want false: an ordinary regenerated value")
+	}
+
+	// And the remediation must carry the password's pointer without the list's.
+	for _, e := range doc.Remediation {
+		if slices.Contains(e.JSONPointers, "/spec/env") {
+			t.Errorf("%s remediation offers /spec/env, which suppresses the list's contents: %+v", e.Engine, e.JSONPointers)
+		}
+	}
+}
+
+// The PR comment says the list reordered, and says why no fix is attached.
+//
+// Markdown is the channel a reviewer actually reads, and it was the format left
+// behind the last two times a finding gained a shape. A bare field name in the
+// table reads as "this value churns", and the reviewer then looks for the
+// collapsed fix block that every other churning finding carries - and finds
+// nothing, with no explanation.
+func TestMarkdownSaysAListReorderedAndWhyNoFixIsAttached(t *testing.T) {
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{reordered("templates/main.yaml", "api", ".spec.env", 6)},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	got := render(t, r, Report.Markdown)
+
+	// The ROW, not merely the word: the note below the table also says
+	// "reordered", so a bare Contains passes with the row unmarked - which is
+	// how the first version of this test passed with the annotation deleted.
+	if !strings.Contains(got, "`.spec.env` (reordered — same 6 elements)") {
+		t.Errorf("the table row does not say the list reordered:\n%s", got)
+	}
+	if !strings.Contains(got, "sortAlpha") {
+		t.Errorf("no explanation of why there is no fix block:\n%s", got)
+	}
+	// The collapsed block, not the word: the sentence explaining why there is
+	// no block necessarily names `ignoreDifferences` itself.
+	if strings.Contains(got, "<summary>Fix") {
+		t.Errorf("offered a fix block for a reordered list:\n%s", got)
+	}
+}
+
+// The inline annotation says it too, since -o github is the other PR channel
+// and carries no fix block at all to fall back on.
+func TestGitHubAnnotatesAReorderAsAnOrderingProblem(t *testing.T) {
+	root := repoWith(t, "charts/api/templates/main.yaml")
+
+	f := reordered("api/templates/main.yaml", "api", ".spec.env", 6)
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"}, Root: root,
+		Charts: []Chart{{
+			Name: "api", RepoDir: "charts/api",
+			Findings: []check.Finding{f},
+			Verdicts: churningVerdict(),
+		}},
+	}
+	got := render(t, r, Report.GitHub)
+
+	if !strings.Contains(got, "reordered") {
+		t.Errorf("annotation does not say the list reordered:\n%s", got)
+	}
+	if !strings.Contains(got, "sortAlpha") {
+		t.Errorf("annotation does not name the fix, and there is no fix block to carry it:\n%s", got)
+	}
+}
+
+// Every reader-facing format says a reordered list cannot be suppressed.
+//
+// One test across the formats rather than three separate ones, because "the
+// format left behind" is this repository's most repeated defect: the Flux fix
+// block once existed only in -o text, and -o markdown once ignored --engine
+// entirely and commented an ArgoCD block onto a Flux user's pull request. A
+// format added later fails here rather than shipping silent.
+//
+// json and yaml are excluded deliberately: they carry `reordered` as a field on
+// the path, which TestJSONMarksAReorderedPathAsUnsuppressable checks by
+// decoding. Prose in a machine contract would be noise.
+func TestEveryReaderFacingFormatSaysAReorderCannotBeSuppressed(t *testing.T) {
+	root := repoWith(t, "charts/api/templates/main.yaml")
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"}, Root: root,
+		Charts: []Chart{{
+			Name: "api", RepoDir: "charts/api",
+			Findings: []check.Finding{reordered("api/templates/main.yaml", "api", ".spec.env", 6)},
+			Verdicts: churningVerdict(),
+		}},
+	}
+
+	for _, tc := range []struct {
+		name string
+		f    func(Report, io.Writer) error
+	}{
+		{"text", Report.Text},
+		{"markdown", Report.Markdown},
+		{"github", Report.GitHub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := render(t, r, tc.f)
+			if !strings.Contains(got, "reordered — same 6 elements") {
+				t.Errorf("does not mark the path as a reorder:\n%s", got)
+			}
+			if !strings.Contains(got, "sortAlpha") {
+				t.Errorf("does not name the fix:\n%s", got)
+			}
+			if !strings.Contains(got, "ordering alone") {
+				t.Errorf("does not say why no config can suppress it:\n%s", got)
+			}
+		})
+	}
+}
+
+// -o json carries the jq-reachable set too, since it is the policy seam.
+//
+// A gate reading the contract has the same question the reader does: is this
+// finding one my own config might already handle? idem computed the answer and
+// emitted it nowhere. `maybeSuppressed` rather than folding it into
+// `suppressed`, because a consumer that treated the two alike would silently
+// drop findings idem never confirmed were covered.
+func TestJSONCarriesFindingsAJQRuleMightCover(t *testing.T) {
+	f := finding("templates/main.yaml", "creds", ".data.password")
+	r := Report{
+		Helm: "4.2.4", Rounds: 3, Engines: []string{"argocd"},
+		Charts: []Chart{{
+			Name: "api", Dir: "./api",
+			Findings: []check.Finding{f},
+			Maybe: []delivery.Suppressed{{
+				Finding: f,
+				By:      delivery.Rule{File: "apps/prod.yaml", JQ: []string{`.data | keys`}},
+			}},
+		}},
+	}
+
+	var doc struct {
+		Suppressed []struct {
+			By struct {
+				File string `json:"file"`
+			} `json:"by"`
+		} `json:"suppressed"`
+		MaybeSuppressed []struct {
+			By struct {
+				File string   `json:"file"`
+				JQ   []string `json:"jqPathExpressions"`
+			} `json:"by"`
+		} `json:"maybeSuppressed"`
+		Summary struct {
+			Churning   int `json:"churning"`
+			Suppressed int `json:"suppressed"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(render(t, r, Report.JSON)), &doc); err != nil {
+		t.Fatalf("JSON does not decode: %v", err)
+	}
+
+	if len(doc.MaybeSuppressed) != 1 {
+		t.Fatalf("maybeSuppressed = %+v, want one entry", doc.MaybeSuppressed)
+	}
+	if doc.MaybeSuppressed[0].By.File != "apps/prod.yaml" {
+		t.Errorf("by.file = %q, want the manifest carrying the rule", doc.MaybeSuppressed[0].By.File)
+	}
+	if len(doc.MaybeSuppressed[0].By.JQ) != 1 {
+		t.Errorf("by.jqPathExpressions = %v, want the expression idem could not evaluate", doc.MaybeSuppressed[0].By.JQ)
+	}
+
+	// It must NOT appear as suppressed, and must still count as churn.
+	if len(doc.Suppressed) != 0 {
+		t.Errorf("suppressed = %+v, want none: idem never confirmed this is covered", doc.Suppressed)
+	}
+	if doc.Summary.Suppressed != 0 {
+		t.Errorf("summary.suppressed = %d, want 0", doc.Summary.Suppressed)
+	}
+	if doc.Summary.Churning != 1 {
+		t.Errorf("summary.churning = %d, want 1: unconfirmed is not covered", doc.Summary.Churning)
+	}
+}
+
+// --- the verbs' machine-readable forms ---
+
+func diagnosis() doctor.Diagnosis {
+	return doctor.Diagnosis{
+		Scanned: 75,
+		Median:  0.07,
+		Suspects: []doctor.Suspect{{
+			Workload: cluster.Workload{
+				Kind: "Deployment", Namespace: "lab", Name: "lab-harbor-core",
+				Revision: 660, Checksums: []string{"checksum/configmap", "checksum/secret"},
+				Owner: cluster.Owner{Engine: "argocd", Name: "lab-app", Chart: "harbor"},
+			},
+			PerDay: 0.89,
+			Age:    745 * 24 * time.Hour,
+		}},
+	}
+}
+
+// `idem doctor -o json` exists, because -o json is the seam idem tells people
+// to gate on.
+//
+// It was refused outright: "renders text only". idem cut its rules system on
+// the grounds that `-o json | conftest` is the extension point, and then left
+// two of its three verbs unable to reach it - doctor most of all, since a
+// ranked table of what keeps rolling is exactly what someone would alert on.
+func TestDoctorHasAMachineReadableForm(t *testing.T) {
+	var b strings.Builder
+	if err := DoctorJSON(&b, diagnosis(), "truenas", map[string]string{"lab-app": "charts/lab"}); err != nil {
+		t.Fatalf("DoctorJSON: %v", err)
+	}
+
+	var doc struct {
+		Context  string  `json:"context"`
+		Scanned  int     `json:"scanned"`
+		Median   float64 `json:"median"`
+		Suspects []struct {
+			Kind      string   `json:"kind"`
+			Namespace string   `json:"namespace"`
+			Name      string   `json:"name"`
+			Revision  int      `json:"revision"`
+			PerDay    float64  `json:"perDay"`
+			AgeDays   int      `json:"ageDays"`
+			Checksums []string `json:"checksums"`
+			Chart     string   `json:"chart"`
+			Owner     struct {
+				Engine string `json:"engine"`
+				Name   string `json:"name"`
+			} `json:"owner"`
+		} `json:"suspects"`
+	}
+	if err := json.Unmarshal([]byte(b.String()), &doc); err != nil {
+		t.Fatalf("DoctorJSON does not decode: %v\n%s", err, b.String())
+	}
+
+	if doc.Scanned != 75 || doc.Median != 0.07 || doc.Context != "truenas" {
+		t.Errorf("scanned/median/context = %d/%v/%q, want 75/0.07/truenas", doc.Scanned, doc.Median, doc.Context)
+	}
+	if len(doc.Suspects) != 1 {
+		t.Fatalf("suspects = %+v, want one", doc.Suspects)
+	}
+	s := doc.Suspects[0]
+	if s.Kind != "Deployment" || s.Namespace != "lab" || s.Name != "lab-harbor-core" {
+		t.Errorf("identity = %s/%s/%s", s.Kind, s.Namespace, s.Name)
+	}
+	if s.Revision != 660 || s.PerDay != 0.89 || s.AgeDays != 745 {
+		t.Errorf("rev/perDay/ageDays = %d/%v/%d, want 660/0.89/745", s.Revision, s.PerDay, s.AgeDays)
+	}
+	// Every checksum, not the "+ N more" the table shows: the text form elides
+	// for width, and a contract that elided would be lying to a consumer.
+	if len(s.Checksums) != 2 {
+		t.Errorf("checksums = %v, want both - the text form's elision is a display concern", s.Checksums)
+	}
+	if s.Owner.Engine != "argocd" || s.Owner.Name != "lab-app" {
+		t.Errorf("owner = %+v", s.Owner)
+	}
+	if s.Chart != "charts/lab" {
+		t.Errorf("chart = %q, want the path the confirm command uses", s.Chart)
+	}
+}
+
+// A clean doctor run is still a document, not an empty stream.
+//
+// Same rule as `.findings` never being null: the clean run is the case a
+// consumer's pipeline hits most often, and it must not have to special-case it.
+func TestDoctorJSONIsADocumentEvenWithNothingToReport(t *testing.T) {
+	var b strings.Builder
+	if err := DoctorJSON(&b, doctor.Diagnosis{Scanned: 12, Median: 0.02}, "", nil); err != nil {
+		t.Fatalf("DoctorJSON: %v", err)
+	}
+	var doc struct {
+		Scanned  int   `json:"scanned"`
+		Suspects []any `json:"suspects"`
+	}
+	if err := json.Unmarshal([]byte(b.String()), &doc); err != nil {
+		t.Fatalf("does not decode: %v\n%s", err, b.String())
+	}
+	if doc.Scanned != 12 {
+		t.Errorf("scanned = %d, want 12", doc.Scanned)
+	}
+	if doc.Suspects == nil {
+		t.Errorf("suspects is null, want an empty array:\n%s", b.String())
+	}
+}
+
+func TestDriftHasAMachineReadableForm(t *testing.T) {
+	drifts := []doctor.Drift{{
+		Object:   diff.ObjectRef{APIVersion: "v1", Kind: "Secret", Namespace: "lab", Name: "creds"},
+		Writer:   "external-secrets",
+		Evidence: "field manager",
+		Changes: []diff.PathDiff{{
+			Path: path(".data.password"), Left: "a", Right: "b", HasLeft: true, HasRight: true,
+		}},
+	}}
+
+	var b strings.Builder
+	if err := DriftJSON(&b, drifts, "lab"); err != nil {
+		t.Fatalf("DriftJSON: %v", err)
+	}
+
+	var doc struct {
+		Namespace string `json:"namespace"`
+		Drifts    []struct {
+			Object   jsonObject `json:"object"`
+			Writer   string     `json:"writer"`
+			Evidence string     `json:"evidence"`
+			Changes  []struct {
+				Pointer string `json:"pointer"`
+			} `json:"changes"`
+		} `json:"drifts"`
+	}
+	if err := json.Unmarshal([]byte(b.String()), &doc); err != nil {
+		t.Fatalf("does not decode: %v\n%s", err, b.String())
+	}
+	if doc.Namespace != "lab" {
+		t.Errorf("namespace = %q", doc.Namespace)
+	}
+	if len(doc.Drifts) != 1 || doc.Drifts[0].Writer != "external-secrets" {
+		t.Fatalf("drifts = %+v", doc.Drifts)
+	}
+	if doc.Drifts[0].Object.Name != "creds" {
+		t.Errorf("object = %+v", doc.Drifts[0].Object)
+	}
+	if len(doc.Drifts[0].Changes) != 1 || doc.Drifts[0].Changes[0].Pointer != "/data/password" {
+		t.Errorf("changes = %+v", doc.Drifts[0].Changes)
+	}
+}
+
+func TestDiffHasAMachineReadableForm(t *testing.T) {
+	f := secretFinding("creds", ".data.password")
+
+	var b strings.Builder
+	if err := DiffJSON(&b, []check.Finding{f}, "a.yaml", "b.yaml"); err != nil {
+		t.Fatalf("DiffJSON: %v", err)
+	}
+
+	var doc struct {
+		Left     string `json:"left"`
+		Right    string `json:"right"`
+		Findings []struct {
+			Object jsonObject `json:"object"`
+			Type   string     `json:"type"`
+			Paths  []struct {
+				Pointer   string `json:"pointer"`
+				Reordered bool   `json:"reordered"`
+			} `json:"paths"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(b.String()), &doc); err != nil {
+		t.Fatalf("does not decode: %v\n%s", err, b.String())
+	}
+	if doc.Left != "a.yaml" || doc.Right != "b.yaml" {
+		t.Errorf("left/right = %q/%q", doc.Left, doc.Right)
+	}
+	if len(doc.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one", doc.Findings)
+	}
+	if doc.Findings[0].Type != "differs" {
+		t.Errorf("type = %q, want the name not the ordinal", doc.Findings[0].Type)
+	}
+	if doc.Findings[0].Paths[0].Pointer != "/data/password" {
+		t.Errorf("pointer = %q", doc.Findings[0].Paths[0].Pointer)
+	}
+}
+
+// Each verb's YAML is the same document as its JSON, decoded and compared -
+// the rule TestYAMLIsTheJSONContractInAnotherEncoding already applies to the
+// chart report, extended to the two verbs that just gained a contract.
+func TestEachVerbsYAMLIsItsJSONInAnotherEncoding(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		json, yaml func(io.Writer) error
+	}{
+		{
+			"doctor",
+			func(w io.Writer) error { return DoctorJSON(w, diagnosis(), "truenas", nil) },
+			func(w io.Writer) error { return DoctorYAML(w, diagnosis(), "truenas", nil) },
+		},
+		{
+			"drift",
+			func(w io.Writer) error { return DriftJSON(w, nil, "lab") },
+			func(w io.Writer) error { return DriftYAML(w, nil, "lab") },
+		},
+		{
+			"diff",
+			func(w io.Writer) error {
+				return DiffJSON(w, []check.Finding{secretFinding("creds", ".data.password")}, "a.yaml", "b.yaml")
+			},
+			func(w io.Writer) error {
+				return DiffYAML(w, []check.Finding{secretFinding("creds", ".data.password")}, "a.yaml", "b.yaml")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var jb, yb strings.Builder
+			if err := tc.json(&jb); err != nil {
+				t.Fatalf("JSON: %v", err)
+			}
+			if err := tc.yaml(&yb); err != nil {
+				t.Fatalf("YAML: %v", err)
+			}
+
+			var fromJSON any
+			if err := json.Unmarshal([]byte(jb.String()), &fromJSON); err != nil {
+				t.Fatalf("JSON does not parse: %v", err)
+			}
+			var decoded any
+			if err := yaml.Unmarshal([]byte(yb.String()), &decoded); err != nil {
+				t.Fatalf("YAML does not parse: %v\n%s", err, yb.String())
+			}
+			// Round-trip so numbers land in the same Go types on both sides.
+			normalised, err := json.Marshal(decoded)
+			if err != nil {
+				t.Fatalf("YAML did not survive a JSON round trip: %v", err)
+			}
+			var fromYAML any
+			if err := json.Unmarshal(normalised, &fromYAML); err != nil {
+				t.Fatalf("round-tripped YAML does not parse: %v", err)
+			}
+			if !reflect.DeepEqual(fromJSON, fromYAML) {
+				t.Errorf("YAML and JSON disagree.\n json: %s\n yaml: %s", jb.String(), normalised)
+			}
+		})
+	}
+}
+
+// idem's own machine-readable output does not change between two runs of the
+// same command.
+//
+// perDay and median are derived from time.Now(), so at full float64 precision
+// every one of them differs a second later - and `idem doctor -o json` piped to
+// a file, hashed, or diffed would show churn produced entirely by idem. A tool
+// that reports non-determinism cannot exhibit it; this is the same rule that
+// made internal/doctor redact the API server's minted token names.
+//
+// Rounded to the two decimals the text form has always displayed. The extra
+// precision is spurious anyway: the inputs are a rollout count and an age in
+// days.
+func TestTheDoctorContractDoesNotDriftBetweenTwoRunsASecondApart(t *testing.T) {
+	now := diagnosis()
+	later := diagnosis()
+	// A second of age changes every derived rate.
+	later.Suspects[0].Age += time.Second
+	later.Median += 1e-9
+	later.Suspects[0].PerDay += 1e-9
+
+	var a, b strings.Builder
+	if err := DoctorJSON(&a, now, "truenas", nil); err != nil {
+		t.Fatalf("DoctorJSON: %v", err)
+	}
+	if err := DoctorJSON(&b, later, "truenas", nil); err != nil {
+		t.Fatalf("DoctorJSON: %v", err)
+	}
+
+	if a.String() != b.String() {
+		t.Errorf("two runs a second apart produced different documents:\n%s\n%s", a.String(), b.String())
+	}
+	if !strings.Contains(a.String(), "0.89") {
+		t.Errorf("perDay is not rounded to the two decimals the text form shows:\n%s", a.String())
 	}
 }
