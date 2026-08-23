@@ -1851,3 +1851,72 @@ func TestTwoGeneratorElementsNeverShareAValuesFile(t *testing.T) {
 		t.Errorf("the first release's values file = %q, want its own values", body)
 	}
 }
+
+// `--help` prints the flag forms the README documents.
+//
+// Go's flag package accepts one dash and two interchangeably, so `--strict` has
+// always worked - but PrintDefaults writes a single dash, so the help said
+// `-strict` while the README's table said `--strict`. A reader of `--help`
+// would reasonably conclude long flags were not supported, and the two halves
+// of idem's own documentation disagreed about its interface.
+//
+// One dash for a single-letter name and two for the rest, which is what the
+// README table already does and what every POSIX-shaped CLI looks like.
+func TestHelpPrintsTheFlagFormsTheREADMEDocuments(t *testing.T) {
+	_, help, _ := invoke(t, "--help")
+
+	// Two-space prefixed, which only the flag LISTING produces: the examples
+	// block above it already contains `idem ./charts --strict`, so a bare
+	// Contains("--strict") passed before any of this existed.
+	for _, want := range []string{
+		"  --strict", "  --engine", "  --rounds", "  --namespace",
+		"  --new-from-merge-base", "  --dependency-update", "  --chart-version", "  --version",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help does not print %q:\n%s", want, help)
+		}
+	}
+
+	// A single-letter flag keeps one dash - `--v` is not what anyone types.
+	for _, want := range []string{"  -v\t", "  -o string", "  -f value"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help does not print %q:\n%s", want, help)
+		}
+	}
+	for _, unwanted := range []string{"--v\t", "--o string", "--f value"} {
+		if strings.Contains(help, unwanted) {
+			t.Errorf("help prints %q, and a one-letter flag takes one dash:\n%s", unwanted, help)
+		}
+	}
+
+	// The old single-dash long forms are gone, not merely joined by new ones.
+	for _, unwanted := range []string{"  -strict", "  -engine", "  -rounds"} {
+		if strings.Contains(help, unwanted) {
+			t.Errorf("help still prints the single-dash long form %q:\n%s", unwanted, help)
+		}
+	}
+
+	// Defaults survive the reimplementation, quoted for strings as the flag
+	// package quotes them.
+	for _, want := range []string{`(default "auto")`, `(default "text")`, "(default 3)"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lost the default %q:\n%s", want, help)
+		}
+	}
+}
+
+// Both dash forms keep working, whatever the help prints.
+//
+// The help is a display decision; the parser is stdlib and treats `-x` and
+// `--x` as one flag. Pinned so that a future switch to a flag library which
+// does distinguish them cannot quietly break every script that used one dash.
+func TestOneDashAndTwoAreTheSameFlag(t *testing.T) {
+	requireHelm(t)
+
+	one, _, _ := invoke(t, "testdata/churn", "-strict")
+	two, _, _ := invoke(t, "testdata/churn", "--strict")
+
+	if one != exitFinding || two != exitFinding {
+		t.Errorf("-strict exit = %d, --strict exit = %d, want %d for both", one, two, exitFinding)
+	}
+}

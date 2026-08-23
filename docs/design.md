@@ -817,6 +817,18 @@ precision two runs a second apart differ in every one of them - and `idem doctor
 or diffed would show churn that idem produced itself. Same rule that made `internal/doctor`
 redact the API server's minted token names, applied to idem's own arithmetic.
 
+**Flags are listed as `--long`, and parsed by the standard library.** Go's `flag` accepts one
+dash and two interchangeably, so `--strict` always worked - but `PrintDefaults` writes a single
+dash, so `--help` said `-strict` while the README's table said `--strict`. Two halves of idem's
+own documentation disagreeing about its interface is the defect `readme_test.go` exists to catch,
+in the one place that test could not see: it compares flag NAMES, having trimmed the dashes off
+both sides.
+
+`writeFlags` reimplements the listing - one dash for a single letter, two for a word - and
+changes nothing about parsing. Real POSIX behaviour (clustering, attached short values) needs a
+flag library, and one dependency is a stated property of this repository; the same reasoning that
+made `**` glob matching hand-implemented rather than vendoring `doublestar`.
+
 **No HTML, CSV or SARIF.** JSON covers every machine consumer and markdown covers the human one
 that matters; each further format is a rendering to maintain forever, and SARIF in particular
 buys GitHub code-scanning integration for a tool whose findings are not code defects.

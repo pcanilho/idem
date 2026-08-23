@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -455,11 +456,78 @@ examples:
 flags:
 `)
 
-	// PrintDefaults writes to the set's own output, which is stderr for the
-	// error path. Pointed at the caller's writer just for this.
-	fs.SetOutput(w)
-	fs.PrintDefaults()
-	fs.SetOutput(io.Discard)
+	writeFlags(w, fs)
+}
+
+// writeFlags lists the flags the way the README documents them.
+//
+// Reimplemented rather than delegated to flag.PrintDefaults, which writes ONE
+// dash for every name. Go's parser accepts one dash and two interchangeably, so
+// `--strict` has always worked - but the help said `-strict` while the README's
+// table said `--strict`, and a reader of `--help` would reasonably conclude
+// long flags were not supported. Two halves of idem's own documentation
+// disagreeing about its interface is the same defect readme_test.go exists to
+// catch, in the one place that test could not see.
+//
+// A flag LIBRARY would give real POSIX - clustering, attached short values -
+// but idem has one dependency and that is a stated property of the repository.
+// This is a display change and nothing else: the parser is untouched, and both
+// dash forms still work.
+//
+// The layout follows PrintDefaults deliberately, down to the four spaces before
+// the tab that align on 4- and 8-space tab stops.
+func writeFlags(w io.Writer, fs *flag.FlagSet) {
+	fs.VisitAll(func(f *flag.Flag) {
+		var b strings.Builder
+		fmt.Fprintf(&b, "  %s", dashed(f.Name))
+
+		name, usage := flag.UnquoteUsage(f)
+		if name != "" {
+			b.WriteString(" ")
+			b.WriteString(name)
+		}
+
+		// A one-letter flag with no value keeps its usage on the same line,
+		// which is what makes `-v` read as one row rather than two.
+		if b.Len() <= 4 {
+			b.WriteString("\t")
+		} else {
+			b.WriteString("\n    \t")
+		}
+		b.WriteString(strings.ReplaceAll(usage, "\n", "\n    \t"))
+
+		if def, ok := defaultOf(f); ok {
+			b.WriteString(" (default " + def + ")")
+		}
+		fmt.Fprintln(w, b.String())
+	})
+}
+
+// dashed is the POSIX-shaped spelling: one dash for a single letter, two for a
+// word. It is what the README's flag table already uses.
+func dashed(name string) string {
+	if len(name) == 1 {
+		return "-" + name
+	}
+	return "--" + name
+}
+
+// defaultOf reports a flag's default, and whether it is worth printing.
+//
+// flag.isZeroValue is unexported, so the zero values are named here instead.
+// Strings are quoted because PrintDefaults quotes them and `(default text)`
+// reads like prose rather than a value.
+func defaultOf(f *flag.Flag) (string, bool) {
+	switch f.DefValue {
+	case "", "false", "0":
+		return "", false
+	}
+	if g, ok := f.Value.(flag.Getter); ok {
+		if _, isString := g.Get().(string); isString {
+			return strconv.Quote(f.DefValue), true
+		}
+	}
+	return f.DefValue, true
 }
 
 // parseArgs parses flags that may appear before or after the chart reference.

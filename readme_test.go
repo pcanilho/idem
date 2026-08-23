@@ -211,9 +211,13 @@ func TestTheREADMEAndTheBinaryAgreeOnEveryFlag(t *testing.T) {
 	}
 }
 
-// binaryFlags is the set of flag names `idem --help` prints. PrintDefaults
-// writes each one as two spaces, a dash, the name, then either a space and a
-// type or a tab and the description.
+// binaryFlags is the set of flag names `idem --help` prints: two spaces, one
+// dash for a single letter or two for a word, the name, then either a space and
+// a type or a tab and the description.
+//
+// Both dash forms are accepted here, and the README's table is trimmed the same
+// way, so this compares NAMES - the spelling is writeFlags' business and is
+// asserted by TestHelpPrintsTheFlagFormsTheREADMEDocuments instead.
 func binaryFlags(help string) map[string]bool {
 	out := map[string]bool{}
 	for line := range strings.SplitSeq(help, "\n") {
@@ -221,6 +225,7 @@ func binaryFlags(help string) map[string]bool {
 		if !ok {
 			continue
 		}
+		rest = strings.TrimPrefix(rest, "-")
 		// A tab for a boolean flag (`-v\texpand every…`), a space for one
 		// that takes a value (`-o string`). Cut on whichever comes first.
 		name := strings.TrimRight(rest, " \t")

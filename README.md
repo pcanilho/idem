@@ -335,7 +335,9 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 | `--helm` | which helm binary to render with |
 | `--version` | print idem's version |
 
-Flags may come before or after the chart path.
+Flags may come before or after the chart path. One dash or two works for every flag — `--strict`
+and `-strict` are the same thing — because `idem` parses with Go's standard library rather than
+taking a second dependency for it. There is no short-flag clustering: `-vs` is not `-v -s`.
 
 `-o json` is the machine-readable contract, so you can gate on it however you like. `-o yaml` is
 the same document, for when the next thing in the pipe reads YAML:
