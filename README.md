@@ -75,7 +75,7 @@ The objects where this bug lives are the ones ArgoCD will not show you.
 
 ## Install
 
-Pre-1.0 and unreleased, so build it from source. Needs **Go 1.26** or newer:
+Pre-1.0 and unreleased, so build it from source. Needs **Go 1.27** or newer:
 
 ```sh
 go install github.com/pcanilho/idem@latest

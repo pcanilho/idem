@@ -533,8 +533,7 @@ func parse(root string, body []byte, file string) ([]Rule, []Destination, []Valu
 			//
 			// A syntax error does end the stream: after one there is no
 			// dependable document boundary to resume from.
-			var typeErr *yaml.TypeError
-			if errors.As(err, &typeErr) {
+			if _, ok := errors.AsType[*yaml.TypeError](err); ok {
 				continue
 			}
 			break

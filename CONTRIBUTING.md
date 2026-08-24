@@ -11,7 +11,7 @@ go build ./...
 go test ./...
 ```
 
-You need **Go 1.26** and **helm** on your `PATH`. Tests that need helm skip themselves when it is
+You need **Go 1.27** and **helm** on your `PATH`. Tests that need helm skip themselves when it is
 absent, so a green run without it proves less than you might think — install helm before
 trusting a local pass. Tests that need a cluster skip themselves too.
 
