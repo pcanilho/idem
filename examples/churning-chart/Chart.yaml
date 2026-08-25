@@ -1,0 +1,4 @@
+apiVersion: v2
+name: churning-chart
+description: A chart that cannot converge under ArgoCD, for trying idem out.
+version: 0.1.0

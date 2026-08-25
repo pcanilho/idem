@@ -1,0 +1,319 @@
+name: idem
+description: Check whether Helm charts render consistently under the GitOps engine you run
+author: pcanilho
+
+branding:
+  icon: repeat
+  color: blue
+
+inputs:
+  args:
+    description: |
+      Arguments passed to idem. The output format is supplied separately via
+      `output`, so do not pass -o here - the action refuses it rather than
+      silently overriding what you asked for.
+
+      Split on whitespace, so quoting has no effect: an argument containing a
+      space cannot be expressed through this interface. Globs expand on the
+      runner, relative to `working-directory`.
+    required: false
+    default: "."
+
+  version:
+    description: |
+      Release to install, e.g. "v0.1.0". Defaults to the ref you used the
+      action AT, so `uses: pcanilho/idem@v1` gets v1's binary and a new idem
+      release cannot change your CI with no change to your workflow.
+
+      A ref that names no release - a branch, a commit SHA, or a local
+      `uses: ./` - has no version to derive from, so it resolves "latest" and
+      says so in the log. If you pin this action to a SHA, set `version:` too.
+
+      "latest" resolves the newest release at run time instead, which is
+      convenient and not reproducible.
+    required: false
+    default: ""
+
+  output:
+    description: |
+      github    inline annotations on the diff (default)
+      text      human-readable, for reading in the log
+      json      machine-readable
+      yaml      the same document as json, for a yq pipeline
+      markdown  shaped for `gh pr comment --body-file`
+
+      `idem diff` and `idem doctor` render only text, json and yaml, so pass
+      one of those in `args:` with a matching `output:`.
+    required: false
+    default: github
+
+  report-file:
+    description: |
+      Also write idem's report here, and expose the path as the `report-file`
+      output. Workspace-relative: `hashFiles()` sees nothing outside
+      GITHUB_WORKSPACE, so an absolute path would make the usual
+      `if: hashFiles(...) != ''` guard permanently false.
+    required: false
+    default: ""
+
+  working-directory:
+    description: Directory to run in.
+    required: false
+    default: "."
+
+  helm-version:
+    description: |
+      Helm to install and render with. idem shells out to whatever `helm` is on
+      PATH, and results can depend on which one: ArgoCD 3.4 shipped Helm 3.19
+      and 3.5 ships Helm 4.2. Pin this to whatever your ArgoCD runs, or leave
+      empty to use the helm already on the runner.
+    required: false
+    default: ""
+
+# No finding COUNTS here, deliberately.
+#
+# They are what people ask for first, and idem cannot produce them alongside a
+# human-readable report: `-o` takes exactly one format, there is no
+# --output-file, and a count would mean rendering every chart a second time -
+# which is the expensive half of the run. A number this action inferred from an
+# exit code would be a guess, and guessing a verdict is the one thing idem does
+# not do.
+outputs:
+  exit-code:
+    description: |
+      idem's exit code: 0 ran clean, 1 findings with --strict, 2 fatal. Set
+      `continue-on-error: true` on the step to read it rather than be failed by
+      it.
+    value: ${{ steps.run.outputs.exit-code }}
+
+  report-file:
+    description: |
+      Workspace-relative path the report was written to, or empty when
+      `report-file` was not set.
+    value: ${{ steps.run.outputs.report-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install helm
+      if: inputs.helm-version != ''
+      # Pinned to a SHA, not a tag, because this line runs in the CALLER's
+      # workflow: someone who has SHA-pinned idem and set an actions allowlist
+      # still executes whatever `v5` resolves to at run time, and their
+      # Scorecard drops on a dependency they did not choose.
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      with:
+        version: ${{ inputs.helm-version }}
+
+    - name: Install idem
+      shell: bash
+      # GITHUB_ACTION_REF is empty inside a composite step's environment; it is
+      # only correct read as an expression, which is why it arrives through
+      # `env:` like everything else here.
+      env:
+        VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+
+        # uname -s is validated as well as uname -m. Git Bash on a Windows
+        # runner reports MINGW64_NT-10.0-…, which composes an asset name no
+        # release has, and the failure surfaced further down as
+        # "checksum mismatch" - a false accusation about a file that was never
+        # downloaded.
+        os=$(uname -s | tr '[:upper:]' '[:lower:]')
+        case "$os" in
+          linux|darwin) ;;
+          *) echo "::error::idem has no release build for $(uname -s); linux and darwin only"; exit 1 ;;
+        esac
+        case "$(uname -m)" in
+          x86_64|amd64) arch=amd64 ;;
+          arm64|aarch64) arch=arm64 ;;
+          *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+        esac
+
+        # curl, with wget as the fallback. This used `gh`, which is present on
+        # the hosted images and absent in a `container:` job and on most
+        # self-hosted runners - so `helm-version:` worked in a container and
+        # idem itself did not.
+        if command -v curl >/dev/null; then
+          fetch()   { curl -fsSL --retry 3 --retry-all-errors -o "$1" "$2"; }
+          resolve() { curl -fsSLI -o /dev/null -w '%{url_effective}' --retry 3 --retry-all-errors "$1"; }
+        elif command -v wget >/dev/null; then
+          fetch()   { wget -q -O "$1" "$2"; }
+          resolve() { echo ""; }
+        else
+          echo "::error::neither curl nor wget is available to download idem"
+          exit 1
+        fi
+
+        # An empty `version:` means "the ref this action was used at". That is
+        # what lets `uses: pcanilho/idem@v1` install v1's binary with no string
+        # in this file to bump at release time - the pin it replaced could not
+        # be got right in either order: bumping it before the tag failed its own
+        # test, and tagging first shipped the stale value.
+        if [ -z "$VERSION" ]; then
+          case "$ACTION_REF" in
+            v[0-9]*) VERSION=$ACTION_REF ;;
+            *)
+              VERSION=latest
+              echo "::notice::idem was used at \"${ACTION_REF:-a local path}\", which names no release -- resolving latest; set \`version:\` to pin it"
+              ;;
+          esac
+        fi
+
+        if [ "$VERSION" = latest ]; then
+          # The releases/latest page redirects to the tag, so resolving it costs
+          # no API call and no token. `gh` and api.github.com both spend the
+          # CALLING repository's 1,000/hr REST budget, which a chart matrix can
+          # get through quickly for no reason.
+          location=$(resolve "https://github.com/pcanilho/idem/releases/latest" || true)
+          VERSION=${location##*/}
+          if [ -z "$VERSION" ] || [ "$VERSION" = latest ]; then
+            echo "::error::could not resolve the newest idem release; set \`version:\` to a tag"
+            exit 1
+          fi
+          echo "::notice::resolved idem latest to $VERSION -- pin \`version:\` for reproducible runs"
+        fi
+
+        # Not cached, on purpose. The archive is ~2.3 MB from the release CDN;
+        # an actions/cache round trip costs a restore and a save step, a key
+        # that has to be right across os/arch/version, and a slice of the
+        # caller's 10 GB budget - to make the common case slower.
+        mkdir -p "$RUNNER_TEMP/idem"
+        archive="idem_${os}_${arch}.tar.gz"
+        base="https://github.com/pcanilho/idem/releases/download/$VERSION"
+
+        fetch "$RUNNER_TEMP/idem/$archive" "$base/$archive" || {
+          echo "::error::release $VERSION has no asset $archive, or it could not be downloaded"
+          exit 1
+        }
+        fetch "$RUNNER_TEMP/idem/checksums.txt" "$base/checksums.txt" || {
+          echo "::error::release $VERSION has no checksums.txt, or it could not be downloaded"
+          exit 1
+        }
+
+        # Integrity, not authenticity - and worth being clear about which.
+        #
+        # checksums.txt ships in the SAME release as the archive, so anyone able
+        # to replace one could replace both; this is not tamper protection. What
+        # it does catch is a truncated or corrupted download, which otherwise
+        # surfaces as `tar: unexpected EOF` or a binary that dies on first run.
+        #
+        # Releases carry build provenance, so authenticity is available to
+        # anyone who wants it:
+        #   gh attestation verify idem_linux_amd64.tar.gz --repo pcanilho/idem
+        # It is not done here because it would put `gh` back on the critical
+        # path, which is the dependency this step just removed.
+        #
+        # -o pipefail is load-bearing: `sha256sum -c -` on EMPTY stdin exits 0
+        # on both GNU and Darwin, so a grep that matches nothing is caught by
+        # the pipeline status and by nothing else.
+        (
+          cd "$RUNNER_TEMP/idem"
+          if command -v sha256sum >/dev/null; then
+            grep " ${archive}\$" checksums.txt | sha256sum -c -
+          else
+            grep " ${archive}\$" checksums.txt | shasum -a 256 -c -
+          fi
+        ) || { echo "::error::checksum mismatch for $archive from $VERSION"; exit 1; }
+
+        tar -xzf "$RUNNER_TEMP/idem/$archive" -C "$RUNNER_TEMP/idem"
+        echo "$RUNNER_TEMP/idem" >> "$GITHUB_PATH"
+
+    - name: Run idem
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # Through env, not `${{ }}` in the script.
+      #
+      # A ${{ }} expression is substituted into the script TEXT before bash
+      # parses it, so `args` containing $(...) or a backtick executes on the
+      # runner. Wiring args from a PR title or a branch name - which is an
+      # ordinary thing to do - would then be arbitrary command execution in the
+      # caller's repository. Through env the value is data: bash expands $ARGS
+      # and does not re-parse the result, so it word-splits and pathname-expands
+      # into arguments and nothing more.
+      #
+      # ARGS is expanded unquoted into the positional parameters below,
+      # because it IS a list of arguments. OUTPUT is quoted, being one value.
+      env:
+        ARGS: ${{ inputs.args }}
+        OUTPUT: ${{ inputs.output }}
+        REPORT_FILE: ${{ inputs.report-file }}
+      run: |
+        set -uo pipefail
+
+        # Word-split ONCE, into the positional parameters, so everything below
+        # asks about arguments rather than about a string. Unquoted on purpose:
+        # this is the split that turns `args:` into an argument list, and it
+        # pathname-expands too, which is why a glob in `args:` works.
+        set -- $ARGS
+
+        # `idem -o github` with no operands prints help and exits 0, so an
+        # `args:` wired from a step that produced nothing is a GREEN run that
+        # checked nothing - a gate the user believes is enforcing and is not.
+        # .pre-commit-hooks.yaml pins `entry: idem .` against the same failure.
+        if [ $# -eq 0 ]; then
+          echo "::error::args is empty; idem with no chart reference prints help and exits 0"
+          exit 1
+        fi
+
+        # Passing -o twice means the last one wins, so a user who puts it in
+        # `args:` loses their choice without being told. Refuse instead. Checked
+        # per argument rather than against the raw string, so a chart path that
+        # happens to contain " -o " is not mistaken for the flag.
+        for arg in "$@"; do
+          case "$arg" in
+            -o|-o=*|-output|-output=*|--output|--output=*)
+              echo "::error::pass the output format through \`output:\`, not \`args:\`"
+              exit 1 ;;
+          esac
+        done
+
+        # Resolved against GITHUB_WORKSPACE rather than the step's
+        # working-directory, so the path this reports back is the one
+        # hashFiles() wants no matter where idem ran.
+        if [ -n "$REPORT_FILE" ]; then
+          case "$REPORT_FILE" in
+            /*|*..*)
+              echo "::error::report-file must be workspace-relative; hashFiles() cannot see anything else"
+              exit 1 ;;
+          esac
+          report="$GITHUB_WORKSPACE/$REPORT_FILE"
+          mkdir -p "$(dirname "$report")"
+        else
+          report="$RUNNER_TEMP/idem-report"
+        fi
+
+        # `shell: bash` runs `bash --noprofile --norc -eo pipefail {0}`, and the
+        # `set -uo pipefail` above does NOT clear that -e. Written as
+        # `idem ...; status=$?` the shell exits at the idem line on any non-zero
+        # code and everything below is unreachable - which is how the exit-2
+        # annotation shipped, unable to ever print. `|| status=$?` is
+        # errexit-safe, because errexit is suspended in the left operand of ||.
+        status=0
+        idem "$@" -o "$OUTPUT" >"$report" 2>"$RUNNER_TEMP/idem.err" || status=$?
+
+        cat "$report"
+        cat "$RUNNER_TEMP/idem.err" >&2
+
+        {
+          echo "exit-code=$status"
+          echo "report-file=$REPORT_FILE"
+        } >> "$GITHUB_OUTPUT"
+
+        # 0 = ran clean, 1 = findings with --strict, 2 = idem could not do its
+        # job. Only 2 is a failure of idem itself; 1 is a deliberate gate.
+        #
+        # The cause comes from idem's own stderr rather than being asserted
+        # here. Exit 2 covers an unrenderable chart, but equally a typo in
+        # `args:`, a missing helm, `-o` a verb does not render, and
+        # `--new-from-merge-base` against history a default checkout does not
+        # have - and annotating every one of those as "could not render one or
+        # more charts" told people their chart was broken when it was fine.
+        if [ "$status" -eq 2 ]; then
+          reason=$(tr '\n' ' ' < "$RUNNER_TEMP/idem.err" | sed 's/  */ /g; s/ *$//' | cut -c1-400)
+          echo "::error::idem exited 2: ${reason:-no diagnostic on stderr}"
+        fi
+        exit "$status"

@@ -1,0 +1,150 @@
+# Runs on every pull request.
+#
+# helm is installed even though most tests would pass without it: idem's suite
+# SKIPS everything that needs helm when helm is absent, so a green run on a
+# runner without it would prove very little about the part that matters.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # Formatting, vet and the modernizers do not depend on which helm is
+  # installed, so they run once rather than once per matrix cell.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Modernizers
+        # `go fix` is part of this repository's workflow, so CI holds it to a
+        # fixed point rather than letting the next person discover a diff.
+        run: |
+          go fix ./...
+          if ! git diff --quiet; then
+            echo "::error::go fix would change these files -- run 'go fix ./...' and commit:"
+            git --no-pager diff --stat
+            exit 1
+          fi
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, because idem is a developer tool people run locally and a CI
+        # tool people run on Linux - and path handling has differed between
+        # them before.
+        os: [ubuntu-latest, macos-latest]
+
+        # BOTH helm lines, because idem's whole thesis is that the renderer is
+        # an input: the docs state that ArgoCD 3.4 ships Helm 3.19 and 3.5
+        # ships Helm 4.2, and idem tells users to pin `--helm` to whichever
+        # their ArgoCD runs. Until this matrix existed, every claim the docs
+        # made about the 3.x line was untested - CI installed whatever
+        # azure/setup-helm called latest, so the tool that exists to catch
+        # non-determinism had a non-deterministic renderer in its own pipeline.
+        #
+        # Pinned exactly, which is the same advice idem gives its users:
+        # `version:` takes "latest or any semantic version string", so there is
+        # no way to say "newest 3.x" - and a floating version would mean a helm
+        # release could turn this build red with no change here. Bump these
+        # deliberately when a new line ships.
+        helm: ["v3.19.2", "v4.2.4"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install helm ${{ matrix.helm }}
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ matrix.helm }}
+
+      - name: Test
+        run: go test ./... -race
+
+  # Runs action.yml itself, which nothing else does.
+  #
+  # The Go suite covers the binary and hooks_test.go covers
+  # .pre-commit-hooks.yaml, but the action was never executed by anything - and
+  # it is the channel idem is most likely to be adopted through. What is untested
+  # is not idem, it is the shell in the action: uname mapping to a release asset
+  # name, `gh release download` matching a pattern, tar extraction, and whether
+  # $GITHUB_PATH actually puts the binary on PATH for the NEXT step.
+  #
+  # It installs the last published release rather than this commit's build, so
+  # this proves the action's plumbing, not the code under review. That is the
+  # right trade: the plumbing is the part with no other coverage.
+  #
+  # `uses: ./` supplies no github.action_ref, so the action resolves `latest` -
+  # which is what "the last published release" means here.
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A chart with nothing wrong must exit 0. This is also the step that
+      # proves $GITHUB_PATH worked, since `idem` has to resolve on PATH.
+      - name: A clean chart passes
+        uses: ./
+        with:
+          args: ./examples/stable-chart
+          output: text
+
+      # And a churning one with --strict must exit 1. `continue-on-error` so the
+      # expected failure does not fail the job; the outcome is asserted below,
+      # which also catches the case where it stops failing.
+      # Running the action a SECOND time in one job is itself part of what this
+      # asserts. RUNNER_TEMP is per-job and the install step used to refuse to
+      # overwrite what the first run had already downloaded, so this step died
+      # during install and the outcome check below passed for the wrong reason.
+      - name: A churning chart fails under --strict
+        id: churn
+        uses: ./
+        continue-on-error: true
+        with:
+          args: ./examples/churning-chart --strict
+          output: markdown
+          report-file: idem.md
+
+      - name: --strict must have failed, and said so through the outputs
+        run: |
+          if [ "${{ steps.churn.outcome }}" != "failure" ]; then
+            echo "::error::idem --strict exited ${{ steps.churn.outcome }} on a churning chart, want failure"
+            exit 1
+          fi
+
+          # The outputs are the reason a caller does not need `outcome` at all,
+          # so they have to survive the non-zero exit they exist to describe.
+          if [ "${{ steps.churn.outputs.exit-code }}" != "1" ]; then
+            echo "::error::exit-code output = '${{ steps.churn.outputs.exit-code }}', want 1"
+            exit 1
+          fi
+          if [ ! -s idem.md ]; then
+            echo "::error::report-file wrote nothing to idem.md, so the documented gh pr comment guard could never fire"
+            exit 1
+          fi

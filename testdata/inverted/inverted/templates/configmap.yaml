@@ -1,0 +1,23 @@
+{{/*
+The mirror image of `guarded`, and the case that used to report as silence.
+
+Under `helm template` the lookup returns nothing, the else branch renders a
+pinned value, and the two rounds are byte-identical -- so ArgoCD's repo-server
+is genuinely stable here. Under a real install the lookup succeeds and
+randAlphaNum fires on every render, which is what Flux and Helm actually do.
+
+Contrived, deliberately: what it reproduces is not the idiom but the shape --
+a chart whose churn only exists on the condition idem can measure ONLY with
+--context.
+*/}}
+{{- $ns := lookup "v1" "Namespace" "" "kube-system" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-stamp
+data:
+{{- if $ns }}
+  session: {{ randAlphaNum 16 | quote }}
+{{- else }}
+  session: "pinned"
+{{- end }}

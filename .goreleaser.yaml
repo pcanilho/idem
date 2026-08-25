@@ -1,0 +1,93 @@
+# Release configuration.
+#
+# The asset names here are load-bearing: action.yml downloads
+# `idem_${os}_${arch}.tar.gz` and untars it straight onto PATH, so the archive
+# is named for the platform and holds the binary at its root. Changing either
+# breaks the action silently, on someone else's CI.
+version: 2
+
+project_name: idem
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: idem
+    # The module root, so `go install github.com/pcanilho/idem@latest` is the
+    # whole command. A single-binary module has no reason to bury it.
+    main: .
+    binary: idem
+    env:
+      # idem shells out rather than linking anything, so a static binary costs
+      # nothing and runs on any base image a runner happens to use.
+      - CGO_ENABLED=0
+    goos:
+      # Matching action.yml, which detects the platform with uname.
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      # main.version is read by cliVersion(), which otherwise falls back to
+      # the module's build info. Stamping it is what makes `idem --version`
+      # report a release rather than a pseudo-version.
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: idem
+    ids: [idem]
+    formats: [tar.gz]
+    # Exactly what action.yml asks for.
+    name_template: "idem_{{ .Os }}_{{ .Arch }}"
+    # The action untars into a directory it puts on PATH, so the binary must
+    # be at the archive root.
+    wrap_in_directory: false
+    files:
+      - LICENSE
+      - README.md
+      - docs/design.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^chore:"
+      - "^docs:"
+      - "^test:"
+
+# `brews` was deprecated in goreleaser v2; casks are how CLI binaries are
+# published now.
+homebrew_casks:
+  - name: idem
+    ids: [idem]
+    repository:
+      # The tap is pcanilho/tap, so the repository is homebrew-tap. Singular:
+      # `brew install pcanilho/taps/idem` resolves to a repository that does
+      # not exist, which fails only when someone tries to install.
+      owner: pcanilho
+      name: homebrew-tap
+      # The default GITHUB_TOKEN cannot write to another repository, so the
+      # tap push needs its own. Without this the release succeeds and the
+      # formula silently never updates.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/pcanilho/idem
+    description: Check whether Helm charts render consistently under the GitOps engine you run
+    license: Apache-2.0
+    # idem renders by shelling out to helm; without it there is nothing to run.
+    dependencies:
+      - formula: helm
+    caveats: |
+      idem renders with whichever helm is on your PATH, and prints which one it used.
+
+      `idem doctor` and `--context` additionally need kubectl, which is not a
+      hard dependency because everything else works with no cluster at all.
