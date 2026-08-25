@@ -6,7 +6,7 @@
 
 **Some Helm charts never finish deploying, and your GitOps engine will not tell you which.**
 
-`idem` renders a chart more than once, compares the results, and names the objects that will
+`idem` checks that your Helm chart is `idempotent` by rendering it more than once, comparing the results, and naming the objects that will
 never settle under ArgoCD, under Flux, or under plain Helm, with the config that stops it.
 
 ```console
