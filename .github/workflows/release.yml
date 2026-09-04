@@ -71,6 +71,13 @@ jobs:
           fi
           echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
 
+      # goreleaser-action verifies the goreleaser binary it downloads, but only
+      # when cosign is on PATH. Without it the release log says "cosign not
+      # found in PATH, skipping signature verification" and carries on
+      # unverified, which is a supply-chain check that silently does nothing.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       - name: Release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:

@@ -130,9 +130,14 @@ func TestTheReleaseNotesReachGoreleaser(t *testing.T) {
 	}
 }
 
-func TestTheChangelogIsNotGeneratedTwice(t *testing.T) {
-	// Two sources of release notes is one too many: whichever loses is dead
-	// config that reads as if it were live.
+func TestTheChangelogPipeStaysEnabled(t *testing.T) {
+	// The trap that shipped v0.1.1 with an empty body. goreleaser reads
+	// --release-notes inside the changelog pipe, so `disable: true` stops it
+	// reading the file as well as generating one, and the release publishes
+	// with nothing in it. The run stays green: goreleaser does not warn, the
+	// notes were extracted correctly, and no other check looks at a release
+	// body. Proven by running goreleaser both ways - "generating changelog"
+	// appears only when the pipe is enabled.
 	body, err := os.ReadFile(".goreleaser.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +150,24 @@ func TestTheChangelogIsNotGeneratedTwice(t *testing.T) {
 	if err := yaml.Unmarshal(body, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Changelog.Disable {
-		t.Error("goreleaser still generates a changelog, but release notes come from CHANGELOG.md")
+	if cfg.Changelog.Disable {
+		t.Error("changelog is disabled, which also stops goreleaser reading --release-notes: the release would publish empty notes")
+	}
+}
+
+func TestTheReleaseWorkflowPinsItsThirdPartyActions(t *testing.T) {
+	// Same rule action.yml is held to. A tag is a moving target, and the
+	// release workflow is the one that signs and publishes.
+	w := loadWorkflow(t, "release.yml")
+	for _, job := range w.Jobs {
+		for _, s := range job.Steps {
+			if s.Uses == "" || strings.HasPrefix(s.Uses, "./") {
+				continue
+			}
+			_, ref, ok := strings.Cut(s.Uses, "@")
+			if !ok || len(ref) != 40 {
+				t.Errorf("step %q uses %q, want a 40-character commit SHA", s.Name, s.Uses)
+			}
+		}
 	}
 }

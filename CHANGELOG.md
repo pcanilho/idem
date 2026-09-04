@@ -9,6 +9,36 @@ Release notes are taken from this file: `.github/workflows/release.yml` extracts
 the section matching the tag and hands it to goreleaser, so a tag with no
 section here fails the release rather than publishing generated commit subjects.
 
+## [Unreleased]
+
+### Fixed
+
+- **v0.1.1 published with empty release notes.** `.goreleaser.yaml` set
+  `changelog: disable: true`, reasoning that a generated changelog would be a
+  second source of notes competing with this file. But goreleaser reads
+  `--release-notes` *inside* the changelog pipe, so disabling it stopped
+  goreleaser reading the notes file as well as generating one, and the release
+  body came out empty.
+
+  Nothing failed. The extraction step wrote 62 correct lines, goreleaser exited
+  0, the attestation ran, and every check was green: a release body is the one
+  artifact nothing else looks at. Confirmed by running goreleaser both ways -
+  "generating changelog" appears in the log only when the pipe is enabled.
+
+  The pipe is enabled again. `--release-notes` still wins over anything it would
+  generate, so there was never a second source to remove. A test now fails if
+  the pipe is disabled. The published v0.1.1 notes were filled in afterwards;
+  immutable releases lock the tag and the assets, not the body.
+
+### Changed
+
+- The release workflow installs cosign before goreleaser. `goreleaser-action`
+  verifies the goreleaser binary it downloads only when cosign is on `PATH`;
+  without it the run logged "cosign not found in PATH, skipping signature
+  verification" and carried on, which is a supply-chain check that silently did
+  nothing. Third-party actions in the release workflow are now held to a commit
+  SHA by test, as `action.yml`'s already were.
+
 ## [0.1.1] - 2026-09-04
 
 One bug fix, and the one behaviour change it implies. `idem` now weighs the
@@ -69,8 +99,8 @@ values you supply yourself against the ones it could not resolve, so the
 - `docs/limits.md` now says how to clear the caveat, next to the limit it
   qualifies.
 - This file, and `.github/workflows/release.yml` now builds release notes from
-  it. The generated changelog in `.goreleaser.yaml` is disabled rather than left
-  in place, so there is one source of release notes and not two.
+  it: the section matching the tag is extracted and passed to goreleaser with
+  `--release-notes`.
 
 ## [0.1.0] - 2026-08-25
 
@@ -113,5 +143,6 @@ used on every run.
 - `gopkg.in/yaml.v3` v3.0.1
 
 [#4]: https://github.com/pcanilho/idem/issues/4
+[Unreleased]: https://github.com/pcanilho/idem/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/pcanilho/idem/releases/tag/v0.1.1
 [0.1.0]: https://github.com/pcanilho/idem/releases/tag/v0.1.0

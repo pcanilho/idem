@@ -57,12 +57,15 @@ snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 
 changelog:
-  # Release notes come from CHANGELOG.md, extracted by
-  # .github/workflows/release.yml and passed with --release-notes. A generated
-  # changelog would be a second source of the same thing, and the one that
-  # loses is dead config that still reads as if it were live. Disabled rather
-  # than deleted, because the key is where a reader looks to find out which.
-  disable: true
+  # MUST stay enabled, however dead the generated changelog looks. goreleaser
+  # reads `--release-notes` INSIDE this pipe, so `disable: true` does not merely
+  # stop it generating notes - it stops it reading the file too, and the release
+  # publishes with an EMPTY body. v0.1.1 shipped that way and the run was green
+  # throughout: nothing in goreleaser warns, and the notes are the one artifact
+  # no other check looks at. What this would generate never reaches a release,
+  # because the file .github/workflows/release.yml passes always wins.
+  use: github
+  sort: asc
 
 # `brews` was deprecated in goreleaser v2; casks are how CLI binaries are
 # published now.
