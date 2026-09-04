@@ -6,8 +6,10 @@
 
 **Some Helm charts never finish deploying, and your GitOps engine will not tell you which.**
 
-`idem` checks that your Helm chart is `idempotent` by rendering it more than once, comparing the results, and naming the objects that will
-never settle under ArgoCD, under Flux, or under plain Helm, with the config that stops it.
+`idem` is short for **idempotent**, and that is the whole test: it checks whether
+your Helm charts are idempotent under the GitOps engine you run, by rendering a chart more than
+once, comparing the results, and naming the objects that will never settle under ArgoCD, under
+Flux, or under plain Helm, with the config that stops it.
 
 ```console
 $ idem ./examples/churning-chart

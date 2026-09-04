@@ -1060,6 +1060,303 @@ spec:
 	}
 }
 
+func TestAValueSuppliedWithSetIsNoLongerMissing(t *testing.T) {
+	// The whole point of the caveat is "these findings are about a different
+	// release than the deployed one". Supplying the value the generator would
+	// have supplied is exactly how a reader clears it, so a warning that
+	// survives being answered has stopped being a signal.
+	opt := options{setValues: multiFlag{"cluster=verify-render"}}
+
+	if got := stillMissing([]string{"cluster"}, opt); len(got) != 0 {
+		t.Errorf("stillMissing() = %v, want nothing - the user supplied it", got)
+	}
+}
+
+func TestAValueSuppliedInAValuesFileIsNoLongerMissing(t *testing.T) {
+	// A dotted parameter name addresses a nested key, so the file has to be
+	// walked rather than string-matched: `webRoute.enabled` is two segments.
+	dir := t.TempDir()
+	file := filepath.Join(dir, "values.yaml")
+	if err := os.WriteFile(file, []byte("webRoute:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := options{valuesFiles: multiFlag{file}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 0 {
+		t.Errorf("stillMissing() = %v, want nothing - the file supplies it", got)
+	}
+}
+
+func TestAValuesFileWithoutTheKeyDoesNotSupplyIt(t *testing.T) {
+	// Presence is the whole question. Passing a file is not an answer; the key
+	// being in it is - and reading an absent key as an empty one would clear
+	// every caveat the moment any -f appeared.
+	dir := t.TempDir()
+	file := filepath.Join(dir, "values.yaml")
+	if err := os.WriteFile(file, []byte("image:\n  tag: v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := options{valuesFiles: multiFlag{file}}
+
+	if got := stillMissing([]string{"cluster"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want cluster kept - the file does not define it", got)
+	}
+}
+
+func TestAValueTheUserDidNotSupplyIsStillMissing(t *testing.T) {
+	// Answering one of two is not answering both, and the caveat is still true
+	// of the one left. Crediting it would be worse than never clearing at all.
+	opt := options{setValues: multiFlag{"cluster=verify-render"}}
+
+	got := stillMissing([]string{"cluster", "webRoute.enabled"}, opt)
+
+	if len(got) != 1 || got[0] != "webRoute.enabled" {
+		t.Errorf("stillMissing() = %v, want only webRoute.enabled left", got)
+	}
+}
+
+func TestASourceIdemCannotReachIsNeverClearedByAFlag(t *testing.T) {
+	// Unresolved mixes five shapes and only two of them are values keys. A
+	// cluster Secret, another repository's values file and a templated path
+	// name a SOURCE, not a key, so no -f or --set can answer them - and
+	// crediting one would hide a release idem genuinely did not render.
+	// Each --set below assigns the entry's own text as a key, so a run that
+	// compared entries to supplied keys without first asking whether the entry
+	// IS a key would clear every one of them. Contrived on purpose: the point
+	// is that the shape decides, not that anyone types this.
+	entries := []string{
+		"valuesFrom Secret/db-creds",
+		"$values (env/prod.yaml, from another source)",
+		"envs/{{ .name }}/values.yaml",
+		"{{ .Release.Name }}",
+	}
+	var sets multiFlag
+	for _, e := range entries {
+		sets = append(sets, e+"=supplied")
+	}
+	opt := options{setValues: sets}
+
+	if got := stillMissing(entries, opt); len(got) != len(entries) {
+		t.Errorf("stillMissing() = %v, want all %d kept - none is a values key", got, len(entries))
+	}
+}
+
+func TestOneSetArgumentCanCarrySeveralAssignments(t *testing.T) {
+	// helm reads `--set a=1,b=2` as two assignments, and idem hands the string
+	// to helm verbatim - so reading it as one key would leave the second
+	// reported missing while helm had in fact been given it.
+	opt := options{setValues: multiFlag{"cluster=verify-render,webRoute.enabled=false"}}
+
+	if got := stillMissing([]string{"cluster", "webRoute.enabled"}, opt); len(got) != 0 {
+		t.Errorf("stillMissing() = %v, want nothing - both were assigned", got)
+	}
+}
+
+func TestASetKeyEscapingADotNamesADifferentKey(t *testing.T) {
+	// helm's escape: `a\.b` assigns the single key "a.b", which is NOT the
+	// nested key an ArgoCD parameter named `a.b` addresses. Reading the two as
+	// the same would clear the caveat while helm rendered something else -
+	// exactly the silent wrongness idem exists to catch.
+	opt := options{setValues: multiFlag{`webRoute\.enabled=false`}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want it kept - the escaped key is another key", got)
+	}
+}
+
+func TestAnEscapedCommaDoesNotInventASuppliedKey(t *testing.T) {
+	// helm reads `a\,b` as one value carrying a comma, so this assigns
+	// nodeSelector alone. Splitting on every comma would read a second
+	// assignment out of the tail and credit the reader for `tier`, a key
+	// nobody supplied - clearing a caveat that is still true.
+	opt := options{setValues: multiFlag{`nodeSelector=disk\,tier=fast`}}
+
+	if got := stillMissing([]string{"tier"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want tier kept - it was never assigned", got)
+	}
+}
+
+func TestASetOfAListElementSuppliesTheKeyItIndexes(t *testing.T) {
+	// `servers[0].port` addresses a position inside `servers`, not a segment
+	// of its own, so it does supply `servers` - and helm builds the list to
+	// hold it.
+	opt := options{setValues: multiFlag{"servers[0].port=80"}}
+
+	if got := stillMissing([]string{"servers"}, opt); len(got) != 0 {
+		t.Errorf("stillMissing() = %v, want nothing - the list was assigned", got)
+	}
+}
+
+func TestALaterValuesFileReplacingAMapDoesNotSupplyItsChild(t *testing.T) {
+	// helm coalesces a later map INTO an earlier one, but a later scalar
+	// REPLACES the whole subtree - so once webRoute is false there is nowhere
+	// for webRoute.enabled to live, however plainly the first file defined it.
+	// Asking each source on its own would credit a key helm never received.
+	dir := t.TempDir()
+	base, over := filepath.Join(dir, "base.yaml"), filepath.Join(dir, "over.yaml")
+	if err := os.WriteFile(base, []byte("webRoute:\n  enabled: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(over, []byte("webRoute: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := options{valuesFiles: multiFlag{base, over}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want it kept - the later file replaced the map", got)
+	}
+}
+
+func TestALaterValuesFileRestoringAMapSuppliesItsChild(t *testing.T) {
+	// The same rule read the other way round, which is what makes it a rule
+	// about order rather than a veto: the map arrives last, so the key lives.
+	dir := t.TempDir()
+	base, over := filepath.Join(dir, "base.yaml"), filepath.Join(dir, "over.yaml")
+	if err := os.WriteFile(base, []byte("webRoute: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(over, []byte("webRoute:\n  enabled: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := options{valuesFiles: multiFlag{base, over}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 0 {
+		t.Errorf("stillMissing() = %v, want nothing - the later file defines it", got)
+	}
+}
+
+func TestASetReplacingAValuesFileMapDoesNotSupplyItsChild(t *testing.T) {
+	// helm applies every --set after every -f, so the scalar wins whichever
+	// order they were typed in - and idem must weigh them in helm's order,
+	// not the reader's.
+	dir := t.TempDir()
+	file := filepath.Join(dir, "values.yaml")
+	if err := os.WriteFile(file, []byte("webRoute:\n  enabled: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opt := options{valuesFiles: multiFlag{file}, setValues: multiFlag{"webRoute=false"}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want it kept - --set replaced the map", got)
+	}
+}
+
+func TestASetOfALongerNameDoesNotSupplyTheShorterOne(t *testing.T) {
+	// `servers` and `server` are two keys, not one with a suffix. Matching on
+	// a bare prefix would credit the reader for a value they never gave.
+	opt := options{setValues: multiFlag{"servers=1"}}
+
+	if got := stillMissing([]string{"server"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want server kept - servers is another key", got)
+	}
+}
+
+func TestASetOfAParentKeyDoesNotSupplyItsChild(t *testing.T) {
+	// Setting webRoute to a scalar says nothing about webRoute.enabled: helm
+	// does not build the child, so the generator's value for it is still the
+	// one idem could not reach.
+	opt := options{setValues: multiFlag{"webRoute=false"}}
+
+	if got := stillMissing([]string{"webRoute.enabled"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want it kept - only the parent was assigned", got)
+	}
+}
+
+func TestASetOfADifferentListElementDoesNotSupplyTheOneNamed(t *testing.T) {
+	// servers[0].port and servers[1].port are two keys, built at two
+	// positions. Reading the index as decoration would credit the reader for a
+	// value the generator supplies somewhere else entirely.
+	opt := options{setValues: multiFlag{"servers[1].port=80"}}
+
+	if got := stillMissing([]string{"servers[0].port"}, opt); len(got) != 1 {
+		t.Errorf("stillMissing() = %v, want it kept - a different element was assigned", got)
+	}
+}
+
+func TestSupplyingEveryValueIdemCouldNotReachClearsTheCaveat(t *testing.T) {
+	requireHelm(t)
+
+	// The caveat's whole worth is "these findings are about a release nobody
+	// deploys". Once the reader has supplied the values the generator would
+	// have, that is no longer true - and a warning nothing can clear cannot be
+	// gated on, so a --strict run over a generator-driven estate stayed red
+	// however correct the charts were.
+	dir := tree(t, map[string]string{
+		"apps/agents.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: agents}
+spec:
+  goTemplate: true
+  generators:
+    - clusters: {}
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"), "--set", "cluster=verify-render")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if strings.Contains(stdout, "cannot reach") || strings.Contains(stdout, "missing") {
+		t.Errorf("stdout = %q, want no caveat - every value it lacked was supplied", stdout)
+	}
+}
+
+func TestSupplyingOneOfTwoValuesLeavesOnlyTheOtherNamed(t *testing.T) {
+	requireHelm(t)
+
+	// Half an answer is still half a gap, and the report must name the half
+	// that is left rather than either dropping the caveat or repeating a value
+	// the reader has already given.
+	dir := tree(t, map[string]string{
+		"apps/agents.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: agents}
+spec:
+  goTemplate: true
+  generators:
+    - clusters: {}
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+          parameters:
+            - name: webRoute.enabled
+              value: '{{ .enabled }}'
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts/needs"), "--set", "cluster=verify-render")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "webRoute.enabled") {
+		t.Errorf("stdout = %q, want the value still unreachable named", stdout)
+	}
+	if strings.Contains(stdout, "missing cluster") || strings.Contains(stdout, "needs cluster") {
+		t.Errorf("stdout = %q, want cluster dropped - the reader supplied it", stdout)
+	}
+}
+
 func TestAGitFilesGeneratorIsCheckedOncePerElement(t *testing.T) {
 	requireHelm(t)
 

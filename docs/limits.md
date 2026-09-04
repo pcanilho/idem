@@ -7,6 +7,8 @@
 - **It does not reconstruct your delivery pipeline.** No kustomize overlays, no `postBuild`
   substitution, no post-renderers. It renders what you point it at, and names in the output
   whatever it could not resolve rather than rendering defaults and calling that an answer.
+  Supply those values yourself with `-f` or `--set` and they stop being named: a flag you
+  typed is taken as the answer, so the caveat clears and `--strict` can reach green.
 - **It reads, never writes.** Not your cluster (`--context` renders through the API server;
   `doctor` only does `kubectl get`), and not your repository (subcharts resolve in a temp
   directory unless you pass `--dependency-update`).

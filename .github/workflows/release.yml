@@ -42,11 +42,40 @@ jobs:
       - name: Test
         run: go test ./... -race
 
+      # Release notes come from CHANGELOG.md rather than from commit subjects:
+      # a release page is read by someone deciding whether to upgrade, and a
+      # list of "fix: ..." lines does not answer that. Extracting here rather
+      # than letting goreleaser generate also means a tag with no section fails
+      # LOUDLY - which matters, because an immutable release cannot be re-cut.
+      - name: Extract changelog section
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          notes_file="$RUNNER_TEMP/notes.md"
+          # The body of the matching '## [version]' section, stopping at the
+          # next '## [' header or EOF. The header line itself is dropped: the
+          # release title already carries the version. Matched with index()
+          # rather than a regex, because a version is full of dots and `0.1.1`
+          # as a pattern would also match `0X1X1`.
+          awk -v ver="$version" '
+            index($0, "## [" ver "]") == 1 { found = 1; next }
+            found && /^## \[/             { exit }
+            found                          { print }
+          ' CHANGELOG.md > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            echo "::error::No CHANGELOG.md section found for ${TAG} (looked for '## [${version}]'). Add the section before tagging."
+            exit 1
+          fi
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
       - name: Release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --release-notes=${{ steps.notes.outputs.notes_file }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Needs write access to pcanilho/homebrew-tap, which the default

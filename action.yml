@@ -1,5 +1,5 @@
 name: idem
-description: Check whether Helm charts render consistently under the GitOps engine you run
+description: Check whether your Helm charts are idempotent under the GitOps engine you run
 author: pcanilho
 
 branding:

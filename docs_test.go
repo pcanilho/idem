@@ -24,6 +24,44 @@ import (
 //
 // Only blocks reproducible from `examples/` are pinned. Anything needing a
 // cluster is written to say so rather than to look copied.
+// tagline is the one sentence idem describes itself with.
+//
+// It lives in FOUR places - the GitHub repo description, action.yml's
+// description, the Homebrew cask description in .goreleaser.yaml, and the
+// README's opening - and until this test nothing held them together, so they
+// drifted: the repo description dropped the tail, and the README said "chart
+// is" where the rest said "charts are". The repo description is the one place
+// a test cannot reach, so it is named in the failure to be changed with the
+// others.
+const tagline = "Check whether your Helm charts are idempotent under the GitOps engine you run"
+
+// claim is the half of it that carries the meaning. The README needs a
+// sentence of its own around it, so this is the part every place shares
+// verbatim.
+const claim = "your Helm charts are idempotent under the GitOps engine you run"
+
+func TestTheTaglineReadsTheSameEverywhereItAppears(t *testing.T) {
+	if !strings.HasSuffix(tagline, claim) {
+		t.Fatalf("tagline %q does not end in the claim %q", tagline, claim)
+	}
+
+	// The README makes a sentence of it, so it shares the claim rather than
+	// the whole line.
+	for _, name := range []string{"action.yml", ".goreleaser.yaml", "README.md"} {
+		if !strings.Contains(read(t, name), claim) {
+			t.Errorf("%s does not carry %q - and the GitHub repo description needs the same sentence, which no test here can check", name, claim)
+		}
+	}
+
+	// The two description fields carry it whole: they are one line each, and
+	// there is nothing to wrap it in.
+	for _, name := range []string{"action.yml", ".goreleaser.yaml"} {
+		if !strings.Contains(read(t, name), tagline) {
+			t.Errorf("%s does not carry the whole tagline %q", name, tagline)
+		}
+	}
+}
+
 func TestTheREADMEShowsWhatTheBinaryActuallyPrints(t *testing.T) {
 	requireHelm(t)
 

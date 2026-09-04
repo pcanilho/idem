@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -752,7 +753,8 @@ type release struct {
 	instance string
 
 	// unresolved names values a generator substitutes, which idem refused to
-	// invent. Carried so a chart that will not render can say what it lacked.
+	// invent and the user did not supply either. Carried so a chart that will
+	// not render can say what it lacked.
 	unresolved []string
 }
 
@@ -760,7 +762,9 @@ type release struct {
 //
 // Order is ArgoCD's: valueFiles, then values/valuesObject, then parameters.
 // The user's own -f and --set go last in each, because a flag typed at the
-// terminal is a deliberate override of what the repository says.
+// terminal is a deliberate override of what the repository says - which is
+// also why they are subtracted from what idem could not resolve rather than
+// only added to what it renders.
 func resolveReleases(cfg delivery.Config, opt options, root, chartPath, chartName, inlineDir string) []release {
 	found := cfg.ReleasesFor(chartPath)
 	if len(found) == 0 {
@@ -771,7 +775,7 @@ func resolveReleases(cfg delivery.Config, opt options, root, chartPath, chartNam
 
 	out := make([]release, 0, len(found))
 	for _, vals := range found {
-		rel := release{name: chartName, instance: vals.Instance, unresolved: vals.Templated, from: vals.File}
+		rel := release{name: chartName, instance: vals.Instance, unresolved: stillMissing(vals.Templated, opt), from: vals.File}
 		if vals.Name != "" {
 			rel.name = vals.Name
 		}
@@ -803,6 +807,247 @@ func withUser(rel release, opt options) release {
 	rel.files = append(rel.files, opt.valuesFiles...)
 	rel.sets = append(rel.sets, opt.setValues...)
 	return rel
+}
+
+// stillMissing drops the values the user supplied themselves from the ones
+// idem could not resolve.
+//
+// A caveat that cannot be cleared by doing the right thing stops being a
+// signal. `--set` and `-f` are exactly how a reader answers "idem could not
+// reach this value" - they say, deliberately, this is what the generator
+// supplies - so a report that ignores them can never reach a clean run, and a
+// `--strict` gate over a generator-driven estate is permanently red for a
+// reason nobody can act on.
+//
+// Only the user's own flags count. A values file the repository names is not
+// an assertion about the generator's value; a flag typed at the terminal is.
+func stillMissing(entries []string, opt options) []string {
+	sources := userValues(opt)
+
+	// A fresh slice rather than a filter in place: the caller's entries are
+	// delivery's own Templated slice, which it still owns.
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !valuesKey(entry) || !supplied(keyPath(entry), sources) {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// valueSource is one thing the user passed: a -f file, or one assignment from
+// a --set. Exactly one of the two is meaningful, which isSet says.
+type valueSource struct {
+	key    []string
+	values map[string]any
+	isSet  bool
+}
+
+// userValues returns what the user typed, in the order helm applies it: every
+// -f file first, in order, and then every --set - because a --set beats a
+// values file whichever way round they were typed on the command line.
+func userValues(opt options) []valueSource {
+	out := make([]valueSource, 0, len(opt.valuesFiles)+len(opt.setValues))
+	for _, f := range opt.valuesFiles {
+		out = append(out, valueSource{values: readValues(f)})
+	}
+	for _, arg := range opt.setValues {
+		for _, key := range setKeys(arg) {
+			out = append(out, valueSource{key: key, isSet: true})
+		}
+	}
+	return out
+}
+
+// supplied reports whether the user's own flags leave this key path defined.
+//
+// Order decides it, and asking each source on its own would get it wrong: helm
+// coalesces a later map INTO an earlier one, but a later scalar REPLACES the
+// subtree. So `-f base.yaml --set webRoute=false` leaves webRoute.enabled with
+// nowhere to live however plainly base.yaml defined it, and crediting the file
+// would clear a caveat that is still true.
+func supplied(want []string, sources []valueSource) bool {
+	defined := false
+	for _, s := range sources {
+		switch {
+		case s.defines(want):
+			defined = true
+		case s.replaces(want):
+			defined = false
+		}
+	}
+	return defined
+}
+
+// defines reports whether this source, on its own, would define want.
+func (s valueSource) defines(want []string) bool {
+	if s.isSet {
+		return supplies(s.key, want)
+	}
+	return definedIn(s.values, want)
+}
+
+// replaces reports whether this source overwrites a PROPER prefix of want with
+// something that is not a map, which leaves want nowhere to live.
+func (s valueSource) replaces(want []string) bool {
+	for k := 1; k < len(want); k++ {
+		if s.isSet {
+			// --set a=1 makes a a scalar, so a.b is gone whatever put it
+			// there. A longer key is the `defines` case, not this one.
+			if slices.Equal(s.key, want[:k]) {
+				return true
+			}
+			continue
+		}
+		if v, ok := valueAt(s.values, want[:k]); ok {
+			if _, isMap := v.(map[string]any); !isMap {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// valuesKey reports whether an unresolved entry names a values key at all.
+//
+// The list mixes shapes and only two of them are keys: a valuesObject key and
+// a helm parameter name. The rest name a SOURCE idem cannot reach - a cluster
+// Secret behind Flux's `valuesFrom`, a values file in another repository's
+// source, a valueFiles path a generator templates - and no flag answers those,
+// so nothing may clear them. Their punctuation is what tells them apart: a key
+// never carries a brace, a slash, a space or a `$`.
+func valuesKey(entry string) bool {
+	return entry != "" && !strings.ContainsAny(entry, "{} /$")
+}
+
+// keyPath splits a helm values key into its segments.
+//
+// Read exactly as helm reads it, because a key read differently would credit
+// the user for a value helm was never given: a dot separates segments unless
+// backslash-escaped. A `[n]` index stays part of its segment rather than
+// becoming one, because it addresses a position within that segment - and
+// keeping it is what tells servers[0] from servers[1].
+func keyPath(key string) []string {
+	var out []string
+	var seg strings.Builder
+	for i := 0; i < len(key); i++ {
+		switch {
+		case key[i] == '\\' && i+1 < len(key):
+			i++
+			seg.WriteByte(key[i])
+		case key[i] == '.':
+			out = append(out, seg.String())
+			seg.Reset()
+		default:
+			seg.WriteByte(key[i])
+		}
+	}
+	return append(out, seg.String())
+}
+
+// setKeys returns the key paths one --set argument assigns to.
+//
+// One argument can carry several, comma separated, and helm reads a
+// backslash-escaped comma as part of the value rather than a separator - so
+// splitting on every comma would invent an assignment, and with it a key
+// nobody supplied.
+func setKeys(arg string) [][]string {
+	var out [][]string
+	for _, assign := range splitUnescaped(arg, ',') {
+		if key, _, ok := strings.Cut(assign, "="); ok && key != "" {
+			out = append(out, keyPath(key))
+		}
+	}
+	return out
+}
+
+// splitUnescaped splits on sep, ignoring an occurrence a backslash escapes.
+// The escape is written through rather than consumed, because keyPath reads
+// the same bytes again for its own dots.
+func splitUnescaped(s string, sep byte) []string {
+	var out []string
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			cur.WriteByte(s[i])
+			i++
+			cur.WriteByte(s[i])
+		case s[i] == sep:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	return append(out, cur.String())
+}
+
+// readValues parses a values file the user named.
+//
+// An unreadable or unparseable file supplies nothing rather than failing the
+// run: helm is about to be handed the same file and will say what is wrong
+// with it far better than idem can.
+func readValues(file string) map[string]any {
+	body, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	var out map[string]any
+	if yaml.Unmarshal(body, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// supplies reports whether one --set key path defines want.
+//
+// Setting a.b.c defines a and a.b as well, because helm builds the whole path,
+// so a longer key still answers a shorter want. The reverse never holds:
+// setting a.b to a scalar says nothing about a.b.c.
+//
+// Only the last segment compares loosely, and only one way round:
+// `servers[0].port` does define `servers`, since helm builds the list to hold
+// the element. It does not define `servers[1]` - two elements are two keys,
+// and crediting one for the other would clear a caveat that is still true.
+func supplies(key, want []string) bool {
+	if len(key) < len(want) {
+		return false
+	}
+	for i, seg := range want {
+		switch {
+		case key[i] == seg:
+		case i == len(want)-1 && strings.HasPrefix(key[i], seg+"["):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// definedIn reports whether parsed values carry this key path. A key present
+// with a null value counts: helm treats an explicit null as supplied, and so
+// does the generator idem is standing in for.
+func definedIn(values map[string]any, want []string) bool {
+	_, ok := valueAt(values, want)
+	return ok
+}
+
+// valueAt resolves a key path in parsed values, reporting whether it is there
+// at all - which is a different question from what it holds, since a key set
+// to null is present.
+func valueAt(values map[string]any, want []string) (any, bool) {
+	var node any = values
+	for _, seg := range want {
+		m, ok := node.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if node, ok = m[seg]; !ok {
+			return nil, false
+		}
+	}
+	return node, true
 }
 
 // label distinguishes one release of a chart from another, and is the chart

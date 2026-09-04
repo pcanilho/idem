@@ -57,13 +57,12 @@ snapshot:
   version_template: "{{ incpatch .Version }}-snapshot"
 
 changelog:
-  use: github
-  sort: asc
-  filters:
-    exclude:
-      - "^chore:"
-      - "^docs:"
-      - "^test:"
+  # Release notes come from CHANGELOG.md, extracted by
+  # .github/workflows/release.yml and passed with --release-notes. A generated
+  # changelog would be a second source of the same thing, and the one that
+  # loses is dead config that still reads as if it were live. Disabled rather
+  # than deleted, because the key is where a reader looks to find out which.
+  disable: true
 
 # `brews` was deprecated in goreleaser v2; casks are how CLI binaries are
 # published now.
@@ -81,7 +80,7 @@ homebrew_casks:
       # formula silently never updates.
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/pcanilho/idem
-    description: Check whether Helm charts render consistently under the GitOps engine you run
+    description: Check whether your Helm charts are idempotent under the GitOps engine you run
     license: Apache-2.0
     # idem renders by shelling out to helm; without it there is nothing to run.
     dependencies:
