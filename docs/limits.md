@@ -8,7 +8,10 @@
   substitution, no post-renderers. It renders what you point it at, and names in the output
   whatever it could not resolve rather than rendering defaults and calling that an answer.
   Supply those values yourself with `-f` or `--set` and they stop being named: a flag you
-  typed is taken as the answer, so the caveat clears and `--strict` can reach green.
+  typed is taken as the answer, so the caveat clears and `--strict` can reach green. Until it
+  does, a release `idem` could not build at all exits 1 under `--strict`: a release nobody
+  checked is not one that passed. The ratchet still applies, so it is only the charts your
+  branch touched.
 - **It reads, never writes.** Not your cluster (`--context` renders through the API server;
   `doctor` only does `kubectl get`), and not your repository (subcharts resolve in a temp
   directory unless you pass `--dependency-update`).
@@ -18,6 +21,12 @@
   in a different order, churns just as much, but neither ArgoCD nor Flux can ignore ordering
   without also ignoring the list's contents. `idem` says so and points at the fix in the chart,
   rather than handing you a block that would hide real changes along with the noise.
+- **A chart helm cannot render at all is exit 2**, always fatal and outside the ratchet, so one
+  of them anywhere in a tree fails the whole sweep. Some cannot be fixed from `idem`'s side at
+  all: a vendored `.tgz` over helm's 5 MiB chart-file limit, for one. `--exclude` takes it out of
+  the sweep, and the count is printed so the gap is never silent. A pattern with no `/` matches a
+  chart directory at any depth, as `.gitignore` does; with one, it matches the path from wherever
+  you pointed `idem`.
 - **It skips `type: library` charts, and says how many.** Helm refuses to render one at all
   (*"library charts are not installable"*), so there is nothing to compare. They are counted on
   the provenance line rather than dropped in silence, and they no longer fail the run, which they

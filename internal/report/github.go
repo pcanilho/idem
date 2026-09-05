@@ -70,10 +70,12 @@ func (r Report) GitHub(w io.Writer) error {
 	for _, c := range r.Charts {
 		switch {
 		case unbuilt(c):
-			// A notice, not an error: idem could not build the release, and
-			// failing a pull request for idem's own limit trains people to
-			// ignore its annotations.
-			fmt.Fprintf(&b, "::notice::idem: %s could not be built: needs %s, which comes from a generator idem cannot expand\n",
+			// A warning, not an error: idem could not build the release, and
+			// blaming the chart for idem's own limit trains people to ignore
+			// its annotations. Not a notice either, which is the quietest
+			// thing GitHub renders - --strict exits 1 on this, and a red check
+			// whose only annotation is grey sends the reader to the raw log.
+			fmt.Fprintf(&b, "::warning::idem: %s could not be built: needs %s, which comes from a generator idem cannot expand\n",
 				c.Name, data(strings.Join(c.Unresolved, ", ")))
 		case c.Err != nil:
 			fmt.Fprintf(&b, "::error::idem: %s could not be rendered: %s\n", c.Name, data(c.Err.Error()))

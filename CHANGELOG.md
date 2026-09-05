@@ -11,7 +11,30 @@ section here fails the release rather than publishing generated commit subjects.
 
 ## [Unreleased]
 
-### Fixed
+## [0.2.0] - 2026-09-05
+
+Three ways a run that checked nothing could read as clean, and the flag for the
+one chart `idem` cannot do anything about.
+
+### Added
+
+- **`--exclude`, repeatable, to leave a chart out of a sweep** ([#9]). A chart
+  helm cannot render is exit 2, always fatal and outside the ratchet, so one of
+  them anywhere in a tree made the whole sweep permanently red with no way out
+  and no flag to reach for. Some cannot be fixed from idem's side at all: a
+  vendored `.tgz` over helm's 5 MiB chart-file limit, for one.
+
+  This is input selection, not finding suppression. Nothing is rendered, so it
+  is not a second place to configure idem, and the seam for suppressing
+  findings is still `-o json | conftest`.
+
+  A pattern with no `/` matches a chart directory at any depth, as
+  `.gitignore` does; with one, it matches the path from wherever idem was
+  pointed. Excluded charts are counted on the provenance line, following
+  `type: library`, and a pattern that matched no chart is named, because a
+  filter that addresses nothing reads as protection and gives none. Excluding
+  every chart is an error rather than a clean run: "All 0 charts render
+  consistently" is the worst sentence idem could print.
 
 - **v0.1.1 published with empty release notes.** `.goreleaser.yaml` set
   `changelog: disable: true`, reasoning that a generated changelog would be a
@@ -29,6 +52,74 @@ section here fails the release rather than publishing generated commit subjects.
   generate, so there was never a second source to remove. A test now fails if
   the pipe is disabled. The published v0.1.1 notes were filled in afterwards;
   immutable releases lock the tag and the assets, not the body.
+
+### Fixed
+
+- **`--strict` exited 0 when a release could not be built** ([#5]). A release
+  whose values come from a generator idem cannot expand is reported as
+  `could not be built`, and that count reached no exit code at all, so
+  `idem <chart> --strict` printed the gap and passed. A chart nobody checked was
+  indistinguishable from a chart that came back clean, which is the one outcome
+  a strict mode exists to prevent.
+
+  It is exit 1 now, never exit 2: idem withheld the values, so the chart is not
+  at fault, and a run without `--strict` is unchanged. Clear it the way
+  `docs/limits.md` already says, with `-f` or `--set`.
+
+  The gate is scoped to the ratchet, unlike `could not be rendered`. A chart
+  that will not render is a coverage gap no branch closes, so it escapes
+  `--new-from-rev` and stays fatal. This is idem's own limit, and asking a
+  branch to name every generator value in an estate it never touched would shut
+  the on-ramp in `docs/ci.md` on the estates that need it most.
+
+  The other half of the report was already correct: `could not be rendered` has
+  always exited 2, with or without `--strict`.
+
+- **`-o markdown` wrote nothing for a release it could not build**, so the
+  documented pull-request recipe posted no comment. Paired with the exit code
+  above that is a red build with no reason anywhere on the pull request. It now
+  writes the same collapsed block the other outcomes get, ratchet-scoped to
+  match the gate. `-o github` says it as a warning rather than a notice, which
+  is the quietest thing GitHub renders. The 0.1.1 notes claimed markdown already
+  reported this; it did not.
+
+- **A chart with a template defect was excused as "could not be built"** ([#8]).
+  `unbuilt()` was a disjunction of two unrelated facts, the render failed and
+  something is unresolved, and never asked whether one caused the other. So any
+  chart standing near a manifest idem cannot expand escaped `could not be
+  rendered`, and idem printed "The chart is not at fault" about a chart that
+  was. That put a genuinely broken chart outside exit 2, the one code nothing
+  may ignore.
+
+  The render error now has to be one a value could have caused, verified
+  against helm 3.9.4, 3.14.4, 3.19.0 and 4.2.4:
+
+  - **A parse error is refused, and that is structural rather than a guess.**
+    `pkg/engine` parses every template from its raw bytes in a loop that
+    finishes before the first `ExecuteTemplate`, so no value exists yet when a
+    parse error is produced. The wording is helm's own and byte-identical
+    across all four versions.
+  - **`execution error at (` is not the positive test.** helm emits it only
+    through `warnWrap`, from the two `required` branches and `fail`. A nil
+    pointer or a wrong type carries no such marker and is exactly what a
+    withheld value produces, so testing for it would reject the cases this
+    exists to accept.
+  - **Everything else must name a template.** A missing or malformed
+    `Chart.yaml`, an unresolved dependency, helm's 5 MiB chart-file limit and a
+    `type: library` chart all fail in the loader and name no template, so no
+    value could have changed the outcome. A `values.schema.json` violation is
+    the one value-caused failure with no template location, so it is matched on
+    its own.
+
+- **The documented pull-request comment fired on every run** ([#10]).
+  `hashFiles` hashes any file that matches and never looks at its size: the
+  runner's `hashFiles.ts` sets `hasMatch` on the file count, and its only
+  `statSync` tests `isDirectory()`. The action's redirect creates the report
+  before idem writes a byte, so a clean run left a zero-byte file whose digest
+  is a perfectly good non-empty string, and
+  `if: hashFiles('idem.md') != ''` could never tell "nothing to say" from
+  "something to say". The action removes an empty report, which is what makes
+  the documented recipe mean what it says.
 
 ### Changed
 
@@ -143,6 +234,11 @@ used on every run.
 - `gopkg.in/yaml.v3` v3.0.1
 
 [#4]: https://github.com/pcanilho/idem/issues/4
-[Unreleased]: https://github.com/pcanilho/idem/compare/v0.1.1...HEAD
+[#5]: https://github.com/pcanilho/idem/issues/5
+[#8]: https://github.com/pcanilho/idem/issues/8
+[#9]: https://github.com/pcanilho/idem/issues/9
+[#10]: https://github.com/pcanilho/idem/issues/10
+[Unreleased]: https://github.com/pcanilho/idem/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/pcanilho/idem/releases/tag/v0.2.0
 [0.1.1]: https://github.com/pcanilho/idem/releases/tag/v0.1.1
 [0.1.0]: https://github.com/pcanilho/idem/releases/tag/v0.1.0

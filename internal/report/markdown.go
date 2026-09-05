@@ -23,7 +23,7 @@ import (
 // this function's whole behaviour rests on was permanently false and no comment
 // was ever posted. the documented snippet writes inside the workspace instead.
 func (r Report) Markdown(w io.Writer) error {
-	if r.Churning() == 0 && r.Unevaluable() == 0 && r.ChurningWithLookup() == 0 {
+	if r.Churning() == 0 && r.Unevaluable() == 0 && r.ChurningWithLookup() == 0 && r.UnconstructedInScope() == 0 {
 		return nil
 	}
 
@@ -69,6 +69,10 @@ func (r Report) Markdown(w io.Writer) error {
 			undoneBySelfHeal, plural(undoneBySelfHeal, "finding", "findings"))
 	}
 
+	// In scope, unlike the unrenderable charts below it: this is what --strict
+	// exits 1 on, and the ratchet decides that. A release the branch never
+	// touched is a comment its author cannot act on.
+	writeUnconstructedRows(&b, r.inScope())
 	writeUnevaluableRows(&b, r.Charts)
 	writeFixBlock(&b, r.inScope(), r.Engines)
 
@@ -93,6 +97,10 @@ func (r Report) headline() string {
 		// The engines that do a real install saw something else entirely.
 		if lookupOnly := r.ChurningWithLookup(); lookupOnly > 0 {
 			return fmt.Sprintf("%d of %d %s will churn under Flux and Helm", lookupOnly, total, plural(total, "chart", "charts"))
+		}
+		if r.Unevaluable() == 0 {
+			n := r.UnconstructedInScope()
+			return fmt.Sprintf("%d %s could not be built", n, plural(n, "release", "releases"))
 		}
 		return fmt.Sprintf("%d %s could not be rendered", r.Unevaluable(), plural(r.Unevaluable(), "chart", "charts"))
 	}
@@ -146,6 +154,26 @@ func writeLookupRows(b *strings.Builder, charts []Chart) {
 	b.WriteString("| chart | object | field | consequence |\n|---|---|---|---|\n")
 	b.WriteString(rows.String())
 	b.WriteString("\n")
+}
+
+// writeUnconstructedRows says what idem never built, and carries the remedy,
+// because the pull request is where the reader is and the terminal is not.
+func writeUnconstructedRows(b *strings.Builder, charts []Chart) {
+	var unbuiltCharts []Chart
+	for _, c := range charts {
+		if unbuilt(c) {
+			unbuiltCharts = append(unbuiltCharts, c)
+		}
+	}
+	if len(unbuiltCharts) == 0 {
+		return
+	}
+
+	b.WriteString("<details>\n<summary>Could not be built</summary>\n\nValues come from a generator idem cannot expand, so the chart is not at fault. Supply them with `-f` or `--set` to check it.\n\n")
+	for _, c := range unbuiltCharts {
+		fmt.Fprintf(b, "    %s needs %s\n", c.Name, strings.Join(c.Unresolved, ", "))
+	}
+	b.WriteString("\n</details>\n\n")
 }
 
 func writeUnevaluableRows(b *strings.Builder, charts []Chart) {

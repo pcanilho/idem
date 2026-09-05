@@ -1467,11 +1467,34 @@ func TestWithoutARatchetTheRenderFailureClauseStaysPlain(t *testing.T) {
 // cannot expand, idem could not BUILD the release — a different statement from
 // "this chart could not be rendered", and not the same exit code.
 
+// The error is helm's own wording, not an approximation of it: unbuilt() now
+// reads the message to tell a withheld value from a defect in the chart, so a
+// fixture that invents the text tests nothing.
 func unbuiltChart(name string, keys ...string) Chart {
 	return Chart{
 		Name:       name,
-		Err:        errors.New(`execution error: .Values.cluster is required`),
+		Err:        errors.New(`helm template: exit status 1: Error: execution error at (` + name + `/templates/cm.yaml:6:8): cluster is required (the Application supplies it)`),
 		Unresolved: keys,
+	}
+}
+
+func TestAChartWithATemplateDefectIsNotExcusedByAnUnrelatedUnresolvedValue(t *testing.T) {
+	// The bug this predicate exists for. An undefined function is a defect in
+	// the chart that no value can fix, but it used to be reported as "could
+	// not be built" - and told the reader "the chart is not at fault" - purely
+	// because a manifest nearby carried a value idem could not expand. That
+	// let it escape exit 2, which is the one code nothing may ignore.
+	r := Report{Charts: []Chart{{
+		Name:       "app",
+		Err:        errors.New(`helm template: exit status 1: Error: parse error at (app/templates/cm.yaml:6): function "nosuchfunction" not defined`),
+		Unresolved: []string{"cluster"},
+	}}, Helm: "4.2.4", Rounds: 2}
+
+	if got := r.Unconstructed(); got != 0 {
+		t.Errorf("Unconstructed() = %d, want 0 - no value would fix a parse error", got)
+	}
+	if got := r.Unevaluable(); got != 1 {
+		t.Errorf("Unevaluable() = %d, want 1 - this is exit 2", got)
 	}
 }
 
@@ -1483,6 +1506,30 @@ func TestAReleaseIdemCouldNotBuildIsNotAnUnrenderableChart(t *testing.T) {
 	}
 	if got := r.Unconstructed(); got != 1 {
 		t.Errorf("Unconstructed() = %d, want 1", got)
+	}
+}
+
+func TestAnUnbuiltReleaseOutsideTheRatchetIsCountedButNotGated(t *testing.T) {
+	// The count is the honest total of what idem did not check, so it never
+	// hides a chart. The gate is what the ratchet holds back: a release idem
+	// could not build is idem's own limit, cleared with -f or --set, and a
+	// branch cannot be asked to answer for every generator-driven chart in an
+	// estate it did not touch.
+	r := Report{
+		Charts: []Chart{unbuiltChart("agent", "cluster"), {Name: "home", Changed: true}},
+		Since:  "main", Helm: "4.2.4", Rounds: 2,
+	}
+
+	if got := r.Unconstructed(); got != 1 {
+		t.Errorf("Unconstructed() = %d, want 1 - the gap is still reported", got)
+	}
+	if got := r.UnconstructedInScope(); got != 0 {
+		t.Errorf("UnconstructedInScope() = %d, want 0 - this branch did not touch it", got)
+	}
+
+	r.Charts[0].Changed = true
+	if got := r.UnconstructedInScope(); got != 1 {
+		t.Errorf("UnconstructedInScope() = %d, want 1 once the branch touches it", got)
 	}
 }
 

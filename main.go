@@ -44,6 +44,7 @@ import (
 	"github.com/pcanilho/idem/internal/engine"
 	"github.com/pcanilho/idem/internal/engines"
 	"github.com/pcanilho/idem/internal/gitrev"
+	"github.com/pcanilho/idem/internal/globpath"
 	"github.com/pcanilho/idem/internal/helm"
 	"github.com/pcanilho/idem/internal/manifest"
 	"github.com/pcanilho/idem/internal/report"
@@ -93,6 +94,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&opt.setValues, "set", "set a value, repeatable")
 	fs.IntVar(&opt.rounds, "rounds", 3, "renders to compare")
 	fs.BoolVar(&opt.strict, "strict", false, "exit non-zero on findings")
+	fs.Var(&opt.exclude, "exclude", "skip charts whose path matches this glob, repeatable")
 	fs.BoolVar(&opt.verbose, "v", false, "expand every finding instead of capping each at five fields")
 	fs.StringVar(&opt.helmBin, "helm", "", "helm binary to render with (default: first on PATH)")
 	fs.StringVar(&opt.repo, "repo", "", "chart repository URL, as helm's --repo")
@@ -232,7 +234,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFatal
 	}
 
-	charts, libraries, err := resolve(ref)
+	charts, selected, err := resolve(ref, opt.exclude)
 	if err != nil {
 		fmt.Fprintf(stderr, "idem: %v\n", err)
 		return exitFatal
@@ -325,7 +327,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep := report.Report{
 		Helm: helmVersion, Rounds: opt.rounds,
 		Delivery: deliveryCfg.Files, Engines: shown, Root: root, Since: since, Verbose: opt.verbose,
-		Cluster: opt.cluster, Context: opt.kubeContext, Libraries: libraries,
+		Cluster: opt.cluster, Context: opt.kubeContext, Libraries: selected.libraries,
+		Excluded: selected.excluded, UnusedExcludes: selected.unusedExcludes,
 	}
 	for _, result := range scan.Charts(ctx, h, queue, opt.rounds, opt.jobs, scan.Hooks{Inspect: inspector(ctx, ref, h), Prepare: prepare, Admission: admission(ctx, opt)}) {
 		applied := delivery.Apply(deliveryCfg.For(chartPath(root, result.Chart.Dir)), result.Findings)
@@ -431,6 +434,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stdout, "  exit 1")
 		}
 		return exitFinding
+	// Second, so a run that churns as well reports the churn. Its own line
+	// because "exit 1" over a report naming no finding sends the reader
+	// looking for one that is not there.
+	case opt.strict && rep.UnconstructedInScope() > 0:
+		if text {
+			fmt.Fprintln(stdout, "  exit 1: a release could not be built")
+		}
+		return exitFinding
 	}
 	return exitOK
 }
@@ -457,6 +468,7 @@ usage:
 examples:
   idem ./charts                      check every chart in a directory
   idem ./charts --strict             fail CI when something will churn
+  idem ./charts --exclude vendored   leave a chart helm cannot render out of the sweep
   idem myapp --repo https://…        check a chart before you adopt it
   idem doctor                        find churn that has already happened
 
@@ -655,6 +667,7 @@ type options struct {
 	setValues    multiFlag
 	rounds       int
 	strict       bool
+	exclude      multiFlag
 	verbose      bool
 	helmBin      string
 	repo         string
@@ -816,8 +829,9 @@ func withUser(rel release, opt options) release {
 // signal. `--set` and `-f` are exactly how a reader answers "idem could not
 // reach this value" - they say, deliberately, this is what the generator
 // supplies - so a report that ignores them can never reach a clean run, and a
-// `--strict` gate over a generator-driven estate is permanently red for a
-// reason nobody can act on.
+// `--strict` gate over a generator-driven estate would be permanently red for
+// a reason nobody can act on. That gate is what an unanswered caveat now
+// trips, so this is the mechanism that keeps it answerable.
 //
 // Only the user's own flags count. A values file the repository names is not
 // an assertion about the generator's value; a flag typed at the terminal is.
@@ -1132,23 +1146,36 @@ type target struct {
 //
 // The count comes back rather than being dropped, because a gate that checks
 // less than it was pointed at has to say so.
-func resolve(ref chartref.Ref) ([]target, int, error) {
+func resolve(ref chartref.Ref, exclude []string) ([]target, selection, error) {
 	if ref.Kind != chartref.Local {
-		return []target{{ref: ref.Raw, release: releaseName(ref.Raw)}}, 0, nil
+		return []target{{ref: ref.Raw, release: releaseName(ref.Raw)}}, selection{}, nil
 	}
 
 	found, err := discover.Charts(ref.Raw)
 	if err != nil {
-		return nil, 0, err
+		return nil, selection{}, err
 	}
 	out := make([]target, 0, len(found))
+	sel := selection{unusedExcludes: slices.Clone(exclude)}
 	libraries := 0
 	for _, c := range found {
 		if c.Library {
 			libraries++
 			continue
 		}
+		if pattern, ok := excludedBy(ref.Raw, c.Dir, exclude); ok {
+			sel.excluded++
+			sel.unusedExcludes = slices.DeleteFunc(sel.unusedExcludes, func(p string) bool { return p == pattern })
+			continue
+		}
 		out = append(out, target{ref: c.Dir, release: c.Name})
+	}
+	sel.libraries = libraries
+	// "All 0 charts render consistently" is true and is the worst sentence
+	// idem could print: a filter that removed everything is a run that checked
+	// nothing, and a zero must never read as good news.
+	if len(out) == 0 && sel.excluded > 0 {
+		return nil, sel, fmt.Errorf("--exclude left nothing to check: every chart under %s matched", ref.Raw)
 	}
 	if len(out) == 0 && libraries > 0 {
 		// Distinguished from discover's "no directory contains a Chart.yaml",
@@ -1157,10 +1184,46 @@ func resolve(ref chartref.Ref) ([]target, int, error) {
 		if libraries == 1 {
 			noun = "library chart"
 		}
-		return nil, libraries, fmt.Errorf("found %d %s under %s and nothing else: helm cannot render a `type: library` chart, so there is nothing to compare",
+		return nil, sel, fmt.Errorf("found %d %s under %s and nothing else: helm cannot render a `type: library` chart, so there is nothing to compare",
 			libraries, noun, ref.Raw)
 	}
-	return out, libraries, nil
+	return out, sel, nil
+}
+
+// selection records what resolve chose not to render, so the run can say so.
+// Excluding work in silence is the failure idem exists to report.
+type selection struct {
+	libraries int
+	excluded  int
+
+	// unusedExcludes are patterns that matched no chart. A filter that
+	// addresses nothing reads as protection and gives none, which is the
+	// defect idem reports in an ignoreDifferences block.
+	unusedExcludes []string
+}
+
+// excludedBy reports the first pattern that excludes this chart.
+//
+// Matched against the path from wherever idem was pointed, so two charts of
+// the same name in different trees can be told apart. A pattern with no slash
+// also matches a single directory name at any depth, which is what .gitignore
+// does and therefore what a reader already expects.
+func excludedBy(root, dir string, patterns []string) (string, bool) {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+
+	for _, p := range patterns {
+		if globpath.Match(p, rel) {
+			return p, true
+		}
+		if !strings.Contains(p, "/") && globpath.Match(p, path.Base(rel)) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // releaseName derives a release name for a remote chart.

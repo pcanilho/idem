@@ -825,6 +825,42 @@ func tree(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// gitTree is tree() with real history, for the ratchet. gitrev shells out to
+// git, so a faked .git/HEAD cannot answer what a revision changed.
+func gitTree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "t@example.com")
+	git("config", "user.name", "t")
+	git("config", "commit.gpgsign", "false")
+
+	for name, body := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", "-A")
+	git("commit", "-q", "-m", "base")
+	return dir
+}
+
 const ownedChart = `apiVersion: v2
 name: owned
 version: 0.1.0
@@ -1057,6 +1093,99 @@ spec:
 	}
 	if !strings.Contains(stdout, "cluster") {
 		t.Errorf("stdout = %q, want the value it lacked named", stdout)
+	}
+}
+
+func TestStrictFailsOnAReleaseIdemCouldNotBuild(t *testing.T) {
+	requireHelm(t)
+
+	// Informative by default is about findings. --strict asks for a gate, and
+	// a release idem never built is not a release that passed: reporting the
+	// gap and then exiting 0 is the silent skip idem exists to catch.
+	//
+	// Still exit 1, never exit 2. The chart is not at fault, and the gap is
+	// escapable - docs/limits.md tells the reader to answer it with -f or
+	// --set, which the second half of this test holds to.
+	dir := tree(t, map[string]string{
+		"apps/agents.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: agents}
+spec:
+  goTemplate: true
+  generators:
+    - clusters: {}
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+	})
+	chart := filepath.Join(dir, "charts/needs")
+
+	code, stdout, stderr := invoke(t, chart, "--strict")
+	if code != exitFinding {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitFinding, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "exit 1: a release could not be built") {
+		t.Errorf("stdout = %q, want the reason for the non-zero exit", stdout)
+	}
+
+	// The gate has to be answerable, or it is one nobody can act on.
+	code, stdout, stderr = invoke(t, chart, "--strict", "--set", "cluster=verify-render")
+	if code != exitOK {
+		t.Errorf("exit = %d after supplying the value, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+}
+
+func TestStrictDoesNotFailOnAnUnbuiltReleaseTheRatchetHoldsBack(t *testing.T) {
+	requireHelm(t)
+
+	// The ratchet's on-ramp is a large estate adopting --strict on the charts
+	// a branch touches. An unbuilt release is idem's own limit, answerable only
+	// by naming every generator value in the estate, so gating on one the
+	// branch never touched would close the on-ramp on exactly the repositories
+	// documented as needing it.
+	//
+	// Unevaluable goes the other way on purpose: a chart that could not be
+	// RENDERED is a coverage gap no branch closes, so it escapes the ratchet.
+	dir := gitTree(t, map[string]string{
+		"apps/agents.yaml": `
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata: {name: agents}
+spec:
+  goTemplate: true
+  generators:
+    - clusters: {}
+  template:
+    spec:
+      source:
+        path: charts/needs
+        helm:
+          valuesObject:
+            cluster: '{{ .name }}'
+`,
+		"charts/needs/Chart.yaml":        guardedChart,
+		"charts/needs/values.yaml":       "image: {}\n",
+		"charts/needs/templates/cm.yaml": requiredTemplate,
+		"charts/other/Chart.yaml":        ownedChart,
+		"charts/other/templates/cm.yaml": ownedTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, filepath.Join(dir, "charts"), "--new-from-rev", "HEAD", "--strict")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d - no chart changed since HEAD\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "could not be built") {
+		t.Errorf("stdout = %q, want the gap still reported, only not gated on", stdout)
 	}
 }
 
@@ -2046,6 +2175,102 @@ func TestAChartThatOnlyReordersAListGetsNoFixBlock(t *testing.T) {
 //
 // Counted rather than dropped: a tool that reports what it checked has to
 // report what it did not.
+func TestAnExcludedChartIsNotRenderedAndIsCounted(t *testing.T) {
+	requireHelm(t)
+
+	// Input selection, not finding suppression: the chart is never rendered,
+	// so this is not a second place to configure idem. Counted, like a library
+	// chart, because a filter that drops work in silence is the failure this
+	// tool exists to catch.
+	code, stdout, stderr := invoke(t, "testdata/many", "--exclude", "beta")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if strings.Contains(stdout, "beta") {
+		t.Errorf("stdout = %q, want no mention of the excluded chart", stdout)
+	}
+	if !strings.Contains(stdout, "1 chart excluded") {
+		t.Errorf("stdout = %q, want the exclusion counted", stdout)
+	}
+}
+
+func TestAnExcludedUnrenderableChartNoLongerFailsTheSweep(t *testing.T) {
+	requireHelm(t)
+
+	// The reason the flag exists. A chart helm cannot render is exit 2, always
+	// fatal and outside the ratchet, so one of them anywhere in a tree makes
+	// the whole sweep permanently red with no way out.
+	dir := tree(t, map[string]string{
+		"good/Chart.yaml":            ownedChart,
+		"good/templates/cm.yaml":     ownedTemplate,
+		"vendored/Chart.yaml":        ownedChart,
+		"vendored/templates/cm.yaml": "x: {{ nosuchfunction . }}\n",
+	})
+
+	if code, _, _ := invoke(t, dir); code != exitFatal {
+		t.Fatalf("exit = %d, want %d without the flag", code, exitFatal)
+	}
+
+	code, stdout, stderr := invoke(t, dir, "--exclude", "vendored", "--strict")
+
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d once excluded\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "1 chart excluded") {
+		t.Errorf("stdout = %q, want the exclusion counted, not silent", stdout)
+	}
+}
+
+func TestAnExcludePatternMatchingNothingIsReported(t *testing.T) {
+	requireHelm(t)
+
+	// A pattern that addresses nothing is the same defect idem reports in an
+	// ignoreDifferences block: it reads as protection and provides none.
+	_, stdout, _ := invoke(t, "testdata/clean", "--exclude", "no-such-chart")
+
+	if !strings.Contains(stdout, "no-such-chart") {
+		t.Errorf("stdout = %q, want the pattern that matched nothing named", stdout)
+	}
+}
+
+func TestAnExcludePatternMatchesAPathAndNotJustAName(t *testing.T) {
+	requireHelm(t)
+
+	// Without a slash it matches a directory name at any depth, as .gitignore
+	// does. With one it matches the path from where idem was pointed, so two
+	// charts of the same name in different trees can be told apart.
+	dir := tree(t, map[string]string{
+		"platform/entrypoint/Chart.yaml":        ownedChart,
+		"platform/entrypoint/templates/cm.yaml": ownedTemplate,
+		"apps/entrypoint/Chart.yaml":            ownedChart,
+		"apps/entrypoint/templates/cm.yaml":     ownedTemplate,
+	})
+
+	code, stdout, stderr := invoke(t, dir, "--exclude", "platform/entrypoint")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s%s", code, exitOK, stdout, stderr)
+	}
+	if strings.Contains(stdout, "matched nothing") {
+		t.Errorf("stdout = %q, want the path pattern to have matched", stdout)
+	}
+	if !strings.Contains(stdout, "1 chart excluded") {
+		t.Errorf("stdout = %q, want exactly the one under platform excluded", stdout)
+	}
+
+	// The same name with no slash reaches both, at whatever depth they sit.
+	code, stdout, stderr = invoke(t, dir, "--exclude", "entrypoint")
+	if code != exitFatal {
+		t.Fatalf("exit = %d, want %d once every chart is excluded\n%s%s", code, exitFatal, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "left nothing to check") {
+		t.Errorf("stderr = %q, want idem to say the filter removed everything", stderr)
+	}
+	if strings.Contains(stdout, "All 0 charts render consistently") {
+		t.Errorf("stdout = %q, want no clean verdict over a run that checked nothing", stdout)
+	}
+}
+
 func TestALibraryChartIsSkippedRatherThanFailingTheRun(t *testing.T) {
 	requireHelm(t)
 

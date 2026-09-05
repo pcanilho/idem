@@ -2,7 +2,9 @@ package helm
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -415,5 +417,108 @@ func TestPullArgsCarryNoRenderOnlyFlags(t *testing.T) {
 	}
 	if !slices.Contains(args, "oci://example.com/charts/podinfo") {
 		t.Errorf("pullArgs() = %v, want the OCI reference pulled as it stands", args)
+	}
+}
+
+// chartAt writes a one-template chart and returns its directory.
+func chartAt(t *testing.T, name, template string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(dir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(p, body string) {
+		if err := os.WriteFile(filepath.Join(dir, p), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("Chart.yaml", "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n")
+	write("values.yaml", "{}\n")
+	write(filepath.Join("templates", "cm.yaml"), template)
+	return dir
+}
+
+func renderErr(t *testing.T, name, template string) error {
+	t.Helper()
+	_, err := New("").Render(context.Background(), engine.Spec{
+		Release: name, ChartRef: chartAt(t, name, template),
+	})
+	if err == nil {
+		t.Fatalf("Render(%s) error = nil, want a failure", name)
+	}
+	return err
+}
+
+func TestMayLackValuesSeparatesATemplateDefectFromAWithheldValue(t *testing.T) {
+	requireHelm(t)
+
+	// Run against real helm, because what idem asserts about helm's errors is
+	// only true if helm actually emits them.
+	for _, c := range []struct {
+		name     string
+		template string
+		want     bool
+	}{
+		// A withheld value can produce all of these.
+		{"guard", "x: {{ required \"x is required\" .Values.x }}\n", true},
+		{"failed", "{{ if not .Values.x }}{{ fail \"x must be set\" }}{{ end }}\n", true},
+		{"nilptr", "x: {{ .Values.a.b }}\n", true},
+		{"wrongtype", "x: {{ .Values.a.b }}\n", true},
+
+		// None of these can be. helm parses every template from raw bytes
+		// before any value is bound, so a parse error precedes values.
+		{"undefined", "x: {{ nosuchfunction . }}\n", false},
+		{"unclosed", "x: {{ if .Values.x }}\n", false},
+	} {
+		tpl := c.template
+		if c.name == "wrongtype" {
+			tpl = "{{ $_ := .Values.a }}x: {{ .Values.a.b }}\n"
+		}
+		if got := MayLackValues(renderErr(t, c.name, tpl)); got != c.want {
+			t.Errorf("MayLackValues(%s) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestMayLackValuesRefusesAnErrorThatNeverReachedATemplate(t *testing.T) {
+	requireHelm(t)
+
+	// The loader fails before rendering, so no value could have changed the
+	// outcome. helm's 5 MiB chart-file limit is the case that motivated this:
+	// it names no template, and was being excused as "could not be built".
+	dir := chartAt(t, "big", "x: y\n")
+	if err := os.MkdirAll(filepath.Join(dir, "charts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "charts", "vendored.tgz"), make([]byte, 6<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := New("").Render(context.Background(), engine.Spec{Release: "big", ChartRef: dir})
+	if err == nil {
+		t.Fatal("Render() error = nil, want helm to refuse the oversized file")
+	}
+	if MayLackValues(err) {
+		t.Errorf("MayLackValues(%q) = true, want false - the loader never reached a template", err)
+	}
+}
+
+func TestMayLackValuesAcceptsASchemaViolation(t *testing.T) {
+	requireHelm(t)
+
+	// Value-caused by definition, and the one such failure with no template
+	// location, so it needs its own clause.
+	dir := chartAt(t, "schema", "x: {{ .Values.x }}\n")
+	schema := `{"$schema":"https://json-schema.org/draft-07/schema#","type":"object","required":["x"]}`
+	if err := os.WriteFile(filepath.Join(dir, "values.schema.json"), []byte(schema), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := New("").Render(context.Background(), engine.Spec{Release: "schema", ChartRef: dir})
+	if err == nil {
+		t.Fatal("Render() error = nil, want the schema to reject absent x")
+	}
+	if !MayLackValues(err) {
+		t.Errorf("MayLackValues(%q) = false, want true", err)
 	}
 }

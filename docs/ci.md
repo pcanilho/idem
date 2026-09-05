@@ -3,13 +3,13 @@
 Findings are informative by default. `--strict` turns them into a failing build:
 
 ```yaml
-- uses: pcanilho/idem@v0.1.0
+- uses: pcanilho/idem@v0.2.0
   with:
     args: ./charts --strict
     helm-version: v3.19.2    # optional, see below
 ```
 
-`version:` defaults to the ref you used the action **at**, so `@v0.1.0` installs the v0.1.0
+`version:` defaults to the ref you used the action **at**, so `@v0.2.0` installs the v0.2.0
 binary and a later idem release cannot change your result without you changing the tag. A ref
 that names no release — a branch, a commit SHA, or a local `uses: ./` — has nothing to derive
 from, so it resolves `latest` and says so in the log; if you pin this action to a SHA, set
@@ -54,7 +54,7 @@ permissions:
   contents: read           # actions/checkout
   pull-requests: write     # the comment step needs it; `-o github` does not
 # ...
-- uses: pcanilho/idem@v0.1.0
+- uses: pcanilho/idem@v0.2.0
   with:
     args: ./charts
     output: markdown
@@ -87,7 +87,7 @@ run should not be the gate. Report only what your branch changed:
     # shallow checkout has neither the ref nor the history. Without this idem
     # exits 2 before it renders anything.
     fetch-depth: 0
-- uses: pcanilho/idem@v0.1.0
+- uses: pcanilho/idem@v0.2.0
   with:
     args: ./charts --new-from-merge-base ${{ github.base_ref }} --strict
 ```
@@ -95,6 +95,10 @@ run should not be the gate. Report only what your branch changed:
 A permanently red pipeline gets switched off, so the ratchet exists to keep it green from day
 one. It filters *findings* only. A chart that will not render at all is still reported, because
 that is a gap in what was checked rather than a finding about it.
+
+A release `idem` could not build goes the other way and is scoped to your branch. It is a limit
+of `idem` rather than a defect in the chart, cleared with `-f` or `--set`, so a branch is never
+asked to answer for every generator-driven chart in the estate.
 
 ## Verifying the download
 
@@ -118,7 +122,7 @@ install step uses `curl` instead.
 ```yaml
 repos:
   - repo: https://github.com/pcanilho/idem
-    rev: v0.1.0
+    rev: v0.2.0
     hooks:
       - id: idem
 ```

@@ -21,7 +21,7 @@ inputs:
 
   version:
     description: |
-      Release to install, e.g. "v0.1.0". Defaults to the ref you used the
+      Release to install, e.g. "v0.2.0". Defaults to the ref you used the
       action AT, so `uses: pcanilho/idem@v1` gets v1's binary and a new idem
       release cannot change your CI with no change to your workflow.
 
@@ -81,7 +81,8 @@ inputs:
 outputs:
   exit-code:
     description: |
-      idem's exit code: 0 ran clean, 1 findings with --strict, 2 fatal. Set
+      idem's exit code: 0 ran clean, 1 findings or an unbuilt release with
+      --strict, 2 fatal. Set
       `continue-on-error: true` on the step to read it rather than be failed by
       it.
     value: ${{ steps.run.outputs.exit-code }}
@@ -297,6 +298,16 @@ runs:
 
         cat "$report"
         cat "$RUNNER_TEMP/idem.err" >&2
+
+        # hashFiles hashes any file that MATCHES and never looks at its size:
+        # the runner's hashFiles.ts sets hasMatch on the file count, and its
+        # only statSync tests isDirectory(). A zero-byte report therefore
+        # returns a real digest, so the documented
+        # `if: hashFiles('idem.md') != ''` guard fired on every run and the
+        # comment step got an empty body. The redirect above creates the file
+        # before idem writes a byte, so removing an empty one is what makes
+        # "nothing to say" and "no file" the same thing again.
+        [ -s "$report" ] || rm -f "$report"
 
         {
           echo "exit-code=$status"

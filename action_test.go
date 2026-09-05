@@ -337,6 +337,35 @@ func TestTheActionWritesTheReportWhereHashFilesCanSeeIt(t *testing.T) {
 // else, so an absolute report-file makes the documented guard permanently false
 // and the comment is never posted. That exact bug shipped once already, in
 // docs/ci.md; refusing the path is how it does not ship again through here.
+func TestTheActionLeavesNoEmptyReportBehind(t *testing.T) {
+	// hashFiles hashes any file that MATCHES and never looks at its size. The
+	// runner's hashFiles.ts sets hasMatch on the file count, so a zero-byte
+	// report yields a real digest and the documented
+	// `if: hashFiles('idem.md') != ''` guard fires on every run. The redirect
+	// creates the file before idem writes anything, so a clean run left one
+	// behind and the guard could not tell "nothing to say" from "something".
+	got := runStep(t, "./charts", "markdown", "idem.md", exitOK, "", "")
+
+	if got.code != exitOK {
+		t.Fatalf("exit = %d, want %d\n%s", got.code, exitOK, got.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(got.workspace, "idem.md")); !os.IsNotExist(err) {
+		t.Errorf("idem.md is still there after a run that wrote nothing; hashFiles will hash it and the comment step will run")
+	}
+}
+
+func TestTheActionKeepsAReportWithSomethingInIt(t *testing.T) {
+	got := runStep(t, "./charts", "markdown", "idem.md", exitFinding, "### idem: 1 of 1 chart will churn", "")
+
+	body, err := os.ReadFile(filepath.Join(got.workspace, "idem.md"))
+	if err != nil {
+		t.Fatalf("reading the report: %v", err)
+	}
+	if !strings.Contains(string(body), "will churn") {
+		t.Errorf("report = %q, want what idem wrote", body)
+	}
+}
+
 func TestTheActionRefusesAReportFileOutsideTheWorkspace(t *testing.T) {
 	for _, path := range []string{"/tmp/idem.md", "../idem.md", "out/../../idem.md"} {
 		got := runStep(t, "./charts", "markdown", path, exitOK, "## churn", "")

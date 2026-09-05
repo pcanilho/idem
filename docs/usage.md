@@ -13,7 +13,8 @@ idem doctor [flags]      ask a cluster you already run what keeps rolling
 | `-f`, `--values` | values file, repeatable |
 | `--set` | set a value, repeatable |
 | `--rounds` | how many renders to compare (default 3) |
-| `--strict` | exit 1 when something will churn |
+| `--strict` | exit 1 when something will churn, or a release could not be built |
+| `--exclude` | skip charts whose path matches this glob, repeatable |
 | `-v` | expand every finding instead of capping each at five fields |
 | `-o` | `text`, `json`, `yaml`, `markdown` or `github` (`diff` and `doctor` take the first three) |
 | `--engine` | `argocd`, `flux`, `helm`, `all`, or `auto` (default) |

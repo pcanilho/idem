@@ -225,6 +225,45 @@ func TestMarkdownIsEmptyWhenThereIsNothingToSay(t *testing.T) {
 	}
 }
 
+func TestMarkdownSaysWhatItCouldNotBuild(t *testing.T) {
+	// --strict exits 1 on this, and the documented recipe posts this file as
+	// the pull-request comment. Writing nothing there is a red build with no
+	// reason anywhere on the pull request.
+	got := render(t, Report{Charts: []Chart{unbuiltChart("agent", "cluster")}, Helm: "4.2.4", Rounds: 2}, Report.Markdown)
+
+	for _, want := range []string{"could not be built", "agent", "cluster", "--set"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Markdown() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestMarkdownStaysEmptyForAnUnbuiltReleaseTheRatchetHoldsBack(t *testing.T) {
+	// It cannot fail the build, so a comment about it is noise on every pull
+	// request the branch opens.
+	got := render(t, Report{
+		Charts: []Chart{unbuiltChart("agent", "cluster")},
+		Since:  "main", Helm: "4.2.4", Rounds: 2,
+	}, Report.Markdown)
+
+	if got != "" {
+		t.Errorf("Markdown() = %q, want empty when the branch did not touch it", got)
+	}
+}
+
+func TestGitHubWarnsAboutAReleaseItCouldNotBuild(t *testing.T) {
+	// Still not an error: the chart is not at fault. But --strict turns this
+	// red, and a notice is the quietest thing GitHub renders.
+	got := render(t, Report{Charts: []Chart{unbuiltChart("agent", "cluster")}, Helm: "4.2.4", Rounds: 2}, Report.GitHub)
+
+	if !strings.Contains(got, "::warning::idem: agent could not be built") {
+		t.Errorf("GitHub() = %q, want the unbuilt release warned about", got)
+	}
+	if strings.Contains(got, "::error::") {
+		t.Errorf("GitHub() = %q, want no error: idem withheld the values", got)
+	}
+}
+
 func TestMarkdownHasATableAndACollapsedFix(t *testing.T) {
 	got := render(t, churningReport(), Report.Markdown)
 

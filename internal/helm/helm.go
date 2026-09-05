@@ -227,3 +227,46 @@ func parseVersion(raw string) string {
 	}
 	return v
 }
+
+// templateLocation matches the `<chart>/templates/<file>:<line>` helm reports
+// for anything that failed while rendering. Nothing that failed BEFORE
+// rendering carries one.
+var templateLocation = regexp.MustCompile(`/templates/[^\s:]+:\d+`)
+
+// MayLackValues reports whether a render failure could have been caused by a
+// value that was not supplied.
+//
+// It exists so idem never says "the chart is not at fault" about a chart that
+// is. Verified against helm 3.9.4, 3.14.4, 3.19.0 and 4.2.4.
+//
+// A parse error is refused outright, and that is a guarantee rather than a
+// guess: pkg/engine parses every template from its raw bytes in a loop that
+// finishes before the first t.ExecuteTemplate, so no value exists yet when a
+// parse error is produced. The wording is helm's own and byte-identical across
+// all four versions.
+//
+// `execution error at (` is deliberately NOT the positive test. helm produces
+// it only through warnWrap, called from three places: the two `required`
+// branches and `fail`. A nil pointer or a wrong type carries no such marker
+// and is exactly what a withheld value produces, so testing for it would
+// reject the cases this function exists to accept.
+//
+// Everything else must name a template. A missing or malformed Chart.yaml, an
+// unresolved dependency, helm's 5 MiB chart-file limit and a `type: library`
+// chart all fail in the loader and name no template, so no value could have
+// changed the outcome. A values.schema.json violation is the one value-caused
+// failure with no template location, so it is matched on its own.
+func MayLackValues(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+
+	if strings.Contains(s, "parse error at (") || strings.Contains(s, "parse error in (") {
+		return false
+	}
+	if strings.Contains(s, "values don't meet the specifications of the schema") {
+		return true
+	}
+	return templateLocation.MatchString(s)
+}

@@ -27,6 +27,7 @@ import (
 
 	"github.com/pcanilho/idem/internal/check"
 	"github.com/pcanilho/idem/internal/diff"
+	"github.com/pcanilho/idem/internal/globpath"
 	"github.com/pcanilho/idem/internal/remediate"
 )
 
@@ -812,7 +813,7 @@ func matches(root, pattern string, wantDir bool) ([]string, bool) {
 		if err != nil || rel == "." {
 			return nil
 		}
-		if matchPath(segments, strings.Split(filepath.ToSlash(rel), "/")) {
+		if globpath.MatchSegments(segments, strings.Split(filepath.ToSlash(rel), "/")) {
 			out = append(out, filepath.ToSlash(rel))
 		}
 		return nil
@@ -823,37 +824,6 @@ func matches(root, pattern string, wantDir bool) ([]string, bool) {
 
 	slices.Sort(out)
 	return out, true
-}
-
-// matchPath reports whether a path matches a pattern, segment by segment.
-//
-// `**` consumes zero or more segments - `a/**/b` matches `a/b` as well as
-// `a/x/y/b`. Requiring at least one is the classic way to get this subtly
-// wrong and drop a release without saying so.
-func matchPath(pattern, name []string) bool {
-	if len(pattern) == 0 {
-		return len(name) == 0
-	}
-
-	if pattern[0] == "**" {
-		for i := 0; i <= len(name); i++ {
-			if matchPath(pattern[1:], name[i:]) {
-				return true
-			}
-		}
-		return false
-	}
-
-	if len(name) == 0 {
-		return false
-	}
-	// path.Match never matches across a separator, which is what makes this
-	// segment-by-segment walk equivalent to globbing the whole path.
-	ok, err := path.Match(pattern[0], name[0])
-	if err != nil || !ok {
-		return false
-	}
-	return matchPath(pattern[1:], name[1:])
 }
 
 // fileElement is one matched file: its parsed contents, plus the path metadata

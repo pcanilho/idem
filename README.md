@@ -128,7 +128,7 @@ A step in your workflow, with `--strict` so a finding fails the build:
 
 ```yaml
 # .github/workflows/charts.yml
-- uses: pcanilho/idem@v0.1.0
+- uses: pcanilho/idem@v0.2.0
   with:
     args: ./charts --strict
 ```
@@ -146,7 +146,7 @@ The same check before the commit is made, in `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/pcanilho/idem
-    rev: v0.1.0
+    rev: v0.2.0
     hooks:
       - id: idem
 ```
@@ -166,7 +166,7 @@ day one. [`docs/ci.md`](docs/ci.md) has the rest of both.
 | Code | Meaning |
 |---|---|
 | `0` | Ran fine. Findings are printed but not fatal. |
-| `1` | Findings, **and** you passed `--strict`. |
+| `1` | Findings, or a release `idem` could not build, **and** you passed `--strict`. |
 | `2` | A chart could not be rendered, or `idem` itself failed. Always fatal. |
 
 ---

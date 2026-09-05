@@ -20,6 +20,7 @@ import (
 	"github.com/pcanilho/idem/internal/diff"
 	"github.com/pcanilho/idem/internal/doctor"
 	"github.com/pcanilho/idem/internal/engine"
+	"github.com/pcanilho/idem/internal/helm"
 	"github.com/pcanilho/idem/internal/remediate"
 )
 
@@ -123,7 +124,9 @@ type Chart struct {
 
 	// Err is set when the chart could not be rendered at all. That is exit 2
 	// and always fatal - a chart silently skipped is the bug idem exists for -
-	// unless Unresolved says why, in which case it is Unconstructed instead.
+	// unless Unresolved says why, in which case it is Unconstructed instead:
+	// still never exit 2, but exit 1 under --strict, because a release idem
+	// never built is not a release that passed.
 	Err error
 }
 
@@ -165,6 +168,17 @@ type Report struct {
 	// conclusion is only reachable from an engine that resolves lookup.
 	// Narrowing the display must not quietly discard it.
 	Engines []string
+
+	// Excluded counts charts --exclude dropped before rendering. Counted for
+	// the same reason Libraries is: work skipped in silence is the failure
+	// idem exists to report, and an exclusion is the one a reader most needs
+	// reminding of.
+	Excluded int
+
+	// UnusedExcludes are --exclude patterns that matched no chart. Named
+	// because a filter that addresses nothing reads as protection and gives
+	// none, which is the defect idem reports in an ignoreDifferences block.
+	UnusedExcludes []string
 
 	// Libraries counts `type: library` charts found and deliberately not
 	// rendered. They are not failures - helm itself refuses to template one -
@@ -262,25 +276,26 @@ func (r Report) ChurningWithLookup() int {
 	return n
 }
 
-// Unevaluable counts charts that could not be rendered.
-//
-// Scoped by the ratchet too: a chart that was already unrenderable before this
-// branch is not this branch's problem, and an estate with one of those could
-// otherwise never adopt the flag at all.
 // unbuilt reports whether idem could not construct this release, as opposed to
 // the chart failing on its own terms.
 //
 // The distinction is the whole point: a chart whose `required` guard fires
 // because idem withheld a value its Application supplies is a chart working
 // exactly as written.
-func unbuilt(c Chart) bool { return c.Err != nil && len(c.Unresolved) > 0 }
+//
+// helm.MayLackValues is the third condition, and it is not optional. Without
+// it this is a disjunction of two unrelated facts - the render failed, and
+// something is unresolved - which excused any template defect standing near a
+// manifest idem could not expand, and printed "the chart is not at fault"
+// about a chart that was.
+func unbuilt(c Chart) bool {
+	return c.Err != nil && len(c.Unresolved) > 0 && helm.MayLackValues(c.Err)
+}
 
 // Unconstructed counts releases idem could not build.
 //
-// Reported and counted but never fatal: idem could not construct the release,
-// which is a limit of idem rather than a defect in the chart, and failing a
-// build for it would make every estate driven by a cluster-reading generator
-// permanently red. Counted so the gap cannot go unnoticed.
+// Every chart, in scope or not, because this is the honest total of what idem
+// did not check. What --strict gates on is UnconstructedInScope.
 func (r Report) Unconstructed() int {
 	n := 0
 	for _, c := range r.Charts {
@@ -291,6 +306,28 @@ func (r Report) Unconstructed() int {
 	return n
 }
 
+// UnconstructedInScope counts the same releases among the charts the ratchet
+// still reports on. It is what --strict exits 1 on.
+//
+// Never exit 2, and never fatal without --strict: idem withheld the values, so
+// the chart is not at fault. But --strict asks for a gate, and a release idem
+// never built is not one that passed.
+//
+// Ratchet-scoped, unlike Unevaluable. A chart that could not be RENDERED is a
+// coverage gap no branch closes. This is idem's own limit, answerable with -f
+// or --set, and holding a branch to every generator-driven chart in an estate
+// it never touched would shut the on-ramp in docs/ci.md.
+func (r Report) UnconstructedInScope() int {
+	n := 0
+	for _, c := range r.inScope() {
+		if unbuilt(c) {
+			n++
+		}
+	}
+	return n
+}
+
+// Unevaluable counts charts that could not be rendered.
 func (r Report) Unevaluable() int {
 	n := 0
 	// Every chart, in scope or not. The ratchet filters findings - claims idem
@@ -349,8 +386,8 @@ func (r Report) Text(w io.Writer) error {
 		fmt.Fprintf(&b, "%s%d pre-existing %s not shown; drop the flag to see them.\n",
 			indent, n, plural(n, "finding", "findings"))
 	}
-	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s%s%s",
-		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.skippedNote(), r.libraryNote(), r.depsNote(), r.deliveryNote())))
+	b.WriteString(provenance(fmt.Sprintf("  helm %s · %d rounds%s%s%s%s%s%s%s%s",
+		r.Helm, r.Rounds, r.releaseNote(), r.namespaceNote(), r.contextNote(), r.skippedNote(), r.libraryNote(), r.excludedNote(), r.depsNote(), r.deliveryNote())))
 	writeRemediation(&b, scope, r.Engines)
 
 	return emit(w, b.String())
@@ -702,6 +739,18 @@ func (r Report) libraryNote() string {
 		return ""
 	}
 	return fmt.Sprintf(" · %d library %s not rendered", r.Libraries, plural(r.Libraries, "chart", "charts"))
+}
+
+// excludedNote says what --exclude dropped, and what it failed to drop.
+func (r Report) excludedNote() string {
+	var out string
+	if r.Excluded > 0 {
+		out = fmt.Sprintf(" · %d %s excluded", r.Excluded, plural(r.Excluded, "chart", "charts"))
+	}
+	if len(r.UnusedExcludes) > 0 {
+		out += fmt.Sprintf(" · --exclude %s matched nothing", strings.Join(r.UnusedExcludes, ", "))
+	}
+	return out
 }
 
 // depsNote says what idem had to do to render at all.
